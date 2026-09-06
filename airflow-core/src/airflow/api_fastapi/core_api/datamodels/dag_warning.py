@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 
 from pydantic import AliasPath, Field
@@ -26,7 +27,7 @@ from airflow.models.dagwarning import DagWarningType
 
 
 class DAGWarningResponse(BaseModel):
-    """DAG Warning serializer for responses."""
+    """Dag Warning serializer for responses."""
 
     dag_id: str
     warning_type: DagWarningType
@@ -36,7 +37,7 @@ class DAGWarningResponse(BaseModel):
 
 
 class DAGWarningCollectionResponse(BaseModel):
-    """DAG warning collection serializer for responses."""
+    """Dag warning collection serializer for responses."""
 
-    dag_warnings: list[DAGWarningResponse]
+    dag_warnings: Iterable[DAGWarningResponse]
     total_entries: int

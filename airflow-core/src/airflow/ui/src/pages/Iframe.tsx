@@ -18,6 +18,7 @@
  */
 import { useParams } from "react-router-dom";
 
+import { useAssetServiceGetAsset } from "openapi/queries";
 import type { ExternalViewResponse } from "openapi/requests/types.gen";
 
 export const Iframe = ({
@@ -27,7 +28,15 @@ export const Iframe = ({
   readonly externalView: ExternalViewResponse;
   readonly sandbox?: string;
 }) => {
-  const { dagId, mapIndex, runId, taskId } = useParams();
+  const { assetId, dagId, mapIndex, runId, taskId } = useParams();
+
+  // The asset URI is not part of the route, so resolve it from the asset record. This is a
+  // cache hit because the asset details page has already fetched it.
+  const { data: asset } = useAssetServiceGetAsset(
+    { assetId: assetId === undefined ? 0 : parseInt(assetId, 10) },
+    undefined,
+    { enabled: Boolean(assetId) },
+  );
 
   // Build the href URL with context parameters if the view has a destination
   let src = externalView.href;
@@ -35,16 +44,22 @@ export const Iframe = ({
   if (externalView.destination !== undefined && externalView.destination !== "nav") {
     // Check if the href contains placeholders that need to be replaced
     if (dagId !== undefined) {
-      src = src.replaceAll("{DAG_ID}", dagId);
+      src = src.replaceAll("{DAG_ID}", encodeURIComponent(dagId));
     }
     if (runId !== undefined) {
-      src = src.replaceAll("{RUN_ID}", runId);
+      src = src.replaceAll("{RUN_ID}", encodeURIComponent(runId));
     }
     if (taskId !== undefined) {
-      src = src.replaceAll("{TASK_ID}", taskId);
+      src = src.replaceAll("{TASK_ID}", encodeURIComponent(taskId));
     }
     if (mapIndex !== undefined) {
       src = src.replaceAll("{MAP_INDEX}", mapIndex);
+    }
+    if (assetId !== undefined) {
+      src = src.replaceAll("{ASSET_ID}", encodeURIComponent(assetId));
+    }
+    if (asset?.uri !== undefined) {
+      src = src.replaceAll("{ASSET_URI}", encodeURIComponent(asset.uri));
     }
   }
 

@@ -44,6 +44,27 @@ def get_provider_info():
             }
         ],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.samba.hooks.samba.SambaHook", "connection-type": "samba"}
+            {
+                "hook-class-name": "airflow.providers.samba.hooks.samba.SambaHook",
+                "hook-name": "Samba",
+                "connection-type": "samba",
+                "conn-fields": {
+                    "share_type": {
+                        "label": "Share Type",
+                        "schema": {"type": ["string", "null"], "default": "posix"},
+                        "description": "The share OS type (`posix` or `windows`). Used to determine the formatting of file and folder paths.",
+                    },
+                    "auth_protocol": {
+                        "label": "Auth Protocol",
+                        "schema": {
+                            "type": ["string", "null"],
+                            "default": "negotiate",
+                            "enum": ["negotiate", "ntlm", "kerberos"],
+                        },
+                        "description": "Must be one of: negotiate, ntlm, kerberos. With `kerberos`, the system's ticket cache is used and login/password are optional.",
+                    },
+                },
+                "ui-field-behaviour": {"hidden-fields": [], "relabeling": {"schema": "Share"}},
+            }
         ],
     }

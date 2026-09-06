@@ -26,13 +26,10 @@ from airflow.providers.amazon.aws.transfers.mongo_to_s3 import MongoToS3Operator
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunType
 
+from tests_common.test_utils.compat import timezone
 from tests_common.test_utils.dag import sync_dag_to_db
+from tests_common.test_utils.taskinstance import create_task_instance, render_template_fields
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
-
-try:
-    from airflow.sdk import timezone
-except ImportError:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
 
 TASK_ID = "test_mongo_to_s3_operator"
 MONGO_CONN_ID = "default_mongo"
@@ -93,14 +90,15 @@ class TestMongoToS3Operator:
 
             sync_dag_to_db(self.dag)
             dag_version = DagVersion.get_latest_version(self.mock_operator.dag_id)
-            ti = TaskInstance(self.mock_operator, dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=self.mock_operator.dag_id,
                 logical_date=DEFAULT_DATE,
                 run_id="test",
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
+                run_after=timezone.utcnow(),
             )
+            ti = create_task_instance(self.mock_operator, run_id="test", dag_version_id=dag_version.id)
         else:
             dag_run = DagRun(
                 dag_id=self.mock_operator.dag_id,
@@ -111,13 +109,9 @@ class TestMongoToS3Operator:
             )
             ti = TaskInstance(task=self.mock_operator)
         ti.dag_run = dag_run
-        session.add(ti)
-        session.commit()
-        ti.render_templates()
-
+        render_template_fields(ti, self.mock_operator)
         expected_rendered_template = {"$lt": "2017-01-01T00:00:00+00:00Z"}
-
-        assert expected_rendered_template == getattr(self.mock_operator, "mongo_query")
+        assert expected_rendered_template == self.mock_operator.mongo_query
 
     @mock.patch("airflow.providers.amazon.aws.transfers.mongo_to_s3.MongoHook")
     @mock.patch("airflow.providers.amazon.aws.transfers.mongo_to_s3.S3Hook")
@@ -145,6 +139,30 @@ class TestMongoToS3Operator:
         mock_s3_hook.return_value.load_string.assert_called_once_with(
             string_data=s3_doc_str, key=S3_KEY, bucket_name=S3_BUCKET, replace=False, compression=COMPRESSION
         )
+
+    @mock.patch("airflow.providers.amazon.aws.transfers.mongo_to_s3.MongoHook")
+    @mock.patch("airflow.providers.amazon.aws.transfers.mongo_to_s3.S3Hook")
+    def test_execute_runs_aggregate_when_query_renders_to_list(self, mock_s3_hook, mock_mongo_hook):
+        """
+        mongo_query is a template field, so whether to run an aggregate pipeline is decided from
+        the rendered value in execute(), not from the un-rendered value in __init__. A query that
+        resolves to a list after templating must take the aggregate path.
+        """
+        operator = self.mock_operator
+        # Simulate templating resolving mongo_query to a list (an aggregate pipeline) after __init__.
+        operator.mongo_query = [{"$match": {"foo": "bar"}}]
+        mock_mongo_hook.return_value.aggregate.return_value = iter(MOCK_MONGO_RETURN)
+        mock_s3_hook.return_value.load_string.return_value = True
+
+        operator.execute(None)
+
+        mock_mongo_hook.return_value.aggregate.assert_called_once_with(
+            mongo_collection=MONGO_COLLECTION,
+            aggregate_query=[{"$match": {"foo": "bar"}}],
+            mongo_db=None,
+            allowDiskUse=False,
+        )
+        mock_mongo_hook.return_value.find.assert_not_called()
 
     @mock.patch("airflow.providers.amazon.aws.transfers.mongo_to_s3.MongoHook")
     @mock.patch("airflow.providers.amazon.aws.transfers.mongo_to_s3.S3Hook")

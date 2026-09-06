@@ -56,7 +56,8 @@ good (and we don't have to test an ever increasing matrix of versions to ensure 
 The one caveat to this is due to the side-effect that these shared modules are going to be
 imported from different locations (for example `airflow._shared.timezones.timezone` and
 `airflow.sdk._shared.timezones.timezone`) then any imports inside the shared code to other parts
-of shared libraries _must_ make use of relative imports, and possibly needs `# noqa: TID252`
+of shared libraries _must_ make use of relative imports (but only in sources - tests are still
+required to use absolute imports).
 
 For example, to use the shared timezone library from another shared library, let's say
 `shared/logging/src/airflow_shared/logging/config.py` you would have
@@ -107,7 +108,7 @@ would be to files outside the distribution otherwise). This is specific to sdist
 resolves the symlinks.
 
 We have a convention that when you include a shared code in your distribution, you should such shared
-distributions (full name of the form `apache-airlow-shared-<name>` it to the `tool.airflow` section of
+distributions (full name of the form `apache-airflow-shared-<name>` it to the `tool.airflow` section of
 your pyproject.toml:
 
 ```toml
@@ -118,7 +119,7 @@ shared_distributions = [
 ]
 ```
 
-This allows `prek` check to automatically verify if the shared distributio is properly configured in
+This allows `prek` check to automatically verify if the shared distribution is properly configured in
 your source tree and `pyproject.toml`.
 
 You should also have `_shared` folder created in your source tree to be able to symlink the shared
@@ -132,7 +133,7 @@ but you can also do it manually (for each shared distribution used):
    `ln -s ../../shared/timezones/src/airflow_shared/timezones src/airflow/sdk/_shared/timezones`
 
 * adding force-include in your `pyproject.toml` to have hatchling copy the source files instead of
-  symling when `.sdist` distribution is built:
+  symlink when `.sdist` distribution is built:
 
 ```toml
 [tool.hatch.build.targets.sdist.force-include]

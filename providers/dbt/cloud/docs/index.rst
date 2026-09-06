@@ -60,7 +60,7 @@ an Integrated Developer Environment (IDE).
     :maxdepth: 1
     :caption: Resources
 
-    Example Dags <https://github.com/apache/airflow/tree/providers-dbt-cloud/|version|/providers/dbt/tests/system/dbt/cloud/example_dbt_cloud.py>
+    Example Dags <https://github.com/apache/airflow/tree/providers-dbt-cloud/|version|/providers/dbt/cloud/tests/system/dbt/cloud/example_dbt_cloud.py>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-dbt-cloud/>
     Installing from sources <installing-providers-from-sources>
 
@@ -81,7 +81,7 @@ apache-airflow-providers-dbt-cloud package
 `dbt Cloud <https://www.getdbt.com/product/dbt-cloud/>`__
 
 
-Release: 4.4.3
+Release: 4.9.3
 
 Provider package
 ----------------
@@ -99,20 +99,22 @@ For the minimum Airflow version supported, see ``Requirements`` below.
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.10.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==========================================  ==================
+==========================================  ======================================
 PIP package                                 Version required
-==========================================  ==================
-``apache-airflow``                          ``>=2.10.0``
-``apache-airflow-providers-common-compat``  ``>=1.6.0``
+==========================================  ======================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
 ``apache-airflow-providers-http``
-``asgiref``                                 ``>=2.3.0``
-``aiohttp``                                 ``>=3.9.2``
-==========================================  ==================
+``asgiref``                                 ``>=2.3.0; python_version < "3.14"``
+``asgiref``                                 ``>=3.11.1; python_version >= "3.14"``
+``aiohttp``                                 ``>=3.14.0``
+``tenacity``                                ``>=8.3.0``
+==========================================  ======================================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified provider distributions in order to use them.
@@ -121,16 +123,31 @@ You can install such cross-provider dependencies when installing from PyPI. For 
 
 .. code-block:: bash
 
-    pip install apache-airflow-providers-dbt-cloud[common.compat]
+    pip install apache-airflow-providers-dbt-cloud[openlineage]
 
 
-==================================================================================================================  =================
-Dependent package                                                                                                   Extra
-==================================================================================================================  =================
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_  ``common.compat``
-`apache-airflow-providers-http <https://airflow.apache.org/docs/apache-airflow-providers-http>`_                    ``http``
-`apache-airflow-providers-openlineage <https://airflow.apache.org/docs/apache-airflow-providers-openlineage>`_      ``openlineage``
-==================================================================================================================  =================
+==============================================================================================================  ===============
+Dependent package                                                                                               Extra
+==============================================================================================================  ===============
+`apache-airflow-providers-openlineage <https://airflow.apache.org/docs/apache-airflow-providers-openlineage>`_  ``openlineage``
+==============================================================================================================  ===============
+
+Optional dependencies
+---------------------
+
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
+
+.. code-block:: bash
+
+    pip install apache-airflow-providers-dbt-cloud[openlineage]
+
+
+===============  ===============================================
+Extra            Dependencies
+===============  ===============================================
+``openlineage``  ``apache-airflow-providers-openlineage>=2.3.0``
+===============  ===============================================
 
 Downloading official packages
 -----------------------------
@@ -138,5 +155,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-dbt-cloud 4.4.3 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.4.3.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.4.3.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.4.3.tar.gz.sha512>`__)
-* `The apache-airflow-providers-dbt-cloud 4.4.3 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.4.3-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.4.3-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.4.3-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-dbt-cloud 4.9.3 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.9.3.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.9.3.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.9.3.tar.gz.sha512>`__)
+* `The apache-airflow-providers-dbt-cloud 4.9.3 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.9.3-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.9.3-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_dbt_cloud-4.9.3-py3-none-any.whl.sha512>`__)

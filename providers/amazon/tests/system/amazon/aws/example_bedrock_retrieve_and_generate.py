@@ -32,7 +32,9 @@ from opensearchpy import (
     AWSV4SignerAuth,
     OpenSearch,
     RequestsHttpConnection,
+    TransportError,
 )
+from tenacity import before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from airflow.providers.amazon.aws.hooks.bedrock import BedrockAgentHook
 from airflow.providers.amazon.aws.hooks.opensearch_serverless import OpenSearchServerlessHook
@@ -42,7 +44,6 @@ from airflow.providers.amazon.aws.operators.bedrock import (
     BedrockCreateDataSourceOperator,
     BedrockCreateKnowledgeBaseOperator,
     BedrockIngestDataOperator,
-    BedrockInvokeModelOperator,
     BedrockRaGOperator,
     BedrockRetrieveOperator,
 )
@@ -55,8 +56,8 @@ from airflow.providers.amazon.aws.sensors.opensearch_serverless import (
     OpenSearchServerlessCollectionActiveSensor,
 )
 from airflow.providers.amazon.aws.utils import get_botocore_version
-from airflow.providers.standard.operators.empty import EmptyOperator
 
+from tests_common.test_utils.compat import EmptyOperator
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 
 if AIRFLOW_V_3_0_PLUS:
@@ -66,7 +67,7 @@ else:
     from airflow.decorators import task, task_group  # type: ignore[attr-defined,no-redef]
     from airflow.models.baseoperator import chain  # type: ignore[attr-defined,no-redef]
     from airflow.models.dag import DAG  # type: ignore[attr-defined,no-redef,assignment]
-    from airflow.sdk import Label  # type: ignore[attr-defined,no-redef]
+    from airflow.utils.edgemodifier import Label  # type: ignore[attr-defined,no-redef]
 try:
     from airflow.sdk import TriggerRule
 except ImportError:
@@ -74,16 +75,9 @@ except ImportError:
     from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.amazon.aws.utils import SystemTestContextBuilder
+from system.amazon.aws.utils.bedrock import get_text_inference_profile_arn
 
-#######################################################################
-# NOTE:
-#   Access to the following foundation model must be requested via
-#   the Amazon Bedrock console and may take up to 24 hours to apply:
-#######################################################################
-
-CLAUDE_MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
-TITAN_MODEL_ID = "amazon.titan-embed-text-v1"
-ANTHROPIC_VERSION = "bedrock-2023-05-31"
+TITAN_MODEL_ID = "amazon.titan-embed-text-v2:0"
 
 # Externally fetched variables:
 ROLE_ARN_KEY = "ROLE_ARN"
@@ -95,7 +89,7 @@ log = logging.getLogger(__name__)
 
 
 @task_group
-def external_sources_rag_group():
+def external_sources_rag_group(text_model_arn):
     """External Sources were added in boto 1.34.90, skip this operator if the version is below that."""
 
     # [START howto_operator_bedrock_external_sources_rag]
@@ -103,7 +97,7 @@ def external_sources_rag_group():
         task_id="external_sources_rag",
         input="Who was the CEO of Amazon in 2022?",
         source_type="EXTERNAL_SOURCES",
-        model_arn=f"arn:aws:bedrock:{region_name}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
+        model_arn=text_model_arn,
         sources=[
             {
                 "sourceType": "S3",
@@ -224,13 +218,14 @@ def create_collection(collection_name: str):
 
 
 @task
-def create_vector_index(index_name: str, collection_id: str, region: str):
+def create_vector_index(index_name: str, collection_id: str, region: str, bedrock_role_arn: str):
     """
     Use the OpenSearchPy client to create the vector index for the Amazon Open Search Serverless Collection.
 
     :param index_name: The vector index name to create.
     :param collection_id: ID of the collection to be indexed.
     :param region: Name of the AWS region the collection resides in.
+    :param bedrock_role_arn: Arn of the Bedrock Knowledge Base Execution Role.
     """
     # Build the OpenSearch client
     oss_client = OpenSearch(
@@ -252,7 +247,7 @@ def create_vector_index(index_name: str, collection_id: str, region: str):
             "properties": {
                 "vector": {
                     "type": "knn_vector",
-                    "dimension": 1536,
+                    "dimension": 1024,
                     "method": {"name": "hnsw", "engine": "faiss", "space_type": "l2"},
                 },
                 "text": {"type": "text"},
@@ -279,6 +274,47 @@ def create_vector_index(index_name: str, collection_id: str, region: str):
                 sleep(2)
             else:
                 raise
+
+    # An acknowledged index-creation call does not guarantee the index is ready for use;
+    # OpenSearch Serverless materializes it asynchronously and exposes no status API for it.
+    # Poll a trivial search as a readiness probe so downstream Bedrock ingestion does not
+    # start (and fail) before the index can serve requests.
+    #
+    # The probe authenticates as the Knowledge Base execution role rather than as this task's
+    # own principal. AOSS data access policies propagate per principal, and the Bedrock
+    # ingestion job runs as the Knowledge Base role, so probing with this task's (already
+    # propagated) credentials would not prove the ingestion job can reach the index. Waiting
+    # until the search succeeds as the Knowledge Base role closes the propagation race that
+    # intermittently failed the ingestion job sensor with:
+    #   [security_exception] authentication/authorization failure. Call to Amazon OpenSearch
+    #   Serverless Vector Database did not succeed.
+    assumed = StsHook().conn.assume_role(RoleArn=bedrock_role_arn, RoleSessionName="AossIndexReadinessProbe")
+    kb_role_session = boto3.Session(
+        aws_access_key_id=assumed["Credentials"]["AccessKeyId"],
+        aws_secret_access_key=assumed["Credentials"]["SecretAccessKey"],
+        aws_session_token=assumed["Credentials"]["SessionToken"],
+    )
+    kb_role_oss_client = OpenSearch(
+        hosts=[{"host": f"{collection_id}.{region}.aoss.amazonaws.com", "port": 443}],
+        http_auth=AWSV4SignerAuth(kb_role_session.get_credentials(), region, "aoss"),
+        use_ssl=True,
+        verify_certs=True,
+        connection_class=RequestsHttpConnection,
+        timeout=300,
+    )
+
+    @retry(
+        retry=retry_if_exception_type(TransportError),
+        stop=stop_after_attempt(30),
+        wait=wait_fixed(5),
+        before_sleep=before_sleep_log(log, logging.INFO),
+        reraise=True,
+    )
+    def _wait_for_index_readiness():
+        kb_role_oss_client.search(index=index_name, body={"query": {"match_all": {}}, "size": 0})
+
+    _wait_for_index_readiness()
+    log.info("Index %s is ready.", index_name)
 
 
 @task
@@ -449,7 +485,6 @@ with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),
-    tags=["example"],
     catchup=False,
 ) as dag:
     test_context = sys_test_context_task()
@@ -468,6 +503,10 @@ with DAG(
 
     create_bucket = S3CreateBucketOperator(task_id="create_bucket", bucket_name=bucket_name)
 
+    # Note that for Anthropic models, first-time users may need to
+    # submit use case details before they can access the model.
+    text_model_arn = get_text_inference_profile_arn()
+
     opensearch_policies = create_opensearch_policies(
         bedrock_role_arn=test_context[ROLE_ARN_KEY],
         collection_name=vector_store_name,
@@ -482,21 +521,6 @@ with DAG(
         collection_name=vector_store_name,
     )
     # [END howto_sensor_opensearch_collection_active]
-
-    PROMPT = "What color is an orange?"
-    # [START howto_operator_invoke_claude_model]
-    invoke_claude_completions = BedrockInvokeModelOperator(
-        task_id="invoke_claude_completions",
-        model_id=CLAUDE_MODEL_ID,
-        input_data={
-            "max_tokens": 4000,
-            "anthropic_version": ANTHROPIC_VERSION,
-            "messages": [
-                {"role": "user", "content": f"\n\nHuman: {PROMPT}\n\nAssistant:"},
-            ],
-        },
-    )
-    # [END howto_operator_invoke_claude_model]
 
     # [START howto_operator_bedrock_create_knowledge_base]
     create_knowledge_base = BedrockCreateKnowledgeBaseOperator(
@@ -563,7 +587,7 @@ with DAG(
         task_id="knowledge_base_rag",
         input="Who was the CEO of Amazon on 2022?",
         source_type="KNOWLEDGE_BASE",
-        model_arn=f"arn:aws:bedrock:{region_name}::foundation-model/{CLAUDE_MODEL_ID}",
+        model_arn=text_model_arn,
         knowledge_base_id=create_knowledge_base.output,
     )
     # [END howto_operator_bedrock_knowledge_base_rag]
@@ -587,20 +611,25 @@ with DAG(
         # TEST SETUP
         test_context,
         create_bucket,
+        text_model_arn,
         opensearch_policies,
         collection,
         await_collection,
-        create_vector_index(index_name=index_name, collection_id=collection, region=region_name),
+        create_vector_index(
+            index_name=index_name,
+            collection_id=collection,
+            region=region_name,
+            bedrock_role_arn=test_context[ROLE_ARN_KEY],
+        ),
         copy_data_to_s3(bucket=bucket_name),
         # TEST BODY
-        invoke_claude_completions,
         create_knowledge_base,
         await_knowledge_base,
         create_data_source,
         ingest_data,
         await_ingest,
         knowledge_base_rag,
-        external_sources_rag_group(),
+        external_sources_rag_group(text_model_arn),
         retrieve,
         delete_data_source(
             knowledge_base_id=create_knowledge_base.output,
@@ -622,5 +651,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

@@ -16,48 +16,75 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useRef } from "react";
-import { useHotkeys } from "react-hotkeys-hook";
+import { HStack } from "@chakra-ui/react";
+import { useRef, type ChangeEvent } from "react";
+import { LuRegex } from "react-icons/lu";
+
+import { AdvancedSearchToggle } from "src/components/AdvancedSearchToggle";
+import { SHORTCUTS } from "src/context/keyboardShortcuts";
+import { useAdvancedSearch } from "src/hooks/useAdvancedSearch";
+import { useShortcut } from "src/hooks/useShortcut";
 
 import { InputWithAddon } from "../../ui";
 import { FilterPill } from "../FilterPill";
 import type { FilterPluginProps } from "../types";
+import { isValidFilterValue } from "../utils";
 
 export const TextSearchFilter = ({ filter, onChange, onRemove }: FilterPluginProps) => {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const hotkeyInputRef = useRef<HTMLInputElement>(null);
+  const advanced = useAdvancedSearch(filter.config.key);
+  const showAdvancedToggle = filter.config.supportsAdvancedSearch === true;
 
-  const hasValue = filter.value !== null && filter.value !== undefined && String(filter.value).trim() !== "";
+  const hasValue = isValidFilterValue(filter.config.type, filter.value);
 
-  const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     const newValue = event.target.value;
 
     onChange(newValue || undefined);
   };
 
-  useHotkeys(
-    "mod+k",
-    () => {
+  useShortcut({
+    ...SHORTCUTS.search.focusFilterSearch,
+    callback: () => {
       if (!filter.config.hotkeyDisabled) {
-        inputRef.current?.focus();
+        hotkeyInputRef.current?.focus();
       }
     },
-    { enabled: !filter.config.hotkeyDisabled, preventDefault: true },
-  );
+    options: { enabled: !filter.config.hotkeyDisabled, preventDefault: true },
+  });
+
+  const isAdvanced = showAdvancedToggle && advanced.enabled;
+  const stringValue = hasValue && typeof filter.value === "string" ? filter.value : "";
 
   return (
     <FilterPill
-      displayValue={hasValue ? String(filter.value) : ""}
+      displayValue={
+        isAdvanced && stringValue !== "" ? (
+          <HStack as="span" gap={1}>
+            <LuRegex aria-label="match anywhere" />
+            {stringValue}
+          </HStack>
+        ) : (
+          stringValue
+        )
+      }
       filter={filter}
       hasValue={hasValue}
-      onChange={onChange}
       onRemove={onRemove}
-    >
-      <InputWithAddon
-        label={filter.config.label}
-        onChange={handleInputChange}
-        placeholder={filter.config.placeholder}
-        value={String(filter.value ?? "")}
-      />
-    </FilterPill>
+      renderInput={(props) => (
+        <InputWithAddon
+          {...props}
+          endAddon={
+            showAdvancedToggle ? (
+              <AdvancedSearchToggle enabled={advanced.enabled} onToggle={advanced.onToggle} variant="addon" />
+            ) : undefined
+          }
+          label={filter.config.label}
+          onChange={handleInputChange}
+          placeholder={filter.config.placeholder}
+          value={typeof filter.value === "string" ? filter.value : ""}
+        />
+      )}
+    />
   );
 };

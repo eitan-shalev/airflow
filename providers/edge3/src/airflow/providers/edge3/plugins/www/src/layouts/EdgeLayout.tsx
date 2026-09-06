@@ -17,28 +17,31 @@
  * under the License.
  */
 import { Box } from "@chakra-ui/react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { useRef } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
 
+import { Toaster } from "src/components/ui";
 import { JobsPage } from "src/pages/JobsPage";
 import { WorkerPage } from "src/pages/WorkerPage";
 
 import { NavTabs } from "./NavTabs";
 
 export const EdgeLayout = () => {
+  const containerRef = useRef<HTMLDivElement>(null);
   const tabs = [
-    { label: "Edge Worker", value: "plugin/edge_worker" },
-    { label: "Edge Jobs", value: "plugin/edge_jobs" },
+    { label: "Edge Worker", value: "worker" },
+    { label: "Edge Jobs", value: "jobs" },
   ];
 
   return (
-    <Box p={2} /* Compensate for parent padding from ExternalView */>
-      <BrowserRouter>
-        <NavTabs tabs={tabs} />
-        <Routes>
-          <Route path="plugin/edge_worker" element={<WorkerPage />} />
-          <Route path="plugin/edge_jobs" element={<JobsPage />} />
-        </Routes>
-      </BrowserRouter>
+    <Box ref={containerRef} p={2} /* Compensate for parent padding from ExternalView */>
+      <NavTabs tabs={tabs} />
+      <Routes>
+        <Route index element={<Navigate to="worker" replace />} />
+        <Route path="worker" element={<WorkerPage />} />
+        <Route path="jobs" element={<JobsPage />} />
+      </Routes>
+      <Toaster containerRef={containerRef} />
     </Box>
   );
 };

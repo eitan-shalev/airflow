@@ -17,10 +17,13 @@
 # under the License.
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import textwrap
 import time
 from datetime import datetime as dt, timedelta, timezone
+from pathlib import Path
 from unittest import mock
 from unittest.mock import ANY, call
 
@@ -28,6 +31,7 @@ import boto3
 import pendulum
 import pytest
 import time_machine
+from botocore.exceptions import ClientError
 from moto import mock_aws
 from pydantic import TypeAdapter
 from watchtower import CloudWatchLogHandler
@@ -39,14 +43,15 @@ from airflow.providers.amazon.aws.log.cloudwatch_task_handler import (
     CloudwatchTaskHandler,
 )
 from airflow.providers.amazon.aws.utils import datetime_to_epoch_utc_ms
-from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.utils.state import State
 from airflow.utils.timezone import datetime
 
+from tests_common.test_utils.compat import EmptyOperator
 from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.dag import sync_dag_to_db
 from tests_common.test_utils.db import clear_db_dag_bundles, clear_db_dags, clear_db_runs
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+from tests_common.test_utils.taskinstance import create_task_instance
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_2_PLUS
 
 
 def get_time_str(time_in_milliseconds):
@@ -58,6 +63,127 @@ def get_time_str(time_in_milliseconds):
 def logmock():
     with mock_aws():
         yield
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_cloudwatch_handlers():
+    # Watchtower's CloudWatchLogHandler spawns a queue worker thread that keeps
+    # the handler alive even after the test fixture tears down, so it stays
+    # registered in logging._handlerList. Several tests here never call close()
+    # or mock watchtower.CloudWatchLogHandler.close, leaking the handler across
+    # tests. When a later test in the same xdist worker calls
+    # logging.config.dictConfig (e.g. settings.configure_logging()), its
+    # _clearExistingHandlers path runs close() on the leaked handler and blocks
+    # up to FLUSH_TIMEOUT waiting for an undrainable queue — mock_aws is gone.
+    # Closing here while mock_aws is still active drains cleanly.
+    yield
+    for handler_ref in logging._handlerList[:]:
+        handler = handler_ref()
+        if handler is not None and isinstance(handler, CloudWatchLogHandler):
+            with contextlib.suppress(Exception):
+                handler.close()
+            logging._removeHandlerRef(handler_ref)
+
+
+class TestCloudWatchRemoteLogIOFromConfig:
+    @conf_vars(
+        {
+            ("logging", "base_log_folder"): "~/airflow/logs",
+            ("logging", "remote_base_log_folder"): (
+                "cloudwatch://arn:aws:logs:us-west-2:123456789098:log-group:log_group_name"
+            ),
+            ("logging", "delete_local_logs"): "True",
+        }
+    )
+    def test_from_config(self):
+        subject = CloudWatchRemoteLogIO.from_config()
+
+        assert (
+            subject.remote_base == "cloudwatch://arn:aws:logs:us-west-2:123456789098:log-group:log_group_name"
+        )
+        assert subject.base_log_folder == Path(os.path.expanduser("~/airflow/logs"))
+        assert subject.delete_local_copy is True
+        assert subject.log_group_arn == "arn:aws:logs:us-west-2:123456789098:log-group:log_group_name"
+        assert subject.log_group == "log_group_name"
+        assert subject.region_name == "us-west-2"
+
+    @conf_vars(
+        {
+            ("logging", "base_log_folder"): "/tmp/airflow/logs",
+            ("logging", "remote_base_log_folder"): (
+                "cloudwatch://arn:aws:logs:us-west-2:123456789098:log-group:log_group_name"
+            ),
+            ("logging", "delete_local_logs"): "False",
+            ("logging", "remote_task_handler_kwargs"): (
+                '{"log_stream_name": "custom-stream", "max_bytes": 1024}'
+            ),
+        }
+    )
+    def test_from_config_applies_io_kwargs_and_filters_file_handler_kwargs(self):
+        subject = CloudWatchRemoteLogIO.from_config()
+
+        assert subject.log_stream_name == "custom-stream"
+        assert subject.delete_local_copy is False
+        assert not hasattr(subject, "max_bytes")
+
+    @conf_vars({("logging", "remote_task_handler_kwargs"): '["not", "a", "dict"]'})
+    def test_from_config_rejects_non_dict_remote_task_handler_kwargs(self):
+        with pytest.raises(ValueError, match="remote_task_handler_kwargs"):
+            CloudWatchRemoteLogIO.from_config()
+
+    @conf_vars({("logging", "remote_base_log_folder"): "cloudwatch://"})
+    def test_from_config_rejects_remote_base_without_log_group_arn(self):
+        with pytest.raises(ValueError, match="log group ARN"):
+            CloudWatchRemoteLogIO.from_config()
+
+    def test_provider_registers_cloudwatch_scheme(self):
+        from airflow.providers_manager import ProvidersManager
+
+        manager = ProvidersManager()
+        if not hasattr(manager, "remote_logging_handler_by_scheme"):
+            pytest.skip("Airflow core does not support remote logging provider dispatch")
+
+        info = manager.remote_logging_handler_by_scheme("cloudwatch")
+
+        assert info is not None
+        assert (
+            info.classpath == "airflow.providers.amazon.aws.log.cloudwatch_task_handler.CloudWatchRemoteLogIO"
+        )
+
+    @pytest.mark.parametrize(
+        "manager_classpath",
+        [
+            pytest.param("airflow.providers_manager.ProvidersManager", id="core"),
+            pytest.param(
+                "airflow.sdk.providers_manager_runtime.ProvidersManagerTaskRuntime", id="task-runtime"
+            ),
+        ],
+    )
+    @conf_vars(
+        {
+            ("logging", "remote_logging"): "True",
+            ("logging", "remote_base_log_folder"): (
+                "cloudwatch://arn:aws:logs:us-west-2:123456789098:log-group:log_group_name"
+            ),
+            ("logging", "remote_log_conn_id"): "aws_default",
+        }
+    )
+    def test_resolve_remote_task_log_uses_provider_dispatch_not_local_settings(self, manager_classpath):
+        factory = pytest.importorskip("airflow._shared.logging.factory")
+        from airflow._shared.module_loading import import_string
+        from airflow.configuration import conf
+
+        with mock.patch.object(factory, "discover_remote_log_handler", autospec=True) as legacy_discover:
+            remote_task_log, conn_id = factory.resolve_remote_task_log(
+                conf=conf,
+                providers_manager=import_string(manager_classpath)(),
+                import_string=import_string,
+            )
+
+        assert isinstance(remote_task_log, CloudWatchRemoteLogIO)
+        assert remote_task_log.log_group_arn == "arn:aws:logs:us-west-2:123456789098:log-group:log_group_name"
+        assert conn_id == "aws_default"
+        legacy_discover.assert_not_called()
 
 
 # We only test this directly on Airflow 3
@@ -106,7 +232,12 @@ class TestCloudRemoteLogIO:
             # loggers.
 
             # Set up the right chain of processors so the event looks like we want for our full test
-            monkeypatch.setattr(airflow.logging_config, "REMOTE_TASK_LOG", self.subject)
+            if AIRFLOW_V_3_2_PLUS:
+                airflow.sdk.log._ActiveLoggingConfig.set(self.subject, None)
+            else:
+                monkeypatch.setattr(airflow.logging_config, "REMOTE_TASK_LOG", self.subject)
+            # Clear @cache'd processors so this test picks up self.subject.
+            airflow.sdk.log.logging_processors.cache_clear()
             try:
                 procs = airflow.sdk.log.logging_processors(colors=False, json_output=False)
             except TypeError:
@@ -133,6 +264,57 @@ class TestCloudRemoteLogIO:
             processors.clear()
             processors.extend(old_processors)
             structlog.configure(processors=old_processors, logger_factory=logger_factory)
+            # Clear @cache to avoid cross-test contamination.
+            airflow.sdk.log.logging_processors.cache_clear()
+
+    def test_upload_deletes_local_log_dir_when_delete_local_copy_true(self):
+        """upload() with delete_local_copy=True deletes the local log parent directory."""
+        assert self.subject.delete_local_copy is True  # attrs default
+        dag_dir = self.local_log_location / "dag_id=a"
+        assert dag_dir.exists()
+
+        with mock.patch.object(self.subject, "close"):
+            self.subject.upload(self.task_log_path, self.ti)
+
+        assert not dag_dir.exists()
+        # Close watchtower handler; conf_vars needed because base_log_folder differs from tmp_path.
+        with conf_vars({("logging", "base_log_folder"): self.local_log_location.as_posix()}):
+            self.subject.handler.close()
+
+    def test_upload_does_not_delete_when_delete_local_copy_false(self):
+        """upload() with delete_local_copy=False leaves local files untouched."""
+        self.subject.delete_local_copy = False
+        dag_dir = self.local_log_location / "dag_id=a"
+        assert dag_dir.exists()
+
+        with mock.patch.object(self.subject, "close"):
+            self.subject.upload(self.task_log_path, self.ti)
+
+        assert dag_dir.exists()
+        with conf_vars({("logging", "base_log_folder"): self.local_log_location.as_posix()}):
+            self.subject.handler.close()
+
+    def test_upload_handles_absolute_path(self):
+        """upload() resolves an absolute path to the correct parent directory."""
+        dag_dir = self.local_log_location / "dag_id=a"
+        assert dag_dir.exists()
+        absolute_path = self.local_log_location / self.task_log_path
+
+        with mock.patch.object(self.subject, "close"):
+            self.subject.upload(absolute_path, self.ti)
+
+        assert not dag_dir.exists()
+        with conf_vars({("logging", "base_log_folder"): self.local_log_location.as_posix()}):
+            self.subject.handler.close()
+
+    def test_upload_skips_deletion_outside_base_log_folder(self):
+        """upload() logs a warning and skips deletion for paths outside base_log_folder."""
+        outside_path = "/tmp/evil/../../../etc/passwd"
+        with conf_vars({("logging", "base_log_folder"): self.local_log_location.as_posix()}):
+            with mock.patch.object(self.subject, "close"):
+                self.subject.upload(outside_path, self.ti)
+        dag_dir = self.local_log_location / "dag_id=a"
+        assert dag_dir.exists()
 
     @time_machine.travel(datetime(2025, 3, 27, 21, 58, 1, 2345), tick=False)
     def test_log_message(self):
@@ -159,23 +341,50 @@ class TestCloudRemoteLogIO:
             assert metadata == [
                 f"Reading remote log from Cloudwatch log_group: log_group_name log_stream: {stream_name}"
             ]
-            assert logs == ['[2025-03-27T21:58:01Z] {"foo": "bar", "event": "Hi", "level": "info"}']
-
-    def test_event_to_str(self):
-        handler = self.subject
-        current_time = int(time.time()) * 1000
-        events = [
-            {"timestamp": current_time - 2000, "message": "First"},
-            {"timestamp": current_time - 1000, "message": "Second"},
-            {"timestamp": current_time, "message": "Third"},
-        ]
-        assert [handler._event_to_str(event) for event in events] == (
-            [
-                f"[{get_time_str(current_time - 2000)}] First",
-                f"[{get_time_str(current_time - 1000)}] Second",
-                f"[{get_time_str(current_time)}] Third",
+            assert logs == [
+                '{"foo": "bar", "event": "Hi", "level": "info", "timestamp": "2025-03-27T21:58:01.002000+00:00"}\n'
             ]
-        )
+
+    @time_machine.travel(datetime(2025, 3, 27, 21, 58, 1, 2345), tick=False)
+    def test_log_message_after_handler_closed_by_dictconfig(self):
+        # configure_logging() ends in logging.config.dictConfig(), whose
+        # _clearExistingHandlers closes every handler in logging._handlerList,
+        # including the streaming watchtower handler built moments earlier. The
+        # processor must rebuild it instead of feeding the closed one (which
+        # silently drops every record), otherwise no task log ever ships.
+        with conf_vars({("logging", "base_log_folder"): self.local_log_location.as_posix()}):
+            import structlog
+
+            closed = self.subject.handler
+            closed.close()
+            assert closed.shutting_down is True
+
+            log = structlog.get_logger()
+            log.info("Hi", foo="bar")
+            self.subject.close()
+
+            # A fresh handler was built rather than reusing the closed one.
+            assert self.subject.handler is not closed
+            assert self.subject.handler.shutting_down is False
+
+            stream_name = self.task_log_path.replace(":", "_")
+            _, logs = self.subject.read(stream_name, self.ti)
+            assert logs == [
+                '{"foo": "bar", "event": "Hi", "level": "info", "timestamp": "2025-03-27T21:58:01.002000+00:00"}\n'
+            ]
+
+    def test_handler_not_rebuilt_after_close(self):
+        # Once the IO has been closed, a closed handler must NOT be rebuilt: a record arriving
+        # after teardown should be dropped silently rather than spin up an orphan handler and its
+        # background queue thread. Only dictConfig closing it mid-task should trigger a rebuild.
+        with conf_vars({("logging", "base_log_folder"): self.local_log_location.as_posix()}):
+            original = self.subject.handler
+            self.subject.close()
+            original.close()
+            assert original.shutting_down is True
+
+            assert self.subject.handler is original
+            assert self.subject.handler.shutting_down is True
 
 
 @pytest.mark.db_test
@@ -230,7 +439,7 @@ class TestCloudwatchTaskHandler:
             from airflow.models.dag_version import DagVersion
 
             dag_version = DagVersion.get_latest_version(self.dag.dag_id, session=session)
-            self.ti = TaskInstance(task=task, run_id=dag_run.run_id, dag_version_id=dag_version.id)
+            self.ti = create_task_instance(task=task, run_id=dag_run.run_id, dag_version_id=dag_version.id)
         else:
             self.ti = TaskInstance(task=task, run_id=dag_run.run_id)
         self.ti.dag_run = dag_run
@@ -268,6 +477,8 @@ class TestCloudwatchTaskHandler:
                 handler.handle(message)
             mock_emit.assert_has_calls([call(message) for message in messages])
 
+    # TODO: Remove when we stop testing for 2.11 compatibility
+    @conf_vars({("core", "use_historical_filename_templates"): "True"})
     @time_machine.travel(datetime(2025, 3, 27, 21, 58, 1, 2345), tick=False)
     def test_read(self, monkeypatch):
         # Confirmed via AWS Support call:
@@ -337,7 +548,7 @@ class TestCloudwatchTaskHandler:
             ]
 
     @pytest.mark.parametrize(
-        "end_date, expected_end_time",
+        ("end_date", "expected_end_time"),
         [
             (None, None),
             (
@@ -356,8 +567,35 @@ class TestCloudwatchTaskHandler:
             end_time=expected_end_time,
         )
 
+    @mock.patch.object(AwsLogsHook, "get_log_events")
+    def test_get_cloudwatch_logs_missing_stream_yields_hint(self, mock_get_log_events):
+        # A missing log stream (no logs written for this try -- e.g. the task logged
+        # to stdout instead of remote storage) must not raise (so the log reader does
+        # not surface a 500) and must yield a hint instead of nothing, so the reader
+        # does not show a blank view that looks like remote logging silently failed.
+        def _raise_not_found(*args, **kwargs):
+            raise ClientError({"Error": {"Code": "ResourceNotFoundException"}}, "GetLogEvents")
+            yield  # pragma: no cover -- makes this a generator function
+
+        mock_get_log_events.side_effect = _raise_not_found
+        events = list(self.cloudwatch_task_handler.io.get_cloudwatch_logs(self.remote_log_stream, self.ti))
+        assert len(events) == 1
+        assert "No log stream found in CloudWatch" in events[0]["message"]
+        assert self.remote_log_stream in events[0]["message"]
+
+    @mock.patch.object(AwsLogsHook, "get_log_events")
+    def test_get_cloudwatch_logs_other_client_error_propagates(self, mock_get_log_events):
+        # Errors other than a missing stream must still surface.
+        def _raise_access_denied(*args, **kwargs):
+            raise ClientError({"Error": {"Code": "AccessDeniedException"}}, "GetLogEvents")
+            yield  # pragma: no cover -- makes this a generator function
+
+        mock_get_log_events.side_effect = _raise_access_denied
+        with pytest.raises(ClientError):
+            list(self.cloudwatch_task_handler.io.get_cloudwatch_logs(self.remote_log_stream, self.ti))
+
     @pytest.mark.parametrize(
-        "conf_json_serialize, expected_serialized_output",
+        ("conf_json_serialize", "expected_serialized_output"),
         [
             pytest.param(
                 "airflow.providers.amazon.aws.log.cloudwatch_task_handler.json_serialize_legacy",
@@ -412,11 +650,78 @@ class TestCloudwatchTaskHandler:
     def test_close_prevents_duplicate_calls(self):
         with mock.patch("watchtower.CloudWatchLogHandler.close") as mock_log_handler_close:
             with mock.patch("airflow.utils.log.file_task_handler.FileTaskHandler.set_context"):
-                self.cloudwatch_task_handler.set_context(self.ti)
-                for _ in range(5):
-                    self.cloudwatch_task_handler.close()
+                with mock.patch.object(self.cloudwatch_task_handler.io, "upload"):
+                    self.cloudwatch_task_handler.set_context(self.ti)
+                    for _ in range(5):
+                        self.cloudwatch_task_handler.close()
 
-                mock_log_handler_close.assert_called_once()
+                    mock_log_handler_close.assert_called_once()
+
+    def test_set_context_stores_ti_and_log_relative_path(self):
+        """set_context() stores the task instance and rendered log path for use in close()."""
+        self.cloudwatch_task_handler.set_context(self.ti)
+
+        assert self.cloudwatch_task_handler.ti is self.ti
+        assert self.cloudwatch_task_handler.log_relative_path != ""
+        assert (
+            self.cloudwatch_task_handler.log_relative_path == self.cloudwatch_task_handler.io.log_stream_name
+        )
+
+    def test_close_calls_upload_once(self):
+        """close() calls io.upload() exactly once, even when called multiple times."""
+        with mock.patch("airflow.utils.log.file_task_handler.FileTaskHandler.set_context"):
+            with mock.patch.object(self.cloudwatch_task_handler.io, "upload") as mock_upload:
+                with mock.patch("watchtower.CloudWatchLogHandler.close"):
+                    self.cloudwatch_task_handler.set_context(self.ti)
+                    for _ in range(3):
+                        self.cloudwatch_task_handler.close()
+
+                    mock_upload.assert_called_once_with(
+                        self.cloudwatch_task_handler.log_relative_path, self.ti
+                    )
+
+    def test_close_closes_live_io_handler_after_rebuild(self):
+        """close() closes the handler the IO is currently using, not a stale captured reference."""
+        handler = self.cloudwatch_task_handler
+        with mock.patch("airflow.utils.log.file_task_handler.FileTaskHandler.set_context"):
+            with mock.patch.object(handler.io, "upload"):
+                handler.set_context(self.ti)
+                stale = handler.handler
+                # Simulate dictConfig closing the handler mid-task and the IO rebuilding it.
+                stale.close()
+                rebuilt = handler.io._cached_handler = handler.io._build_handler()
+                assert rebuilt is not stale
+
+                handler.close()
+
+                # The live (rebuilt) handler is the one that gets closed, not the stale reference.
+                assert rebuilt.shutting_down is True
+
+    def test_close_skips_upload_without_set_context(self):
+        """close() without a prior set_context() should not call io.upload()."""
+        with mock.patch.object(self.cloudwatch_task_handler.io, "upload") as mock_upload:
+            self.cloudwatch_task_handler.close()
+            mock_upload.assert_not_called()
+
+    @pytest.mark.skipif(not AIRFLOW_V_3_0_PLUS, reason="delete_local_copy only relevant for Airflow 3")
+    def test_close_deletes_local_log_dir(self):
+        """close() after set_context() deletes the local log directory."""
+        log_file_path = Path(self.local_log_location) / self.remote_log_stream
+        log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file_path.write_text("some log content")
+        assert log_file_path.parent.exists()
+
+        with conf_vars({("logging", "delete_local_logs"): "True"}):
+            handler = CloudwatchTaskHandler(
+                self.local_log_location,
+                f"arn:aws:logs:{self.region_name}:11111111:log-group:{self.remote_log_group}",
+            )
+        with mock.patch("airflow.utils.log.file_task_handler.FileTaskHandler.set_context"):
+            with mock.patch("watchtower.CloudWatchLogHandler.close"):
+                handler.set_context(self.ti)
+                handler.close()
+
+        assert not log_file_path.parent.exists()
 
     def test_filename_template_for_backward_compatibility(self):
         # filename_template arg support for running the latest provider on airflow 2
@@ -424,6 +729,22 @@ class TestCloudwatchTaskHandler:
             self.local_log_location,
             f"arn:aws:logs:{self.region_name}:11111111:log-group:{self.remote_log_group}",
             filename_template=None,
+        )
+
+    def test_event_to_str(self):
+        handler = self.cloudwatch_task_handler
+        current_time = int(time.time()) * 1000
+        events = [
+            {"timestamp": current_time - 2000, "message": "First"},
+            {"timestamp": current_time - 1000, "message": "Second"},
+            {"timestamp": current_time, "message": "Third"},
+        ]
+        assert [handler._event_to_str(event) for event in events] == (
+            [
+                f"[{get_time_str(current_time - 2000)}] First",
+                f"[{get_time_str(current_time - 1000)}] Second",
+                f"[{get_time_str(current_time)}] Third",
+            ]
         )
 
 

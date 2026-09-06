@@ -66,7 +66,7 @@ class TestCliRoles:
                     self.clear_users_and_roles()
 
     def clear_users_and_roles(self):
-        session = self.appbuilder.get_session
+        session = self.appbuilder.session
         for user in self.appbuilder.sm.get_all_users():
             session.delete(user)
         for role_name in ["FakeTeamA", "FakeTeamB", "FakeTeamC"]:
@@ -115,9 +115,9 @@ class TestCliRoles:
         self.appbuilder.sm.add_role("FakeTeamA")
         self.appbuilder.sm.add_role("FakeTeamB")
 
-        with redirect_stdout(StringIO()) as stdout:
+        with redirect_stdout(StringIO()) as stdout_io:
             role_command.roles_list(self.parser.parse_args(["roles", "list"]))
-            stdout = stdout.getvalue()
+            stdout = stdout_io.getvalue()
 
         assert "FakeTeamA" in stdout
         assert "FakeTeamB" in stdout

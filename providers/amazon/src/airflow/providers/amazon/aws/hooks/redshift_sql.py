@@ -17,20 +17,55 @@
 from __future__ import annotations
 
 from functools import cached_property
+from importlib.util import find_spec
 from typing import TYPE_CHECKING
 
 import redshift_connector
-from redshift_connector import Connection as RedshiftConnection
-from sqlalchemy import create_engine
-from sqlalchemy.engine.url import URL
+import tenacity
+from redshift_connector import Connection as RedshiftConnection, InterfaceError, OperationalError
 
-from airflow.exceptions import AirflowException
+try:
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine.url import URL, make_url
+except ImportError:
+    URL = create_engine = make_url = None  # type: ignore[assignment,misc]
+
 from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
+from airflow.providers.common.compat.sdk import AirflowException, AirflowOptionalProviderFeatureException
 from airflow.providers.common.sql.hooks.sql import DbApiHook
 
 if TYPE_CHECKING:
-    from airflow.models.connection import Connection
+    from airflow.providers.common.compat.sdk import Connection
     from airflow.providers.openlineage.sqlparser import DatabaseInfo
+
+
+def _is_sqlalchemy_2() -> bool:
+    """Whether the installed SQLAlchemy has the native psycopg (v3) dialect (added in 2.0)."""
+    from packaging.version import Version
+    from sqlalchemy import __version__ as sqlalchemy_version
+
+    return Version(sqlalchemy_version) >= Version("2.0.0")
+
+
+def _resolve_postgres_drivername() -> str:
+    """
+    Pick a Postgres DB-API driver for the SQLAlchemy engine used by lineage/reflection.
+
+    Redshift is wire-compatible with Postgres, but Airflow's own connection to Redshift
+    uses ``redshift_connector`` directly (see ``get_conn``) — this only picks the driver
+    for the separate SQLAlchemy engine used e.g. for OpenLineage extraction.
+    """
+    # The psycopg (v3) package may be importable even where SQLAlchemy is pinned below 2.0
+    # (e.g. compat tests against older released Airflow versions), which doesn't register
+    # SQLAlchemy's native "postgresql+psycopg" dialect and would raise NoSuchModuleError.
+    if find_spec("psycopg") is not None and _is_sqlalchemy_2():
+        return "postgresql+psycopg"
+    if find_spec("psycopg2") is not None:
+        return "postgresql+psycopg2"
+    raise AirflowOptionalProviderFeatureException(
+        "A Postgres DB-API driver is required for the SQLAlchemy engine. Install one with: "
+        "pip install 'apache-airflow-providers-amazon[sqlalchemy]' psycopg2-binary (or psycopg[binary])"
+    )
 
 
 class RedshiftSQLHook(DbApiHook):
@@ -51,7 +86,7 @@ class RedshiftSQLHook(DbApiHook):
         :ref:`Amazon Redshift connection id<howto/connection:redshift>`
 
     .. note::
-        get_sqlalchemy_engine() and get_uri() depend on sqlalchemy-amazon-redshift
+        get_sqlalchemy_engine() and get_uri() depend on sqlalchemy-amazon-redshift.
     """
 
     conn_name_attr = "redshift_conn_id"
@@ -83,16 +118,20 @@ class RedshiftSQLHook(DbApiHook):
         conn_params: dict[str, str | int] = {}
 
         if conn.extra_dejson.get("iam", False):
-            conn.login, conn.password, conn.port = self.get_iam_token(conn)
+            login, password, port = self.get_iam_token(conn)
+        else:
+            login = conn.login
+            password = conn.password
+            port = conn.port
 
-        if conn.login:
-            conn_params["user"] = conn.login
-        if conn.password:
-            conn_params["password"] = conn.password
+        if login:
+            conn_params["user"] = login
+        if password:
+            conn_params["password"] = password
+        if port:
+            conn_params["port"] = port
         if conn.host:
             conn_params["host"] = conn.host
-        if conn.port:
-            conn_params["port"] = conn.port
         if conn.schema:
             conn_params["database"] = conn.schema
 
@@ -150,18 +189,39 @@ class RedshiftSQLHook(DbApiHook):
 
     def get_uri(self) -> str:
         """Overridden to use the Redshift dialect as driver name."""
+        if URL is None:
+            raise AirflowOptionalProviderFeatureException(
+                "sqlalchemy is required to generate the connection URI. "
+                "Install it with: pip install 'apache-airflow-providers-amazon[sqlalchemy]'"
+            )
         conn_params = self._get_conn_params()
 
         if "user" in conn_params:
             conn_params["username"] = conn_params.pop("user")
 
-        # Compatibility: The 'create' factory method was added in SQLAlchemy 1.4
-        # to replace calling the default URL constructor directly.
-        create_url = getattr(URL, "create", URL)
-        return str(create_url(drivername="postgresql", **conn_params))
+        # Use URL.create for SQLAlchemy 2 compatibility
+        username = conn_params.get("username")
+        password = conn_params.get("password")
+        host = conn_params.get("host")
+        port = conn_params.get("port")
+        database = conn_params.get("database")
+
+        return URL.create(
+            drivername="postgresql",
+            username=str(username) if username is not None else None,
+            password=str(password) if password is not None else None,
+            host=str(host) if host is not None else None,
+            port=int(port) if port is not None else None,
+            database=str(database) if database is not None else None,
+        ).render_as_string(hide_password=False)
 
     def get_sqlalchemy_engine(self, engine_kwargs=None):
         """Overridden to pass Redshift-specific arguments."""
+        if create_engine is None:
+            raise AirflowOptionalProviderFeatureException(
+                "sqlalchemy is required for creating the engine. Install it with"
+                ": pip install 'apache-airflow-providers-amazon[sqlalchemy]'"
+            )
         conn_kwargs = self.conn.extra_dejson
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -171,7 +231,8 @@ class RedshiftSQLHook(DbApiHook):
         else:
             engine_kwargs["connect_args"] = conn_kwargs
 
-        return create_engine(self.get_uri(), **engine_kwargs)
+        engine_url = make_url(self.get_uri()).set(drivername=_resolve_postgres_drivername())
+        return create_engine(engine_url, **engine_kwargs)
 
     def get_table_primary_key(self, table: str, schema: str | None = "public") -> list[str] | None:
         """
@@ -195,6 +256,14 @@ class RedshiftSQLHook(DbApiHook):
         pk_columns = [row[0] for row in self.get_records(sql, (schema, table))]
         return pk_columns or None
 
+    @tenacity.retry(
+        stop=tenacity.stop_after_attempt(5),
+        wait=tenacity.wait_exponential(max=20),
+        # OperationalError is thrown when the connection times out
+        # InterfaceError is thrown when the connection is refused
+        retry=tenacity.retry_if_exception_type((OperationalError, InterfaceError)),
+        reraise=True,
+    )
     def get_conn(self) -> RedshiftConnection:
         """Get a ``redshift_connector.Connection`` object."""
         conn_params = self._get_conn_params()
@@ -237,12 +306,19 @@ class RedshiftSQLHook(DbApiHook):
             region_name = AwsBaseHook(aws_conn_id=self.aws_conn_id).region_name
             identifier = f"{cluster_identifier}.{region_name}"
         if not cluster_identifier:
-            identifier = self._get_identifier_from_hostname(connection.host)
+            if connection.host:
+                identifier = self._get_identifier_from_hostname(connection.host)
+            else:
+                raise AirflowException("Host is required when cluster_identifier is not provided.")
         return f"{identifier}:{port}"
 
     def _get_identifier_from_hostname(self, hostname: str) -> str:
         parts = hostname.split(".")
         if hostname.endswith("amazonaws.com") and len(parts) == 6:
+            return f"{parts[0]}.{parts[2]}"
+        # AWS China regions use the amazonaws.com.cn endpoint suffix
+        # e.g. my-cluster.id.cn-north-1.redshift.amazonaws.com.cn (7 parts vs 6 for global)
+        if hostname.endswith("amazonaws.com.cn") and len(parts) == 7:
             return f"{parts[0]}.{parts[2]}"
         self.log.debug(
             """Could not parse identifier from hostname '%s'.

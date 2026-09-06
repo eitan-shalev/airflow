@@ -61,7 +61,8 @@ BQ_DATASET_ID = "bq_ds_featurestore_demo"
 BQ_VIEW_ID = "product_features_view"
 BQ_VIEW_FQN = f"{PROJECT_ID}.{BQ_DATASET_ID}.{BQ_VIEW_ID}"
 
-FEATURE_ONLINE_STORE_ID = f"my_feature_online_store_unique_{ENV_ID}"
+# Please take into consideration that max ID length is 60 symbols
+FEATURE_ONLINE_STORE_ID = f"{ENV_ID}_fo_id".replace("-", "_")
 FEATURE_VIEW_ID = "feature_view_product"
 FEATURE_VIEW_DATA_KEY = {"key": "28098"}
 
@@ -126,7 +127,15 @@ with DAG(
         project_id=PROJECT_ID,
         location=REGION,
         feature_online_store_id=FEATURE_ONLINE_STORE_ID,
-        feature_online_store=FeatureOnlineStore(optimized=FeatureOnlineStore.Optimized()),
+        feature_online_store=FeatureOnlineStore(
+            bigtable=FeatureOnlineStore.Bigtable(
+                auto_scaling=FeatureOnlineStore.Bigtable.AutoScaling(
+                    min_node_count=1,
+                    max_node_count=3,
+                    cpu_utilization_target=50,
+                )
+            )
+        ),
     )
     # [END how_to_cloud_vertex_ai_create_feature_online_store_operator]
 
@@ -205,6 +214,7 @@ with DAG(
         location=REGION,
         feature_online_store_id=FEATURE_ONLINE_STORE_ID,
         feature_view_id=FEATURE_VIEW_ID,
+        trigger_rule=TriggerRule.ALL_DONE,
     )
     # [END how_to_cloud_vertex_ai_delete_feature_view_operator]
 
@@ -214,6 +224,7 @@ with DAG(
         project_id=PROJECT_ID,
         location=REGION,
         feature_online_store_id=FEATURE_ONLINE_STORE_ID,
+        trigger_rule=TriggerRule.ALL_DONE,
     )
     # [END how_to_cloud_vertex_ai_delete_feature_online_store_operator]
 
@@ -250,5 +261,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

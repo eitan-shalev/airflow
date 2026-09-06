@@ -35,11 +35,12 @@ export const FieldBool = ({ name, namespace = "default" }: FlexibleFormElementPr
   return (
     <Switch
       checked={Boolean(param.value)}
-      colorPalette="brand"
       disabled={disabled}
       id={`element_${name}`}
+      justifyContent="flex-end"
       name={`element_${name}`}
       onCheckedChange={(event) => onCheck(event.checked)}
+      width="full"
     />
   );
 };

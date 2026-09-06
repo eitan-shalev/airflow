@@ -17,7 +17,7 @@
 # under the License.
 from __future__ import annotations
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 
 
 class OpenAIBatchJobException(AirflowException):
@@ -26,3 +26,7 @@ class OpenAIBatchJobException(AirflowException):
 
 class OpenAIBatchTimeout(AirflowException):
     """Raise when OpenAI Batch Job times out."""
+
+
+class OpenAITriggerEventError(AirflowException):
+    """Raise when a deferred task resumes with a missing or malformed trigger event."""

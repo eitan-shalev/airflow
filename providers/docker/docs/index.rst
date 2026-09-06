@@ -70,7 +70,7 @@ apache-airflow-providers-docker package
 `Docker <https://www.docker.com/>`__
 
 
-Release: 4.4.3
+Release: 4.5.9
 
 Provider package
 ----------------
@@ -88,34 +88,16 @@ For the minimum Airflow version supported, see ``Requirements`` below.
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.10.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.10.0``
-``docker``          ``>=7.1.0``
-``python-dotenv``   ``>=0.21.0``
-==================  ==================
-
-Cross provider package dependencies
------------------------------------
-
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified provider distributions in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
-
-.. code-block:: bash
-
-    pip install apache-airflow-providers-docker[common.compat]
-
-
-==================================================================================================================  =================
-Dependent package                                                                                                   Extra
-==================================================================================================================  =================
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_  ``common.compat``
-==================================================================================================================  =================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.10.1``
+``docker``                                  ``>=7.1.0``
+``python-dotenv``                           ``>=0.21.0``
+==========================================  ==================
 
 Downloading official packages
 -----------------------------
@@ -123,5 +105,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-docker 4.4.3 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.4.3.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.4.3.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.4.3.tar.gz.sha512>`__)
-* `The apache-airflow-providers-docker 4.4.3 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.4.3-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.4.3-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.4.3-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-docker 4.5.9 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.5.9.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.5.9.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.5.9.tar.gz.sha512>`__)
+* `The apache-airflow-providers-docker 4.5.9 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.5.9-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.5.9-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_docker-4.5.9-py3-none-any.whl.sha512>`__)

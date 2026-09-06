@@ -31,8 +31,35 @@
                 "removed"
             ]
         },
+        "lifecycle": {
+            "description": "Provider lifecycle stage per AIP-95. New providers start in incubation, graduate to production, and may be marked mature (stable interface, exempt from activity-based deprecation) or deprecated.",
+            "type": "string",
+            "enum": [
+                "incubation",
+                "production",
+                "mature",
+                "deprecated"
+            ],
+            "default": "production"
+        },
+        "build-system": {
+            "description": "Build-system of provider: Defaults to flit_core but also can be hatchling.",
+            "type": "string",
+            "default": "flit_core",
+            "enum": [
+                "flit_core",
+                "hatchling"
+            ]
+        },
         "excluded-python-versions": {
             "description": "List of python versions excluded for that provider",
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "excluded-platforms": {
+            "description": "List of platforms (e.g. linux/arm64) excluded for that provider. Used to skip providers whose native dependencies are unavailable on a given architecture.",
             "type": "array",
             "items": {
                 "type": "string"
@@ -64,28 +91,37 @@
                         "type": "string"
                     },
                     "tags": {
-                        "description": "List of tags describing the integration. While we're using RST, only one tag is supported per integration.",
+                        "description": "List of tags describing the integration.",
                         "type": "array",
                         "items": {
                             "type": "string",
                             "enum": [
+                                "ai",
+                                "ai-inference",
                                 "alibaba",
+                                "anthropic",
                                 "apache",
                                 "aws",
                                 "azure",
+                                "claude",
                                 "dbt",
+                                "embeddings",
                                 "gcp",
+                                "generative-ai",
                                 "gmp",
                                 "google",
                                 "kafka",
+                                "llm",
+                                "machine-learning",
+                                "openai",
                                 "protocol",
                                 "service",
                                 "software",
+                                "text-generation",
                                 "yandex"
                             ]
                         },
-                        "minItems": 1,
-                        "maxItems": 1
+                        "minItems": 1
                     }
                 },
                 "additionalProperties": false,
@@ -337,6 +373,54 @@
                 ]
             }
         },
+        "toolsets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "integration-name": {
+                        "type": "string",
+                        "description": "Integration name. It must have a matching item in the 'integration' section of any provider."
+                    },
+                    "python-modules": {
+                        "description": "List of python modules containing the toolsets.",
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "additionalProperties": false,
+                "required": [
+                    "integration-name",
+                    "python-modules"
+                ]
+            }
+        },
+        "retry-policies": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "integration-name": {
+                        "type": "string",
+                        "description": "Integration name. It must have a matching item in the 'integration' section of any provider."
+                    },
+                    "python-modules": {
+                        "description": "List of python modules containing the retry policies.",
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "additionalProperties": false,
+                "required": [
+                    "integration-name",
+                    "python-modules"
+                ]
+            }
+        },
         "connection-types": {
             "type": "array",
             "description": "Array of connection types mapped to hook class names",
@@ -350,6 +434,118 @@
                     "hook-class-name": {
                         "description": "Hook class name that implements the connection type",
                         "type": "string"
+                    },
+                    "hook-name": {
+                        "description": "Display name for the connection type in the UI (e.g. 'File (path)', 'Slack')",
+                        "type": "string"
+                    },
+                    "ui-field-behaviour": {
+                        "description": "Customizations for standard connection form fields",
+                        "type": "object",
+                        "properties": {
+                            "hidden-fields": {
+                                "description": "List of standard fields to hide in the UI",
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": ["description", "host", "port", "login", "password", "schema", "extra"]
+                                },
+                                "default": []
+                            },
+                            "relabeling": {
+                                "description": "Map of field names to custom labels",
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "default": {}
+                            },
+                            "placeholders": {
+                                "description": "Map of field names to placeholder text",
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "default": {}
+                            }
+                        },
+                        "additionalProperties": false
+                    },
+                    "external-services": {
+                        "description": "Representative, non-exhaustive list of upstream provider/service names this connection type is known to reach over the network (e.g. 'Anthropic', 'AWS Bedrock', 'Ollama') -- examples, not an exhaustive compatibility matrix. Hooks that resolve the destination from a caller-supplied model identifier (as with pydantic-ai) can reach any service the model id names, so the list can never be complete. Not to be confused with the top-level 'integrations' key, which describes framework integrations and drives docs/logo/tag generation.",
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "minItems": 1
+                    },
+                    "conn-fields": {
+                        "description": "Custom connection fields stored in Connection.extra JSON",
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "description": "Display label for the field"
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "Help text for the field"
+                                },
+                                "schema": {
+                                    "description": "JSON Schema definition for this field",
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {
+                                            "description": "Field data type",
+                                            "oneOf": [
+                                                {"type": "string", "enum": ["string", "integer", "boolean", "number", "object", "array"]},
+                                                {"type": "array", "items": {"type": "string"}}
+                                            ]
+                                        },
+                                        "default": {
+                                            "description": "Default value for the field"
+                                        },
+                                        "format": {
+                                            "type": "string",
+                                            "enum": ["password", "multiline", "email", "url", "json", "date", "date-time", "time"],
+                                            "description": "Format hint for rendering"
+                                        },
+                                        "enum": {
+                                            "type": "array",
+                                            "description": "List of allowed values (creates dropdown)"
+                                        },
+                                        "minimum": {
+                                            "type": "number",
+                                            "description": "Minimum value for numbers"
+                                        },
+                                        "maximum": {
+                                            "type": "number",
+                                            "description": "Maximum value for numbers"
+                                        },
+                                        "pattern": {
+                                            "type": "string",
+                                            "description": "Regex pattern for validation"
+                                        },
+                                        "minLength": {
+                                            "type": "integer",
+                                            "minimum": 0,
+                                            "description": "Minimum string length"
+                                        },
+                                        "maxLength": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "description": "Maximum string length"
+                                        }
+                                    },
+                                    "required": ["type"],
+                                    "additionalProperties": true
+                                }
+                            },
+                            "required": ["label", "schema"],
+                            "additionalProperties": false
+                        }
                     }
                 },
                 "required": [
@@ -369,17 +565,34 @@
             "type": "array",
             "description": "Decorators to use with the TaskFlow API. Can be accessed by users via '@task.<name>'",
             "items": {
-                "name": {
-                    "type": "string"
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "description": "Name the decorator is exposed under, following '@task.'",
+                        "type": "string"
+                    },
+                    "class-name": {
+                        "description": "Class name that implements the decorator",
+                        "type": "string"
+                    }
                 },
-                "path": {
-                    "type": "string"
-                }
+                "additionalProperties": false,
+                "required": [
+                    "name",
+                    "class-name"
+                ]
             }
         },
         "secrets-backends": {
             "type": "array",
             "description": "Secrets Backend class names",
+            "items": {
+                "type": "string"
+            }
+        },
+        "email-backends": {
+            "type": "array",
+            "description": "Email backend function names",
             "items": {
                 "type": "string"
             }
@@ -396,6 +609,25 @@
             "description": "Logging Task Handlers class names",
             "items": {
                 "type": "string"
+            }
+        },
+        "remote-logging": {
+            "type": "array",
+            "description": "Remote logging IO handlers contributed by the provider. Each entry registers a RemoteLogIO implementation that ProvidersManager dispatches by URL scheme.",
+            "items": {
+                "type": "object",
+                "required": ["classpath", "scheme"],
+                "additionalProperties": false,
+                "properties": {
+                    "classpath": {
+                        "type": "string",
+                        "description": "Fully-qualified class name of the RemoteLogIO implementation."
+                    },
+                    "scheme": {
+                        "type": "string",
+                        "description": "URL scheme (without ://) of [logging] remote_base_log_folder that this handler claims."
+                    }
+                }
             }
         },
         "auth-backends": {
@@ -415,6 +647,20 @@
         "executors": {
             "type": "array",
             "description": "Executor class names",
+            "items": {
+                "type": "string"
+            }
+        },
+        "db-managers": {
+            "type": "array",
+            "description": "DB manager class names",
+            "items": {
+                "type": "string"
+            }
+        },
+        "cli": {
+            "type": "array",
+            "description": "CLI command functions exposed by the provider",
             "items": {
                 "type": "string"
             }
@@ -459,24 +705,29 @@
             "type": "array",
             "description": "Plugins exposed by the provider",
             "items": {
-                "name": {
-                    "type": "string"
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "description": "Name of the plugin",
+                        "type": "string"
+                    },
+                    "plugin-class": {
+                        "description": "Class name that implements the plugin",
+                        "type": "string"
+                    }
                 },
-                "plugin-class": {
-                    "type": "string"
-                }
+                "additionalProperties": false,
+                "required": [
+                    "name",
+                    "plugin-class"
+                ]
             }
         },
         "queues": {
             "type": "array",
-            "description": "Message Queues exposed by the provider",
+            "description": "Message queue provider class names",
             "items": {
-                "name": {
-                    "type": "string"
-                },
-                "message-queue-class": {
-                    "type": "string"
-                }
+                "type": "string"
             }
         },
         "source-date-epoch": {

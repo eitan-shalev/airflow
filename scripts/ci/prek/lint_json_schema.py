@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.10,<3.11"
 # dependencies = [
 #   "jsonschema>=3.2.0,<5.0",
 #   "pyyaml>=6.0.3",
@@ -32,7 +32,6 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 
 import requests
 import yaml
@@ -45,7 +44,6 @@ if __name__ != "__main__":
         "To run this script, run the ./build_docs.py command"
     )
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))  # make sure common_prek_utils is imported
 from common_prek_utils import AIRFLOW_ROOT_PATH
 
 

@@ -27,10 +27,12 @@ from airflow_breeze.utils.packages import (
     apply_version_suffix_to_non_provider_pyproject_tomls,
     apply_version_suffix_to_provider_pyproject_toml,
     convert_cross_package_dependencies_to_table,
+    convert_optional_dependencies_to_table,
     convert_pip_requirements_to_table,
     expand_all_provider_distributions,
     find_matching_long_package_names,
     get_available_distributions,
+    get_cross_provider_dependencies_for_extras,
     get_cross_provider_dependent_packages,
     get_dist_package_name_prefix,
     get_long_package_name,
@@ -38,11 +40,13 @@ from airflow_breeze.utils.packages import (
     get_pip_package_name,
     get_provider_details,
     get_provider_info_dict,
+    get_provider_jinja_context,
     get_provider_requirements,
     get_removed_provider_ids,
     get_short_package_name,
     get_suspended_provider_folders,
     get_suspended_provider_ids,
+    render_template,
     validate_provider_info_with_runtime_schema,
 )
 from airflow_breeze.utils.path_utils import AIRFLOW_ROOT_PATH
@@ -85,6 +89,7 @@ def test_get_short_package_name():
     assert get_short_package_name("apache-airflow") == "apache-airflow"
     assert get_short_package_name("docker-stack") == "docker-stack"
     assert get_short_package_name("task-sdk") == "task-sdk"
+    assert get_short_package_name("java-sdk") == "java-sdk"
     assert get_short_package_name("apache-airflow-providers-amazon") == "amazon"
     assert get_short_package_name("apache-airflow-providers-apache-hdfs") == "apache.hdfs"
 
@@ -98,13 +103,18 @@ def test_get_long_package_name():
     assert get_long_package_name("apache-airflow") == "apache-airflow"
     assert get_long_package_name("docker-stack") == "docker-stack"
     assert get_long_package_name("task-sdk") == "task-sdk"
+    assert get_long_package_name("java-sdk") == "java-sdk"
     assert get_long_package_name("amazon") == "apache-airflow-providers-amazon"
     assert get_long_package_name("apache.hdfs") == "apache-airflow-providers-apache-hdfs"
 
 
 def test_get_provider_requirements():
     # update me when asana dependencies change
-    assert get_provider_requirements("asana") == ["apache-airflow>=2.10.0", "asana>=5.0.0"]
+    assert get_provider_requirements("asana") == [
+        "apache-airflow>=2.11.0",
+        "apache-airflow-providers-common-compat>=1.8.0",
+        "asana>=5.0.0",
+    ]
 
 
 def test_get_removed_providers():
@@ -114,18 +124,19 @@ def test_get_removed_providers():
 
 def test_get_suspended_provider_ids():
     # Modify it every time we suspend/resume provider
-    assert get_suspended_provider_ids() == []
+    assert get_suspended_provider_ids() == ["apache.beam"]
 
 
 def test_get_suspended_provider_folders():
     # Modify it every time we suspend/resume provider
-    assert get_suspended_provider_folders() == []
+    assert get_suspended_provider_folders() == ["apache/beam"]
 
 
 @pytest.mark.parametrize(
-    "short_packages, filters, long_packages",
+    ("short_packages", "filters", "long_packages"),
     [
         (("amazon",), (), ("apache-airflow-providers-amazon",)),
+        (("java-sdk",), (), ("java-sdk",)),
         (("apache.hdfs",), (), ("apache-airflow-providers-apache-hdfs",)),
         (
             ("apache.hdfs",),
@@ -151,7 +162,7 @@ def test_find_matching_long_package_name_bad_filter():
 
 
 @pytest.mark.parametrize(
-    "provider_id, pip_package_name",
+    ("provider_id", "pip_package_name"),
     [
         ("asana", "apache-airflow-providers-asana"),
         ("apache.hdfs", "apache-airflow-providers-apache-hdfs"),
@@ -162,7 +173,7 @@ def test_get_pip_package_name(provider_id: str, pip_package_name: str):
 
 
 @pytest.mark.parametrize(
-    "provider_id, expected_package_name",
+    ("provider_id", "expected_package_name"),
     [
         ("asana", "apache_airflow_providers_asana"),
         ("apache.hdfs", "apache_airflow_providers_apache_hdfs"),
@@ -173,7 +184,7 @@ def test_get_dist_package_name_prefix(provider_id: str, expected_package_name: s
 
 
 @pytest.mark.parametrize(
-    "requirement_string, expected",
+    ("requirement_string", "expected"),
     [
         pytest.param("apache-airflow", ("apache-airflow", ""), id="no-version-specifier"),
         pytest.param(
@@ -213,7 +224,7 @@ def test_parse_pip_requirements_parse(requirement_string: str, expected: tuple[s
 
 
 @pytest.mark.parametrize(
-    "requirements, markdown, table",
+    ("requirements", "markdown", "table"),
     [
         (
             ["apache-airflow>2.5.0", "apache-airflow-providers-http"],
@@ -249,9 +260,9 @@ def test_validate_provider_info_with_schema():
 
 
 @pytest.mark.parametrize(
-    "provider_id, min_version",
+    ("provider_id", "min_version"),
     [
-        ("amazon", "2.10.0"),
+        ("amazon", "2.11.0"),
         ("fab", "3.0.2"),
     ],
 )
@@ -259,18 +270,94 @@ def test_get_min_airflow_version(provider_id: str, min_version: str):
     assert get_min_airflow_version(provider_id) == min_version
 
 
+@pytest.mark.parametrize(
+    ("cross_provider_deps", "suspended_ids", "requirements", "expected"),
+    [
+        pytest.param(
+            ["common.compat", "common.sql", "google", "apache.beam"],
+            ["apache.beam"],
+            ["apache-airflow-providers-common-compat>=1.2.3"],
+            ["common.sql", "google"],
+            id="filters_suspended_and_required",
+        ),
+        pytest.param(
+            ["common.sql"],
+            [],
+            ["apache-airflow-providers-common-sql-extra>=1.0.0"],
+            ["common.sql"],
+            id="substring_collision_not_filtered",
+        ),
+    ],
+)
+def test_get_cross_provider_dependencies_for_extras(
+    monkeypatch, cross_provider_deps, suspended_ids, requirements, expected
+):
+    monkeypatch.setattr(
+        "airflow_breeze.utils.packages.get_cross_provider_dependent_packages",
+        lambda provider_id: cross_provider_deps,
+    )
+    monkeypatch.setattr(
+        "airflow_breeze.utils.packages.get_suspended_provider_ids",
+        lambda: suspended_ids,
+    )
+    monkeypatch.setattr(
+        "airflow_breeze.utils.packages.get_provider_requirements",
+        lambda provider_id: requirements,
+    )
+
+    assert get_cross_provider_dependencies_for_extras("test.provider") == expected
+
+
 def test_convert_cross_package_dependencies_to_table():
     EXPECTED = """
-| Dependent package                                                                   | Extra         |
-|:------------------------------------------------------------------------------------|:--------------|
-| [apache-airflow-providers-common-sql](https://airflow.apache.org/docs/common-sql)   | `common.sql`  |
-| [apache-airflow-providers-google](https://airflow.apache.org/docs/google)           | `google`      |
-| [apache-airflow-providers-openlineage](https://airflow.apache.org/docs/openlineage) | `openlineage` |
+| Dependent package                                                                       | Extra           |
+|:----------------------------------------------------------------------------------------|:----------------|
+| [apache-airflow-providers-common-compat](https://airflow.apache.org/docs/common-compat) | `common.compat` |
+| [apache-airflow-providers-common-sql](https://airflow.apache.org/docs/common-sql)       | `common.sql`    |
+| [apache-airflow-providers-google](https://airflow.apache.org/docs/google)               | `google`        |
+| [apache-airflow-providers-openlineage](https://airflow.apache.org/docs/openlineage)     | `openlineage`   |
 """
     assert (
         convert_cross_package_dependencies_to_table(get_cross_provider_dependent_packages("trino")).strip()
         == EXPECTED.strip()
     )
+
+
+@pytest.mark.parametrize("markdown", [True, False])
+def test_convert_optional_dependencies_to_table(markdown: bool):
+    optional_dependencies = {
+        "aiobotocore": ["aiobotocore>=3.0.0"],
+        "s3fs": ["s3fs>=2023.10.0", "boto3>=1.0"],
+    }
+    table = convert_optional_dependencies_to_table(optional_dependencies, markdown=markdown)
+    quote = "`" if markdown else "``"
+    assert "Extra" in table
+    assert "Dependencies" in table
+    assert f"{quote}aiobotocore{quote}" in table
+    assert f"{quote}aiobotocore>=3.0.0{quote}" in table
+    # Multiple dependencies for a single extra are comma-joined in one cell.
+    assert f"{quote}s3fs>=2023.10.0{quote}, {quote}boto3>=1.0{quote}" in table
+
+
+def test_provider_index_template_renders_optional_dependencies():
+    # Amazon carries plain-PyPI extras (e.g. ``aiobotocore``) that are not cross-provider
+    # dependencies, so their only rendering path is the "Optional dependencies" section.
+    context = get_provider_jinja_context("amazon", current_release_version="1.0.0", version_suffix="")
+    rendered = render_template(
+        template_name="PROVIDER_INDEX", context=context, extension=".rst", keep_trailing_newline=True
+    )
+    assert "Optional dependencies\n---------------------" in rendered
+    assert "``aiobotocore``" in rendered
+
+
+def test_provider_index_template_omits_optional_dependencies_when_none():
+    context = get_provider_jinja_context("amazon", current_release_version="1.0.0", version_suffix="")
+    context["OPTIONAL_DEPENDENCIES"] = {}
+    context["OPTIONAL_DEPENDENCIES_TABLE_RST"] = ""
+    rendered = render_template(
+        template_name="PROVIDER_INDEX", context=context, extension=".rst", keep_trailing_newline=True
+    )
+    assert "Optional dependencies\n---------------------" not in rendered
 
 
 def test_get_provider_info_dict():
@@ -289,6 +376,7 @@ def test_get_provider_info_dict():
     assert len(provider_info_dict["connection-types"]) > 3
     assert len(provider_info_dict["notifications"]) > 2
     assert len(provider_info_dict["secrets-backends"]) > 1
+    assert len(provider_info_dict["email-backends"]) > 0
     assert len(provider_info_dict["logging"]) > 1
     assert len(provider_info_dict["config"].keys()) > 1
     assert len(provider_info_dict["executors"]) > 0
@@ -343,7 +431,7 @@ def _check_dependencies_modified_properly(
 
 
 @pytest.mark.parametrize(
-    "provider_id, version_suffix, floored_version_suffix",
+    ("provider_id", "version_suffix", "floored_version_suffix"),
     [
         ("google", ".dev0", ".dev0"),
         ("google", ".dev1", ".dev0"),
@@ -370,18 +458,40 @@ def _check_dependencies_modified_properly(
         ("standard", ".post1", ".post1"),
     ],
 )
-def test_apply_version_suffix_to_provider_pyproject_toml(provider_id, version_suffix, floored_version_suffix):
+def test_apply_version_suffix_to_provider_pyproject_toml(
+    provider_id, version_suffix, floored_version_suffix, tmp_path
+):
     """
     Test the apply_version_suffix function with different version suffixes for pyproject.toml of provider.
     """
     try:
         import tomllib
     except ImportError:
-        import tomli as tomllib
-    provider_details = get_provider_details(provider_id)
-    original_content = (provider_details.root_provider_path / "pyproject.toml").read_text()
-    with apply_version_suffix_to_provider_pyproject_toml(provider_id, version_suffix) as pyproject_toml_path:
-        modified_content = pyproject_toml_path.read_text()
+        import tomli as tomllib  # type: ignore[no-redef]
+    from unittest.mock import patch
+
+    # Get the original provider details
+    original_provider_details = get_provider_details(provider_id)
+    original_pyproject_path = original_provider_details.root_provider_path / "pyproject.toml"
+    original_content = original_pyproject_path.read_text()
+
+    # Create a temporary copy of the provider directory structure
+    temp_provider_path = tmp_path / "providers" / provider_id.replace(".", "/")
+    temp_provider_path.mkdir(parents=True, exist_ok=True)
+    temp_pyproject_path = temp_provider_path / "pyproject.toml"
+    temp_pyproject_path.write_text(original_content)
+
+    # Mock get_provider_details to return a modified version with temporary path
+    def mock_get_provider_details(provider_id: str):
+        # Use NamedTuple's _replace() method to create a copy with modified root_provider_path
+        return original_provider_details._replace(root_provider_path=temp_provider_path)
+
+    with patch("airflow_breeze.utils.packages.get_provider_details", side_effect=mock_get_provider_details):
+        with apply_version_suffix_to_provider_pyproject_toml(
+            provider_id, version_suffix
+        ) as pyproject_toml_path:
+            modified_content = pyproject_toml_path.read_text()
+
     original_toml = tomllib.loads(original_content)
     modified_toml = tomllib.loads(modified_content)
     assert original_toml["project"]["version"] != modified_toml["project"]["version"]
@@ -396,8 +506,20 @@ TASK_SDK_INIT_PY = AIRFLOW_ROOT_PATH / "task-sdk" / "src" / "airflow" / "sdk" / 
 AIRFLOWCTL_INIT_PY = AIRFLOW_ROOT_PATH / "airflow-ctl" / "src" / "airflowctl" / "__init__.py"
 
 
+@pytest.fixture
+def lock_version_files():
+    from filelock import FileLock
+
+    lock_file = AIRFLOW_ROOT_PATH / ".version_files.lock"
+    with FileLock(lock_file):
+        yield
+    if lock_file.exists():
+        lock_file.unlink()
+
+
+@pytest.mark.usefixtures("lock_version_files")
 @pytest.mark.parametrize(
-    "distributions,  init_file_path, version_suffix, floored_version_suffix",
+    ("distributions", "init_file_path", "version_suffix", "floored_version_suffix"),
     [
         (("airflow-core", "."), AIRFLOW_CORE_INIT_PY, ".dev0", ".dev0"),
         (("airflow-core", "."), AIRFLOW_CORE_INIT_PY, ".dev1+testversion34", ".dev0"),
@@ -423,7 +545,11 @@ AIRFLOWCTL_INIT_PY = AIRFLOW_ROOT_PATH / "airflow-ctl" / "src" / "airflowctl" / 
     ],
 )
 def test_apply_version_suffix_to_non_provider_pyproject_tomls(
-    distributions: tuple[str, ...], init_file_path: Path, version_suffix: str, floored_version_suffix: str
+    distributions: tuple[str, ...],
+    init_file_path: Path,
+    version_suffix: str,
+    floored_version_suffix: str,
+    tmp_path: Path,
 ):
     """
     Test the apply_version_suffix function with different version suffixes for pyproject.toml of non-provider.
@@ -431,19 +557,28 @@ def test_apply_version_suffix_to_non_provider_pyproject_tomls(
     try:
         import tomllib
     except ImportError:
-        import tomli as tomllib
+        import tomli as tomllib  # type: ignore[no-redef]
     distribution_paths = [AIRFLOW_ROOT_PATH / distribution for distribution in distributions]
     original_pyproject_toml_paths = [path / "pyproject.toml" for path in distribution_paths]
     original_contents = [path.read_text() for path in original_pyproject_toml_paths]
+    modified_pyproject_toml_paths = [
+        tmp_path / path.parent.name / path.name for path in original_pyproject_toml_paths
+    ]
+    for i, modified_pyproject_toml_path in enumerate(modified_pyproject_toml_paths):
+        modified_pyproject_toml_path.parent.mkdir(parents=True, exist_ok=True)
+        modified_pyproject_toml_path.write_text(original_pyproject_toml_paths[i].read_text())
     original_init_py = init_file_path.read_text()
+    modified_init_file_path = tmp_path / init_file_path.name
+    modified_init_file_path.write_text(original_init_py)
+
     with apply_version_suffix_to_non_provider_pyproject_tomls(
-        version_suffix, init_file_path, original_pyproject_toml_paths
+        version_suffix, modified_init_file_path, modified_pyproject_toml_paths
     ) as modified_pyproject_toml_paths:
         modified_contents = [path.read_text() for path in modified_pyproject_toml_paths]
 
         original_tomls = [tomllib.loads(content) for content in original_contents]
         modified_tomls = [tomllib.loads(content) for content in modified_contents]
-        modified_init_py = init_file_path.read_text()
+        modified_init_py = modified_init_file_path.read_text()
 
     assert original_init_py != modified_init_py
     assert version_suffix in modified_init_py

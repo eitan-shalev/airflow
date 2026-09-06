@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Callable
 from unittest import mock
@@ -28,7 +27,6 @@ from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.sdk.api.datamodels._generated import AssetProfile
 from airflow.sdk.definitions.asset import (
     Asset,
-    AssetAlias,
     AssetAll,
     AssetAny,
     AssetUniqueKey,
@@ -40,13 +38,15 @@ from airflow.sdk.definitions.asset import (
 )
 from airflow.sdk.definitions.dag import DAG
 from airflow.sdk.io import ObjectStoragePath
-from airflow.serialization.serialized_objects import SerializedDAG
+from airflow.serialization.definitions.assets import SerializedAsset, SerializedAssetAny
+
+from tests_common.test_utils.dag import create_scheduler_dag
 
 ASSET_MODULE_PATH = "airflow.sdk.definitions.asset"
 
 
 @pytest.mark.parametrize(
-    "sql_conn_value, name, should_raise",
+    ("sql_conn_value", "name", "should_raise"),
     [
         pytest.param("mysql://localhost/db", "", True, id="mysql-empty"),
         pytest.param("mysql://localhost/db", "\n\t", True, id="mysql-whitespace"),
@@ -56,10 +56,10 @@ ASSET_MODULE_PATH = "airflow.sdk.definitions.asset"
         pytest.param("sqlite:///:memory:", "\n\t", True, id="sqlite-whitespace"),
         pytest.param("sqlite:///:memory:", "a" * 1501, True, id="sqlite-too-long"),
         pytest.param("sqlite:///:memory:", "😊", False, id="sqlite-non-ascii"),
-        pytest.param("postgresql://localhost/db", "", True, id="postgres-empty"),
-        pytest.param("postgresql://localhost/db", "\n\t", True, id="postgres-whitespace"),
-        pytest.param("postgresql://localhost/db", "a" * 1501, True, id="postgres-too-long"),
-        pytest.param("postgresql://localhost/db", "😊", False, id="postgres-non-ascii"),
+        pytest.param("postgresql+psycopg2://localhost/db", "", True, id="postgres-empty"),
+        pytest.param("postgresql+psycopg2://localhost/db", "\n\t", True, id="postgres-whitespace"),
+        pytest.param("postgresql+psycopg2://localhost/db", "a" * 1501, True, id="postgres-too-long"),
+        pytest.param("postgresql+psycopg2://localhost/db", "😊", False, id="postgres-non-ascii"),
     ],
 )
 def test_invalid_names(sql_conn_value, name, should_raise, monkeypatch):
@@ -72,7 +72,7 @@ def test_invalid_names(sql_conn_value, name, should_raise, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "sql_conn_value, uri, should_raise",
+    ("sql_conn_value", "uri", "should_raise"),
     [
         pytest.param("mysql://localhost/db", "", True, id="mysql-empty"),
         pytest.param("mysql://localhost/db", "\n\t", True, id="mysql-whitespace"),
@@ -84,13 +84,16 @@ def test_invalid_names(sql_conn_value, name, should_raise, monkeypatch):
         pytest.param("sqlite:///:memory:", "a" * 1501, True, id="sqlite-too-long"),
         pytest.param("sqlite:///:memory:", "airflow://xcom/dag/task", True, id="sqlite-reserved-scheme"),
         pytest.param("sqlite:///:memory:", "😊", False, id="sqlite-non-ascii"),
-        pytest.param("postgresql://localhost/db", "", True, id="postgres-empty"),
-        pytest.param("postgresql://localhost/db", "\n\t", True, id="postgres-whitespace"),
-        pytest.param("postgresql://localhost/db", "a" * 1501, True, id="postgres-too-long"),
+        pytest.param("postgresql+psycopg2://localhost/db", "", True, id="postgres-empty"),
+        pytest.param("postgresql+psycopg2://localhost/db", "\n\t", True, id="postgres-whitespace"),
+        pytest.param("postgresql+psycopg2://localhost/db", "a" * 1501, True, id="postgres-too-long"),
         pytest.param(
-            "postgresql://localhost/db", "airflow://xcom/dag/task", True, id="postgres-reserved-scheme"
+            "postgresql+psycopg2://localhost/db",
+            "airflow://xcom/dag/task",
+            True,
+            id="postgres-reserved-scheme",
         ),
-        pytest.param("postgresql://localhost/db", "😊", False, id="postgres-non-ascii"),
+        pytest.param("postgresql+psycopg2://localhost/db", "😊", False, id="postgres-non-ascii"),
     ],
 )
 def test_invalid_uris(sql_conn_value, uri, should_raise, monkeypatch):
@@ -128,7 +131,7 @@ def test_both_name_and_uri():
 
 
 @pytest.mark.parametrize(
-    "uri, normalized",
+    ("uri", "normalized"),
     [
         pytest.param("foobar", "foobar", id="scheme-less"),
         pytest.param("foo:bar", "foo:bar", id="scheme-less-colon"),
@@ -144,17 +147,22 @@ def test_uri_with_scheme(uri: str, normalized: str) -> None:
     assert os.fspath(asset) == normalized
 
 
-def test_uri_with_auth() -> None:
-    with pytest.warns(UserWarning, match="username") as record:
-        asset = Asset("ftp://user@localhost/foo.txt")
+def test_uri_with_password() -> None:
+    with pytest.warns(UserWarning, match="password") as record:
+        asset = Asset("ftp://user:password@localhost/foo.txt")
     assert len(record) == 1
     assert str(record[0].message) == (
-        "An Asset URI should not contain auth info (e.g. username or "
-        "password). It has been automatically dropped."
+        "An Asset URI should not contain a password. User info has been automatically dropped."
     )
     EmptyOperator(task_id="task1", outlets=[asset])
-    assert asset.uri == "ftp://localhost/foo.txt"
-    assert os.fspath(asset) == "ftp://localhost/foo.txt"
+    assert asset.uri == "ftp://localhost:21/foo.txt"
+    assert os.fspath(asset) == "ftp://localhost:21/foo.txt"
+
+
+def test_uri_without_password() -> None:
+    uri = "abfss://filesystem@account.dfs.core.windows.net/path"
+    asset = Asset(uri)
+    assert asset.uri == uri
 
 
 def test_uri_without_scheme():
@@ -187,6 +195,19 @@ def test_not_equal_when_different_uri():
     assert asset1 != asset2
 
 
+def test_hash_for_same_uri():
+    asset1 = Asset(uri="s3://example/asset")
+    asset2 = Asset(uri="s3://example/asset")
+
+    assert hash(asset1) == hash(asset2)
+
+
+def test_hash_for_different_uri():
+    asset1 = Asset(uri="s3://bucket1/data1")
+    asset2 = Asset(uri="s3://bucket2/data2")
+    assert hash(asset1) != hash(asset2)
+
+
 asset1 = Asset(uri="s3://bucket1/data1", name="asset-1")
 asset2 = Asset(uri="s3://bucket2/data2", name="asset-2")
 asset3 = Asset(uri="s3://bucket3/data3", name="asset-3")
@@ -199,27 +220,6 @@ def test_asset_logic_operations():
     assert isinstance(result_or, AssetAny)
     result_and = asset1 & asset2
     assert isinstance(result_and, AssetAll)
-
-
-def test_asset_iter_assets():
-    assert list(asset1.iter_assets()) == [(AssetUniqueKey("asset-1", "s3://bucket1/data1"), asset1)]
-
-
-def test_asset_iter_asset_aliases():
-    base_asset = AssetAll(
-        AssetAlias(name="example-alias-1"),
-        Asset("1"),
-        AssetAny(
-            Asset(name="2", uri="test://asset1"),
-            AssetAlias("example-alias-2"),
-            Asset(name="3"),
-            AssetAll(AssetAlias("example-alias-3"), Asset("4"), AssetAlias("example-alias-4")),
-        ),
-        AssetAll(AssetAlias("example-alias-5"), Asset("5")),
-    )
-    assert list(base_asset.iter_asset_aliases()) == [
-        (f"example-alias-{i}", AssetAlias(f"example-alias-{i}")) for i in range(1, 6)
-    ]
 
 
 def test_asset_any_operations():
@@ -254,14 +254,14 @@ def test_asset_trigger_setup_and_serialization(create_test_assets):
     assert isinstance(dag.timetable.asset_condition, AssetAny), "Dag assets should be an instance of AssetAny"
 
     # Round-trip the Dag through serialization
-    deserialized_dag = SerializedDAG.deserialize_dag(SerializedDAG.serialize_dag(dag))
+    deserialized_dag = create_scheduler_dag(dag)
 
     # Verify serialization and deserialization integrity
-    assert isinstance(deserialized_dag.timetable.asset_condition, AssetAny), (
-        "Deserialized assets should maintain type AssetAny"
-    )
-    assert deserialized_dag.timetable.asset_condition.objects == dag.timetable.asset_condition.objects, (
-        "Deserialized assets should match original"
+    assert deserialized_dag.timetable.asset_condition == SerializedAssetAny(
+        [
+            SerializedAsset(name="hello1", uri="test://asset1/", group="asset", extra={}, watchers=[]),
+            SerializedAsset(name="hello2", uri="test://asset2/", group="asset", extra={}, watchers=[]),
+        ],
     )
 
 
@@ -319,14 +319,14 @@ test_cases = [
 ]
 
 
-@pytest.mark.parametrize("expression, expected", test_cases)
+@pytest.mark.parametrize(("expression", "expected"), test_cases)
 def test_evaluate_assets_expression(expression, expected):
     expr = expression()
     assert assets_equal(expr, expected)
 
 
 @pytest.mark.parametrize(
-    "expression, error",
+    ("expression", "error"),
     [
         pytest.param(
             lambda: asset1 & 1,  # type: ignore[operator]
@@ -413,27 +413,13 @@ def test_normalize_uri_valid_uri(mock_get_normalized_scheme):
 
 
 class TestAssetUniqueKey:
-    def test_from_asset(self):
-        asset = Asset(name="test", uri="test://test/")
-
-        assert AssetUniqueKey.from_asset(asset) == AssetUniqueKey(name="test", uri="test://test/")
-
     def test_to_asset(self):
         assert AssetUniqueKey(name="test", uri="test://test/").to_asset() == Asset(
             name="test", uri="test://test/"
         )
 
-    def test_from_str(self):
-        json_str = json.dumps({"name": "test", "uri": "test://test/"})
-        assert AssetUniqueKey.from_str(json_str) == AssetUniqueKey(name="test", uri="test://test/")
-
-    def test_to_str(self):
-        assert AssetUniqueKey(name="test", uri="test://test/").to_str() == json.dumps(
-            {"name": "test", "uri": "test://test/"}
-        )
-
     @pytest.mark.parametrize(
-        "name, uri, expected_asset_unique_key",
+        ("name", "uri", "expected_asset_unique_key"),
         [
             ("test", None, AssetUniqueKey(name="test", uri="test")),
             (None, "test://test/", AssetUniqueKey(name="test://test/", uri="test://test/")),
@@ -445,28 +431,22 @@ class TestAssetUniqueKey:
         assert AssetUniqueKey.from_profile(profile) == expected_asset_unique_key
 
 
-class TestAssetAlias:
-    def test_as_expression(self):
-        alias = AssetAlias(name="test_name", group="test")
-        assert alias.as_expression() == {"alias": {"name": alias.name, "group": alias.group}}
-
-
 class TestAssetSubclasses:
-    @pytest.mark.parametrize("subcls, group", ((Model, "model"), (Dataset, "dataset")))
+    @pytest.mark.parametrize(("subcls", "group"), ((Model, "model"), (Dataset, "dataset")))
     def test_only_name(self, subcls, group):
         obj = subcls(name="foobar")
         assert obj.name == "foobar"
         assert obj.uri == "foobar"
         assert obj.group == group
 
-    @pytest.mark.parametrize("subcls, group", ((Model, "model"), (Dataset, "dataset")))
+    @pytest.mark.parametrize(("subcls", "group"), ((Model, "model"), (Dataset, "dataset")))
     def test_only_uri(self, subcls, group):
         obj = subcls(uri="s3://bucket/key/path")
         assert obj.name == "s3://bucket/key/path"
         assert obj.uri == "s3://bucket/key/path"
         assert obj.group == group
 
-    @pytest.mark.parametrize("subcls, group", ((Model, "model"), (Dataset, "dataset")))
+    @pytest.mark.parametrize(("subcls", "group"), ((Model, "model"), (Dataset, "dataset")))
     def test_both_name_and_uri(self, subcls, group):
         obj = subcls("foobar", "s3://bucket/key/path")
         assert obj.name == "foobar"
@@ -474,9 +454,29 @@ class TestAssetSubclasses:
         assert obj.group == group
 
     @pytest.mark.parametrize("arg", ["foobar", "s3://bucket/key/path"])
-    @pytest.mark.parametrize("subcls, group", ((Model, "model"), (Dataset, "dataset")))
+    @pytest.mark.parametrize(("subcls", "group"), ((Model, "model"), (Dataset, "dataset")))
     def test_only_posarg(self, subcls, group, arg):
         obj = subcls(arg)
         assert obj.name == arg
         assert obj.uri == arg
         assert obj.group == group
+
+
+class TestAssetAccessControl:
+    def test_sets_access_control_correctly(self):
+        from airflow.sdk.definitions.asset.access_control import AssetAccessControl
+
+        ac = AssetAccessControl(producer_teams=["team_a"], allow_global=False)
+        asset = Asset(name="x", access_control=ac)
+        assert asset.access_control.producer_teams == ["team_a"]
+        assert asset.access_control.allow_global is False
+
+    def test_defaults_to_default_access_control(self):
+        asset = Asset(name="x")
+        assert asset.access_control.producer_teams == []
+        assert asset.access_control.allow_global is True
+
+    def test_explicit_none_uses_default(self):
+        asset = Asset(name="x", access_control=None)
+        assert asset.access_control.producer_teams == []
+        assert asset.access_control.allow_global is True

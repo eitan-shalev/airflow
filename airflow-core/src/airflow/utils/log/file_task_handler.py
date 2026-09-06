@@ -23,7 +23,7 @@ import heapq
 import io
 import logging
 import os
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Generator, Iterator
 from contextlib import suppress
 from datetime import datetime
 from enum import Enum
@@ -51,6 +51,13 @@ if TYPE_CHECKING:
 
     from requests import Response
 
+    from airflow._shared.logging.remote import (
+        LogMessages,
+        LogResponse,
+        LogSourceInfo,
+        RawLogStream,
+        StreamingLogResponse,
+    )
     from airflow.executors.base_executor import BaseExecutor
     from airflow.models.taskinstance import TaskInstance
     from airflow.models.taskinstancehistory import TaskInstanceHistory
@@ -66,18 +73,6 @@ Assuming 50 characters per line, an offset of 10,000,000 can represent approxima
 HEAP_DUMP_SIZE = 5000
 HALF_HEAP_DUMP_SIZE = HEAP_DUMP_SIZE // 2
 
-# These types are similar, but have distinct names to make processing them less error prone
-LogMessages: TypeAlias = list[str]
-"""The legacy format of log messages before 3.0.2"""
-LogSourceInfo: TypeAlias = list[str]
-"""Information _about_ the log fetching process for display to a user"""
-RawLogStream: TypeAlias = Generator[str, None, None]
-"""Raw log stream, containing unparsed log lines."""
-LegacyLogResponse: TypeAlias = tuple[LogSourceInfo, LogMessages]
-"""Legacy log response, containing source information and log messages."""
-LogResponse: TypeAlias = tuple[LogSourceInfo, list[RawLogStream]]
-LogResponseWithSize: TypeAlias = tuple[LogSourceInfo, list[RawLogStream], int]
-"""Log response, containing source information, stream of log lines, and total log size."""
 StructuredLogStream: TypeAlias = Generator["StructuredLogMessage", None, None]
 """Structured log stream, containing structured log messages."""
 LogHandlerOutputStream: TypeAlias = (
@@ -94,6 +89,13 @@ LegacyProvidersLogType: TypeAlias = list["StructuredLogMessage"] | str | list[st
 - For Alibaba Cloud: returns a string.
 - For Redis: returns a list of strings.
 """
+
+_STATES_WITH_COMPLETED_ATTEMPT = frozenset(
+    {
+        TaskInstanceState.UP_FOR_RETRY,
+        TaskInstanceState.UP_FOR_RESCHEDULE,
+    }
+)
 
 
 logger = logging.getLogger(__name__)
@@ -177,7 +179,7 @@ def _fetch_logs_from_service(url: str, log_relative_path: str) -> Response:
         algorithm="HS512",
         # We must set an empty private key here as otherwise it can be automatically loaded by JWTGenerator
         # and secret_key and private_key cannot be set together
-        private_key=None,  #  type: ignore[arg-type]
+        private_key=None,  # type: ignore[arg-type]
         issuer=None,
         valid_for=conf.getint("webserver", "log_request_clock_grace", fallback=30),
         audience="task-instance-logs",
@@ -396,7 +398,7 @@ def _interleave_logs(*log_streams: RawLogStream) -> StructuredLogStream:
 
 def _is_logs_stream_like(log) -> bool:
     """Check if the logs are stream-like."""
-    return isinstance(log, (chain, GeneratorType))
+    return isinstance(log, (chain, islice, GeneratorType))
 
 
 def _get_compatible_log_stream(
@@ -519,18 +521,20 @@ class FileTaskHandler(logging.Handler):
 
     @provide_session
     def _render_filename(
-        self, ti: TaskInstance | TaskInstanceHistory, try_number: int, session=NEW_SESSION
+        self, ti: TaskInstance | TaskInstanceHistory, try_number: int, *, session=NEW_SESSION
     ) -> str:
         """Return the worker log filename."""
         dag_run = ti.get_dagrun(session=session)
 
         date = dag_run.logical_date or dag_run.run_after
-        date = date.isoformat()
+        formatted_date = date.isoformat()
 
         template = dag_run.get_log_template(session=session).filename
         str_tpl, jinja_tpl = parse_template_string(template)
         if jinja_tpl:
-            return render_template(jinja_tpl, {"ti": ti, "ts": date, "try_number": try_number}, native=False)
+            return render_template(
+                jinja_tpl, {"ti": ti, "ts": formatted_date, "try_number": try_number}, native=False
+            )
 
         if str_tpl:
             data_interval = (dag_run.data_interval_start, dag_run.data_interval_end)
@@ -548,32 +552,30 @@ class FileTaskHandler(logging.Handler):
                 run_id=ti.run_id,
                 data_interval_start=data_interval_start,
                 data_interval_end=data_interval_end,
-                logical_date=date,
+                logical_date=formatted_date,
                 try_number=try_number,
             )
         raise RuntimeError(f"Unable to render log filename for {ti}. This should never happen")
 
-    def _get_executor_get_task_log(
-        self, ti: TaskInstance | TaskInstanceHistory
-    ) -> Callable[[TaskInstance | TaskInstanceHistory, int], tuple[list[str], list[str]]]:
+    def _get_executor(self, ti: TaskInstance | TaskInstanceHistory) -> BaseExecutor:
         """
-        Get the get_task_log method from executor of current task instance.
+        Get the executor of current task instance.
 
         Since there might be multiple executors, so we need to get the executor of current task instance instead of getting from default executor.
 
         :param ti: task instance object
-        :return: get_task_log method of the executor
+        :return: executor of the task instance
         """
         executor_name = ti.executor or self.DEFAULT_EXECUTOR_KEY
         executor = self.executor_instances.get(executor_name)
-        if executor is not None:
-            return executor.get_task_log
+        if executor is None:
+            if executor_name == self.DEFAULT_EXECUTOR_KEY:
+                executor = ExecutorLoader.get_default_executor()
+            else:
+                executor = ExecutorLoader.load_executor(executor_name)
+            self.executor_instances[executor_name] = executor
 
-        if executor_name == self.DEFAULT_EXECUTOR_KEY:
-            self.executor_instances[executor_name] = ExecutorLoader.get_default_executor()
-        else:
-            self.executor_instances[executor_name] = ExecutorLoader.load_executor(executor_name)
-        return self.executor_instances[executor_name].get_task_log
+        return executor
 
     def _read(
         self,
@@ -618,7 +620,7 @@ class FileTaskHandler(logging.Handler):
                 # If the logs are in legacy format, convert them to a generator of log lines
                 remote_logs = [
                     # We don't need to use the log_pos here, as we are using the metadata to track the position
-                    _get_compatible_log_stream(cast("list[str]", logs))
+                    _get_compatible_log_stream(logs)
                 ]
             elif isinstance(logs, list) and _is_logs_stream_like(logs[0]):
                 # If the logs are already in a stream-like format, we can use them directly
@@ -628,26 +630,34 @@ class FileTaskHandler(logging.Handler):
                 raise TypeError("Logs should be either a list of strings or a generator of log lines.")
             # Extend LogSourceInfo
             source_list.extend(sources)
-        has_k8s_exec_pod = False
+
+        has_executor_log = False
         if ti.state == TaskInstanceState.RUNNING:
-            executor_get_task_log = self._get_executor_get_task_log(ti)
-            response = executor_get_task_log(ti, try_number)
-            if response:
-                sources, logs = response
+            executor = self._get_executor(ti)
+            try:
+                # check for streaming logs first
+                sources, executor_logs = executor.get_streaming_task_log(ti, try_number)
+            except NotImplementedError:
+                # fallback to non-streaming logs if streaming not supported
+                sources, logs = executor.get_task_log(ti, try_number)
                 # make the logs stream-like compatible
                 executor_logs = [_get_compatible_log_stream(logs)]
+
             if sources:
                 source_list.extend(sources)
-                has_k8s_exec_pod = True
+                has_executor_log = True
+
         if not (remote_logs and ti.state not in State.unfinished):
             # when finished, if we have remote logs, no need to check local
             worker_log_full_path = Path(self.local_base, worker_log_rel_path)
             sources, local_logs = self._read_from_local(worker_log_full_path)
             source_list.extend(sources)
-        if ti.state in (TaskInstanceState.RUNNING, TaskInstanceState.DEFERRED) and not has_k8s_exec_pod:
+        if ti.state in (TaskInstanceState.RUNNING, TaskInstanceState.DEFERRED) and not has_executor_log:
             sources, served_logs = self._read_from_logs_server(ti, worker_log_rel_path)
             source_list.extend(sources)
-        elif ti.state not in State.unfinished and not (local_logs or remote_logs):
+        elif (ti.state not in State.unfinished or ti.state in _STATES_WITH_COMPLETED_ATTEMPT) and not (
+            local_logs or remote_logs
+        ):
             # ordinarily we don't check served logs, with the assumption that users set up
             # remote logging or shared drive for logs for persistence, but that's not always true
             # so even if task is done, if no local logs or remote logs are found, we'll check the worker
@@ -664,7 +674,8 @@ class FileTaskHandler(logging.Handler):
         # Log message source details are grouped: they are not relevant for most users and can
         # distract them from finding the root cause of their errors
         header = [
-            StructuredLogMessage(event="::group::Log message source details", sources=source_list),  # type: ignore[call-arg]
+            StructuredLogMessage(event="::group::Log message source details"),
+            *[StructuredLogMessage(event=source) for source in source_list],
             StructuredLogMessage(event="::endgroup::"),
         ]
         end_of_log = ti.try_number != try_number or ti.state not in (
@@ -678,7 +689,7 @@ class FileTaskHandler(logging.Handler):
 
             # skip log stream until the last position
             if metadata and "log_pos" in metadata:
-                islice(out_stream, metadata["log_pos"])
+                out_stream = islice(out_stream, metadata["log_pos"], None)
             else:
                 # first time reading log, add messages before interleaved log stream
                 out_stream = chain(header, out_stream)
@@ -689,12 +700,12 @@ class FileTaskHandler(logging.Handler):
             }
 
     @staticmethod
-    @staticmethod
     def _get_pod_namespace(ti: TaskInstance | TaskInstanceHistory):
-        pod_override = ti.executor_config.get("pod_override")
+        pod_override = getattr(ti.executor_config, "pod_override", None)
+        metadata = getattr(pod_override, "metadata", None)
         namespace = None
         with suppress(Exception):
-            namespace = pod_override.metadata.namespace
+            namespace = getattr(metadata, "namespace", None)
         return namespace or conf.get("kubernetes_executor", "namespace")
 
     def _get_log_retrieval_url(
@@ -702,12 +713,23 @@ class FileTaskHandler(logging.Handler):
         ti: TaskInstance | TaskInstanceHistory,
         log_relative_path: str,
         log_type: LogType | None = None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str | None, str | None]:
         """Given TI, generate URL with which to fetch logs from service log server."""
         if log_type == LogType.TRIGGER:
             if not ti.triggerer_job:
                 raise RuntimeError("Could not build triggerer log URL; no triggerer job.")
-            config_key = "triggerer_log_server_port"
+            config_key = "trigger_log_server_port"
+            deprecated_config_key = "triggerer_log_server_port"
+            if (
+                conf.get("logging", config_key, fallback=None) is None
+                and conf.get("logging", deprecated_config_key, fallback=None) is not None
+            ):
+                logger.warning(
+                    "The [logging] %s option is deprecated. Please use [logging] %s instead.",
+                    deprecated_config_key,
+                    config_key,
+                )
+                config_key = deprecated_config_key
             config_default = 8794
             hostname = ti.triggerer_job.hostname
             log_relative_path = self.add_triggerer_suffix(log_relative_path, job_id=ti.triggerer_job.id)
@@ -715,6 +737,10 @@ class FileTaskHandler(logging.Handler):
             hostname = ti.hostname
             config_key = "worker_log_server_port"
             config_default = 8793
+
+        if not hostname:
+            return None, None
+
         return (
             urljoin(
                 f"http://{hostname}:{conf.get('logging', config_key, fallback=config_default)}/log/",
@@ -768,11 +794,9 @@ class FileTaskHandler(logging.Handler):
             out_stream = cast("Generator[StructuredLogMessage, None, None]", out_stream)
             return out_stream, metadata
         if isinstance(out_stream, list) and isinstance(out_stream[0], StructuredLogMessage):
-            out_stream = cast("list[StructuredLogMessage]", out_stream)
             return (log for log in out_stream), metadata
         if isinstance(out_stream, list) and isinstance(out_stream[0], str):
             # If the out_stream is a list of strings, convert it to a generator
-            out_stream = cast("list[str]", out_stream)
             raw_stream = _stream_lines_by_chunk(io.StringIO("".join(out_stream)))
             out_stream = (log for _, _, log in _log_stream_to_parsed_log_stream(raw_stream))
             return out_stream, metadata
@@ -846,49 +870,96 @@ class FileTaskHandler(logging.Handler):
             try:
                 os.chmod(full_path, new_file_permissions)
             except OSError as e:
-                logger.warning("OSError while changing ownership of the log file. ", e)
+                logger.warning("OSError while changing ownership of the log file. %s", e)
 
         return full_path
 
-    @staticmethod
     def _read_from_local(
+        self,
         worker_log_path: Path,
-    ) -> LogResponse:
+    ) -> StreamingLogResponse:
         sources: LogSourceInfo = []
         log_streams: list[RawLogStream] = []
+        # The glob below can match symlinks as well as regular files, so
+        # resolve each hit and only open the ones that stay inside the base
+        # log folder. Canonicalising ``self.local_base`` once up front makes
+        # the containment check compare two already-resolved paths.
+        base_log_folder = os.path.realpath(self.local_base)
         paths = sorted(worker_log_path.parent.glob(worker_log_path.name + "*"))
         if not paths:
             return sources, log_streams
 
         for path in paths:
+            resolved_path = os.path.realpath(path)
+            try:
+                if os.path.commonpath([base_log_folder, resolved_path]) != base_log_folder:
+                    continue
+            except ValueError:
+                # ``os.path.commonpath`` raises ``ValueError`` when the two
+                # paths have nothing in common (e.g. different drives on
+                # Windows); treat that as "not contained" and skip the file.
+                continue
+
+            # Open the resolved path so the file we read is the same one we
+            # just validated above. Append to ``sources`` only after a
+            # successful ``open`` so ``sources`` and ``log_streams`` stay
+            # aligned.
+            try:
+                log_stream = _stream_lines_by_chunk(open(resolved_path, encoding="utf-8"))
+            except OSError:
+                continue
             sources.append(os.fspath(path))
-            # Read the log file and yield lines
-            log_streams.append(_stream_lines_by_chunk(open(path, encoding="utf-8")))
+            log_streams.append(log_stream)
         return sources, log_streams
 
     def _read_from_logs_server(
         self,
         ti: TaskInstance | TaskInstanceHistory,
         worker_log_rel_path: str,
-    ) -> LogResponse:
+    ) -> StreamingLogResponse:
         sources: LogSourceInfo = []
         log_streams: list[RawLogStream] = []
         try:
             log_type = LogType.TRIGGER if getattr(ti, "triggerer_job", False) else LogType.WORKER
             url, rel_path = self._get_log_retrieval_url(ti, worker_log_rel_path, log_type=log_type)
+            if not url or not rel_path:
+                sources.append(
+                    f"Could not read served logs: Hostname not available for "
+                    f"{log_type.value}. "
+                    f"Please check your `hostname_callable` configuration."
+                )
+                return sources, log_streams
             response = _fetch_logs_from_service(url, rel_path)
             if response.status_code == 403:
                 sources.append(
                     "!!!! Please make sure that all your Airflow components (e.g. "
-                    "schedulers, webservers, workers and triggerer) have "
-                    "the same 'secret_key' configured in 'webserver' section and "
+                    "schedulers, api-servers, dag-processors, workers and triggerer) have "
+                    "the same 'secret_key' configured in '[api]' section and "
                     "time is synchronized on all your machines (for example with ntpd)\n"
                     "See more at https://airflow.apache.org/docs/apache-airflow/"
                     "stable/configurations-ref.html#secret-key"
                 )
+            elif response.status_code == 404:
+                # Log file not found on the worker's log server.
+                # This typically happens when a task retried on a different worker
+                # and the original worker's logs are no longer accessible.
+                # Fall back to local filesystem read if available.
+                worker_log_full_path = Path(self.local_base, worker_log_rel_path)
+                fallback_sources, fallback_streams = self._read_from_local(worker_log_full_path)
+                if fallback_sources:
+                    sources.extend(fallback_sources)
+                    log_streams.extend(fallback_streams)
+                else:
+                    sources.append(
+                        f"Log file not found on worker '{ti.hostname}'. "
+                        f"This attempt may have run on a different worker whose logs "
+                        f"are no longer accessible. "
+                        f"Consider configuring remote logging (S3, GCS, etc.) for log persistence."
+                    )
             else:
                 # Check if the resource was properly fetched
                 response.raise_for_status()
+
                 if int(response.headers.get("Content-Length", 0)) > 0:
                     sources.append(url)
                     log_streams.append(
@@ -908,7 +979,7 @@ class FileTaskHandler(logging.Handler):
                 logger.exception("Could not read served logs")
         return sources, log_streams
 
-    def _read_remote_logs(self, ti, try_number, metadata=None) -> LegacyLogResponse | LogResponse:
+    def _read_remote_logs(self, ti, try_number, metadata=None) -> LogResponse | StreamingLogResponse:
         """
         Implement in subclasses to read from the remote service.
 
@@ -920,9 +991,9 @@ class FileTaskHandler(logging.Handler):
         """
         remote_io = None
         try:
-            from airflow.logging_config import REMOTE_TASK_LOG
+            from airflow.logging_config import get_remote_task_log
 
-            remote_io = REMOTE_TASK_LOG
+            remote_io = get_remote_task_log()
         except Exception:
             pass
 
@@ -933,5 +1004,10 @@ class FileTaskHandler(logging.Handler):
         # This living here is not really a good plan, but it just about works for now.
         # Ideally we move all the read+combine logic in to TaskLogReader and out of the task handler.
         path = self._render_filename(ti, try_number)
+        if stream_method := getattr(remote_io, "stream", None):
+            # Use .stream interface if provider's RemoteIO supports it
+            sources, logs = stream_method(path, ti)
+            return sources, logs or []
+        # Fallback to .read interface
         sources, logs = remote_io.read(path, ti)
         return sources, logs or []

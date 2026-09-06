@@ -35,14 +35,19 @@ def test_message_sqs_queue_matches():
     from airflow.providers.amazon.aws.queues.sqs import SqsMessageQueueProvider
 
     provider = SqsMessageQueueProvider()
+    # Standard AWS regions
     assert provider.queue_matches("https://sqs.us-east-1.amazonaws.com/123456789012/my-queue")
     assert not provider.queue_matches("https://sqs.us-east-1.amazonaws.com/123456789012")
     assert not provider.queue_matches("https://sqs.us-east-1.amazonaws.com/123456789012/")
     assert not provider.queue_matches("https://sqs.us-east-1.amazonaws.com/")
+    # AWS China regions use the amazonaws.com.cn endpoint suffix
+    assert provider.queue_matches("https://sqs.cn-north-1.amazonaws.com.cn/123456789012/my-queue")
+    assert provider.queue_matches("https://sqs.cn-northwest-1.amazonaws.com.cn/123456789012/my-queue")
+    assert not provider.queue_matches("https://sqs.cn-north-1.amazonaws.com.cn/123456789012")
 
 
 @pytest.mark.parametrize(
-    "scheme, expected_result",
+    ("scheme", "expected_result"),
     [
         pytest.param("sqs", True, id="sqs_scheme"),
         pytest.param("kafka", False, id="kafka_scheme"),

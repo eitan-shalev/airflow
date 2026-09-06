@@ -82,7 +82,7 @@ you can specify ``--postgres-version 13`` to start Postgres 13). The ``--help`` 
 will show you which backends are supported and which versions are available for each backend.
 
 The choice you made for backend and version are ``sticky`` - the last used selection is cached in the
-``.build`` folder and next time you run any of the ``breeze`` commands that use backend the will use the
+``.build`` folder. Next time you run any of the ``breeze`` commands that use backend, it will use the
 last selected backend and version.
 
 .. note::
@@ -132,11 +132,47 @@ You can connect to these ports/databases using:
 
 If you do not use ``start-airflow`` command. You can use ``tmux`` to multiply terminals.
 You may need to create a user prior to running the API server in order to log in.
-This can be done with the following command:
+
+**Authentication and User Management**
+
+The authentication method depends on which auth manager is configured:
+
+**SimpleAuthManager (Default in Airflow 3.x)**
+
+SimpleAuthManager is the default authentication manager and comes pre-configured with test username and passwords for development:
+
+.. code-block::
+
+    * admin:admin     (Admin role)
+    * viewer:viewer   (Viewer role)
+    * user:user       (User role)
+    * op:op           (Operator role)
+
+These users are automatically available when using SimpleAuthManager and require no additional setup.
+
+**FabAuthManager**
+
+When using FabAuthManager, you can create users manually:
 
 .. code-block:: bash
 
     airflow users create --role Admin --username admin --password admin --email admin@example.com --firstname foo --lastname bar
+
+Or use the ``--create-all-roles`` flag with ``start-airflow`` in dev mode to automatically create test users:
+
+.. code-block:: bash
+
+    breeze start-airflow --dev-mode --create-all-roles --auth-manager FabAuthManager
+
+This will create the following test users:
+
+.. code-block::
+
+    * admin:admin         (Admin role)
+    * viewer:viewer       (Viewer role)
+    * user:user           (User role)
+    * op:op               (Op role)
+    * testadmin:testadmin (Admin role)
 
 .. note::
     ``airflow users`` command is only available when `FAB auth manager <https://airflow.apache.org/docs/apache-airflow-providers-fab/stable/auth-manager/index.html>`_ is enabled.
@@ -161,6 +197,7 @@ You can change the used host port numbers by setting appropriate environment var
 * ``MSSQL_HOST_PORT``
 * ``FLOWER_HOST_PORT``
 * ``REDIS_HOST_PORT``
+* ``RABBITMQ_HOST_PORT``
 
 If you set these variables, next time when you enter the environment the new ports should be in effect.
 
@@ -241,6 +278,19 @@ package names and can be used to select more than one package with single filter
 
      breeze build-docs --package-filter apache-airflow-providers-*
 
+Inventory cache handling
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+When building documentation, Sphinx downloads intersphinx inventories to enable cross-references
+between documentation sets. By default, missing third-party inventories (e.g., Pandas, SQLAlchemy)
+produce warnings but do **not** fail the build — third-party servers can be temporarily unavailable.
+If a cached version exists, it will be used with a warning.
+
+Use ``--clean-inventory-cache`` to force a fresh download of all inventories, or
+``--fail-on-missing-third-party-inventories`` to fail the build when any third-party inventory
+is missing (useful for publishing). Note that ``--clean-build`` cleans build artifacts but
+preserves the inventory cache.
+
 Often errors during documentation generation come from the docstrings of auto-api generated classes.
 During the docs building auto-api generated files are stored in the ``generated`` folder. This helps you
 easily identify the location the problems with documentation originated from.
@@ -271,9 +321,20 @@ For example, this following command:
 
 .. code-block:: bash
 
-     prek mypy-airflow
+     prek mypy-airflow-core
 
 will run mypy check for currently staged files inside ``airflow/`` excluding providers.
+.. _breeze-dev:running-prek-in-breeze:
+
+A note on running ``prek`` inside the Breeze container
+-----------------------------------------------------
+
+While ``prek`` (pre-commit) is intended to be run on your host machine, it can
+also be run from within the Breeze shell for debugging or manual checks.
+
+If you choose to do this, you may need to mount all sources by running
+``breeze shell --mount-sources all``.
+
 
 Selecting files to run static checks on
 ---------------------------------------
@@ -288,7 +349,7 @@ re-run latest prek hooks on your changes, but it can take a long time (few minut
 
 .. code-block:: bash
 
-     prek mypy-airflow --all-files
+     prek mypy-airflow-core --all-files
 
 The above will run mypy check for all files.
 
@@ -297,7 +358,7 @@ specifying (can be multiple times) ``--file`` flag.
 
 .. code-block:: bash
 
-     prek mypy-airflow --file airflow/utils/code_utils.py --file airflow/utils/timeout.py
+     prek mypy-airflow-core --file airflow/utils/code_utils.py --file airflow/utils/timeout.py
 
 The above will run mypy check for those to files (note: autocomplete should work for the file selection).
 
@@ -309,7 +370,7 @@ of commits you choose.
 
 .. code-block:: bash
 
-     prek mypy-airflow --last-commit
+     prek mypy-airflow-core --last-commit
 
 The above will run mypy check for all files in the last commit in your branch.
 
@@ -322,9 +383,17 @@ in ``--from-ref`` and ``--to-ref`` flags.
 
 .. note::
 
-    When you run static checks, some of the artifacts (mypy_cache) is stored in docker-compose volume
-    so that it can speed up static checks execution significantly. However, sometimes, the cache might
-    get broken, in which case you should run ``breeze down`` to clean up the cache.
+    When you run static checks, some of the artifacts (mypy_cache) is stored to speed up static
+    checks execution significantly:
+
+    - The providers ``mypy-providers`` hook runs via Breeze and stores its cache in the
+      ``mypy-cache-volume`` docker-compose volume.
+    - Each non-provider ``mypy-*`` hook uses its own dedicated virtualenv and mypy cache under
+      ``.build/mypy-venvs/<hook>/`` and ``.build/mypy-caches/<hook>/``; mypy itself is installed
+      from the workspace ``uv.lock`` via the ``mypy`` dependency group (``uv sync --group mypy``).
+
+    If the cache gets broken, run ``breeze down --cleanup-mypy-cache`` which wipes the docker
+    volume and every per-hook ``.build/mypy-venvs/`` and ``.build/mypy-caches/`` directory.
 
 .. note::
 
@@ -332,22 +401,6 @@ in ``--from-ref`` and ``--to-ref`` flags.
     The ``--python`` flag has no effect for them. They are always run with lowest supported Python version.
     The main reason is to keep consistency in the results of static checks and to make sure that
     our code is fine when running the lowest supported version.
-
-Compiling ui assets
---------------------
-
-Before starting Airflow, Airflow API server needs to prepare www assets - compiled with node and yarn. The ``compile-ui-assets``
-command takes care about it. This is needed when you want to run API server inside of the breeze.
-
-.. image:: ./images/output_compile-ui-assets.svg
-  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_compile-ui-assets.svg
-  :width: 100%
-  :alt: Breeze compile-ui-assets
-
-Note
-
-This command requires the ``prek`` tool, which should be installed by following `this guide <../../../contributing-docs/03b_contributors_quick_start_seasoned_developers.rst#configuring-prek>`__.
-
 
 Starting Airflow
 ----------------
@@ -632,14 +685,34 @@ Make sure to substitute the port numbers if you have customized them via the abo
 Stopping the environment
 ------------------------
 
-After starting up, the environment runs in the background and takes quite some memory which you might
-want to free for other things you are running on your host.
+After starting up, the environment takes quite some memory which you might want to free for other things
+you are running on your host.
 
-You can always stop it via:
+If you used ``breeze start-airflow``, first exit its terminal multiplexer so that the foreground
+container releases its forwarded ports:
+
+* With mprocs (the default), press ``q`` in the mprocs interface.
+* With tmux, run ``stop_airflow`` from its main shell pane.
+
+After returning to the host shell, stop the remaining Docker Compose services:
 
 .. code-block:: bash
 
    breeze down
+
+``breeze down`` discovers every running docker compose project that breeze knows
+about — ``breeze shell``, ``breeze testing``, ``breeze build-docs``, ``breeze db``,
+release-management, registry, ``breeze run``, and prek-hook compose projects — by
+reading the ``com.docker.compose.project`` label that compose sets on every container
+it creates. Each matching project is brought down with ``--remove-orphans`` and
+``--volumes`` (unless ``--preserve-volumes`` is passed). A running
+``breeze start-airflow`` container must exit first; otherwise it continues to use
+the project's forwarded ports, network, and volumes.
+
+If you have an unrelated docker compose project running on the host that does not
+match any breeze prefix, it is left alone by default. Pass ``--all-projects`` to
+also bring those down. To restrict the cleanup to a single named project (useful
+in CI steps), pass ``--project-name <name>``.
 
 These are all available flags of ``down`` command:
 

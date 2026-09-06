@@ -23,21 +23,22 @@ import signal
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import sleep
-from typing import TYPE_CHECKING
 from unittest import mock
 
 import pytest
 
-from airflow.exceptions import AirflowException, AirflowSkipException, AirflowTaskTimeout
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowSkipException,
+    AirflowTaskTimeout,
+    timezone,
+)
+from airflow.providers.standard.hooks.subprocess import SubprocessResult
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.utils import timezone
 from airflow.utils.state import State
 from airflow.utils.types import DagRunType
 
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
-
-if TYPE_CHECKING:
-    from airflow.models import TaskInstance
 
 DEFAULT_DATE = datetime(2016, 1, 1, tzinfo=timezone.utc)
 END_DATE = datetime(2016, 1, 2, tzinfo=timezone.utc)
@@ -63,7 +64,7 @@ class TestBashOperator:
 
     @pytest.mark.db_test
     @pytest.mark.parametrize(
-        "append_env,user_defined_env,expected_airflow_home",
+        ("append_env", "user_defined_env", "expected_airflow_home"),
         [
             (False, None, "MY_PATH_TO_AIRFLOW_HOME"),
             (True, {"AIRFLOW_HOME": "OVERRIDDEN_AIRFLOW_HOME"}, "OVERRIDDEN_AIRFLOW_HOME"),
@@ -122,7 +123,7 @@ class TestBashOperator:
         assert expected == tmp_file.read_text()
 
     @pytest.mark.parametrize(
-        "val,expected",
+        ("val", "expected"),
         [
             ("test-val", "test-val"),
             ("test-val\ntest-val\n", ""),
@@ -194,7 +195,7 @@ class TestBashOperator:
         assert (test_cwd_path / "outputs.txt").read_text().splitlines()[0] == "xxxx"
 
     @pytest.mark.parametrize(
-        "extra_kwargs,actual_exit_code,expected_exc",
+        ("extra_kwargs", "actual_exit_code", "expected_exc"),
         [
             ({}, 0, None),
             ({}, 100, AirflowException),
@@ -264,7 +265,7 @@ class TestBashOperator:
                 pytest.fail("BashOperator's subprocess still running after stopping on timeout!")
 
     @pytest.mark.db_test
-    def test_templated_fields(self, create_task_instance_of_operator):
+    def test_templated_fields(self, dag_maker, create_task_instance_of_operator):
         ti = create_task_instance_of_operator(
             BashOperator,
             # Templated fields
@@ -275,13 +276,35 @@ class TestBashOperator:
             dag_id="test_templated_fields_dag",
             task_id="test_templated_fields_task",
         )
-        ti.render_templates()
-        task: BashOperator = ti.task
+        context = {
+            "dag": dag_maker.dag,
+            "dag_run": ti.dag_run,
+            "ds": "~whatever~",
+            "task": dag_maker.dag.get_task(ti.task_id),
+            "ti": ti,
+        }
+        task = ti.render_templates(context=context)
         assert task.bash_command == 'echo "test_templated_fields_dag"'
         assert task.cwd == Path(__file__).absolute().parent.as_posix()
 
+    @mock.patch.object(BashOperator, "_run_inline_command")
+    @mock.patch.object(
+        BashOperator, "_run_rendered_script_file", return_value=SubprocessResult(exit_code=0, output="ok")
+    )
+    def test_execute_detects_script_after_bash_command_is_rendered(
+        self, mock_run_rendered_script_file, mock_run_inline_command, context
+    ):
+        op = BashOperator(task_id="abc", bash_command="{{ bash_script }}")
+        op.bash_command = "sample.sh"
+
+        result = op.execute(context)
+
+        assert result == "ok"
+        mock_run_rendered_script_file.assert_called_once()
+        mock_run_inline_command.assert_not_called()
+
     @pytest.mark.db_test
-    def test_templated_bash_script(self, dag_maker, tmp_path, session):
+    def test_templated_bash_script(self, dag_maker, create_task_instance_of_operator, tmp_path, session):
         """
         Creates a .sh script with Jinja template.
         Pass it to the BashOperator and ensure it gets correctly rendered and executed.
@@ -290,16 +313,14 @@ class TestBashOperator:
         path: Path = tmp_path / bash_script
         path.write_text('echo "{{ ti.task_id }}"')
 
-        with dag_maker(
-            dag_id="test_templated_bash_script", session=session, template_searchpath=os.fspath(path.parent)
-        ):
-            BashOperator(task_id="test_templated_fields_task", bash_command=bash_script)
-        ti: TaskInstance = dag_maker.create_dagrun().task_instances[0]
-        session.add(ti)
-        session.commit()
-        context = ti.get_template_context(session=session)
-        ti.render_templates(context=context)
-
-        task: BashOperator = ti.task
+        ti = create_task_instance_of_operator(
+            BashOperator,
+            dag_id="test_templated_bash_script",
+            template_searchpath=os.fspath(path.parent),
+            task_id="test_templated_fields_task",
+            bash_command=bash_script,
+        )
+        context = {"dag": dag_maker.dag, "ti": ti}
+        task = ti.render_templates(context=context)
         result = task.execute(context=context)
         assert result == "test_templated_fields_task"

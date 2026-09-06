@@ -25,11 +25,12 @@ def get_provider_info():
     return {
         "package-name": "apache-airflow-providers-oracle",
         "name": "Oracle",
-        "description": "`Oracle <https://www.oracle.com/en/database/>`__\n",
+        "description": "`Oracle <https://www.oracle.com/database/technologies/>`__\n",
         "integrations": [
             {
                 "integration-name": "Oracle",
                 "external-doc-url": "https://www.oracle.com/en/database/",
+                "how-to-guide": ["/docs/apache-airflow-providers-oracle/operators.rst"],
                 "logo": "/docs/integration-logos/Oracle.png",
                 "tags": ["software"],
             }
@@ -37,8 +38,30 @@ def get_provider_info():
         "operators": [
             {"integration-name": "Oracle", "python-modules": ["airflow.providers.oracle.operators.oracle"]}
         ],
+        "asset-uris": [
+            {
+                "schemes": ["oracle"],
+                "handler": "airflow.providers.oracle.assets.oracle.sanitize_uri",
+                "factory": "airflow.providers.oracle.assets.oracle.create_asset",
+                "to_openlineage_converter": "airflow.providers.oracle.assets.oracle.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["oracle"],
+                "handler": "airflow.providers.oracle.assets.oracle.sanitize_uri",
+                "factory": "airflow.providers.oracle.assets.oracle.create_asset",
+                "to_openlineage_converter": "airflow.providers.oracle.assets.oracle.convert_asset_to_openlineage",
+            }
+        ],
         "hooks": [
-            {"integration-name": "Oracle", "python-modules": ["airflow.providers.oracle.hooks.oracle"]}
+            {
+                "integration-name": "Oracle",
+                "python-modules": [
+                    "airflow.providers.oracle.hooks.handlers",
+                    "airflow.providers.oracle.hooks.oracle",
+                ],
+            }
         ],
         "transfers": [
             {
@@ -50,6 +73,7 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.oracle.hooks.oracle.OracleHook",
+                "hook-name": "Oracle",
                 "connection-type": "oracle",
             }
         ],

@@ -22,23 +22,29 @@ from contextlib import ExitStack, contextmanager
 from json import JSONDecodeError
 from typing import Any
 from unittest import mock
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from aiohttp import ClientSession
+from azure.core import AsyncPipelineClient
+from azure.core.credentials_async import AsyncTokenCredential
+from azure.core.pipeline.transport._aiohttp import AioHttpTransport
+from azure.identity.aio._internal import AadClient
 from httpx import Headers, Response
+from kiota_abstractions.authentication import AuthenticationProvider, BaseBearerTokenAuthenticationProvider
+from kiota_authentication_azure.azure_identity_access_token_provider import AzureIdentityAccessTokenProvider
 from kiota_http.httpx_request_adapter import HttpxRequestAdapter
 from msgraph_core import APIVersion
 
+from airflow.providers.common.compat.sdk import BaseHook
 from airflow.providers.microsoft.azure.utils import (
     AzureIdentityCredentialAdapter,
     add_managed_identity_connection_widgets,
     get_async_default_azure_credential,
     get_field,
-    # _get_default_azure_credential
     get_sync_default_azure_credential,
     parse_blob_account_url,
 )
-from airflow.providers.microsoft.azure.version_compat import BaseHook
 
 MODULE = "airflow.providers.microsoft.azure.utils"
 
@@ -55,7 +61,7 @@ def test_get_field_warns_on_dupe():
 
 
 @pytest.mark.parametrize(
-    "input, expected",
+    ("input", "expected"),
     [
         (dict(this_param="non-prefixed"), "non-prefixed"),
         (dict(this_param=None), None),
@@ -81,7 +87,8 @@ def test_get_field_non_prefixed(input, expected):
 
 def test_add_managed_identity_connection_widgets():
     pytest.importorskip("airflow.providers.fab")
-    pytest.importorskip("flask_appbuilder")  # Remove after upgrading to FAB5
+    # TODO: remove this because fab5 is available now, but it requires recursively fixing tests
+    pytest.importorskip("flask_appbuilder")
 
     class FakeHook:
         @classmethod
@@ -146,7 +153,7 @@ class TestAzureIdentityCredentialAdapter:
 
 
 @pytest.mark.parametrize(
-    "host, login, expected_url",
+    ("host", "login", "expected_url"),
     [
         (None, None, "https://None.blob.core.windows.net/"),  # to maintain existing behaviour
         (None, "storage_account", "https://storage_account.blob.core.windows.net/"),
@@ -268,3 +275,27 @@ def patch_hook_and_request_adapter(response):
                 mock_get_http_response.return_value = response
 
             yield [*hook_mocks, mock_get_http_response]
+
+
+def mock_token_credentials(closed: bool | None = None):
+    _has_been_opened = False if closed is None else not closed
+    transport = Mock(spec=AioHttpTransport, _has_been_opened=_has_been_opened)
+    transport.session = None if closed is None else Mock(spec=ClientSession, closed=closed)
+    pipeline = Mock(spec=AsyncPipelineClient)
+    pipeline._transport = transport
+    client = Mock(spec=AadClient)
+    client._pipeline = pipeline
+    credentials = Mock(spec=AsyncTokenCredential)
+    credentials._client = client
+    credentials.get_token_info = AsyncMock()
+    return credentials
+
+
+def mock_authentication_provider(closed: bool | None = None) -> AuthenticationProvider:
+    from airflow.providers.microsoft.azure.hooks.msgraph import CachedAsyncTokenCredential
+
+    access_token_provider = Mock(spec=AzureIdentityAccessTokenProvider)
+    access_token_provider._credentials = CachedAsyncTokenCredential(
+        credential=mock_token_credentials(closed=closed)
+    )
+    return BaseBearerTokenAuthenticationProvider(access_token_provider=access_token_provider)

@@ -18,12 +18,15 @@
  */
 import { chakra, Code, Link } from "@chakra-ui/react";
 import type { TFunction } from "i18next";
+import type { JSX, ReactNode } from "react";
+import { Fragment } from "react";
 import { Link as RouterLink } from "react-router-dom";
 
-import type { StructuredLogMessage } from "openapi/requests/types.gen";
+import type { StructuredLogMessage, TaskInstancesLogResponse } from "openapi/requests/types.gen";
+import AnsiRenderer from "src/components/AnsiRenderer";
 import Time from "src/components/Time";
 import { urlRegex } from "src/constants/urlRegex";
-import { LogLevel, logLevelColorMapping } from "src/utils/logs";
+import { isUserCodeFrame, LogLevel, logLevelColorMapping } from "src/utils/logs";
 
 type Frame = {
   filename: string;
@@ -45,34 +48,41 @@ type RenderStructuredLogProps = {
   logLevelFilters?: Array<string>;
   logLink: string;
   logMessage: string | StructuredLogMessage;
+  renderingMode?: "jsx" | "text";
   showSource?: boolean;
   showTimestamp?: boolean;
   sourceFilters?: Array<string>;
   translate: TFunction;
 };
 
-const addLinks = (line: string) => {
-  const matches = [...line.matchAll(urlRegex)];
-  let currentIndex = 0;
-  const elements: Array<JSX.Element | string> = [];
+const addAnsiWithLinks = (line: string) => {
+  const urlMatches = [...line.matchAll(urlRegex)];
 
-  if (!matches.length) {
-    return line;
+  if (!urlMatches.length) {
+    return <AnsiRenderer linkify={false}>{line}</AnsiRenderer>;
   }
 
-  matches.forEach((match) => {
-    const startIndex = match.index;
+  let currentIndex = 0;
+  const elements: Array<ReactNode> = [];
 
-    // Add text before the URL
+  urlMatches.forEach((match) => {
+    const { index: startIndex } = match;
+
     if (startIndex > currentIndex) {
-      elements.push(line.slice(currentIndex, startIndex));
+      const textBeforeUrl = line.slice(currentIndex, startIndex);
+
+      elements.push(
+        <AnsiRenderer key={`ansi-before-${textBeforeUrl}`} linkify={false}>
+          {textBeforeUrl}
+        </AnsiRenderer>,
+      );
     }
 
     elements.push(
       <Link
         color="fg.info"
         href={match[0]}
-        key={match[0]}
+        key={`link-${match[0]}-${startIndex}`}
         rel="noopener noreferrer"
         target="_blank"
         textDecoration="underline"
@@ -84,9 +94,14 @@ const addLinks = (line: string) => {
     currentIndex = startIndex + match[0].length;
   });
 
-  // Add remaining text after the last URL
   if (currentIndex < line.length) {
-    elements.push(line.slice(currentIndex));
+    const textAfterUrl = line.slice(currentIndex);
+
+    elements.push(
+      <AnsiRenderer key="ansi-after" linkify={false}>
+        {textAfterUrl}
+      </AnsiRenderer>,
+    );
   }
 
   return elements;
@@ -94,20 +109,88 @@ const addLinks = (line: string) => {
 
 const sourceFields = ["logger", "chan", "lineno", "filename", "loc"];
 
-export const renderStructuredLog = ({
+// Fields bound once per task-instance process via bind_contextvars — identical on every log line,
+// so we strip them from per-line rendering and show them once as a preamble instead.
+export const tiContextFields = ["ti_id", "dag_id", "task_id", "run_id", "try_number", "map_index"];
+
+export const renderTIContextPreamble = (
+  context: Record<string, unknown>,
+  renderingMode: "jsx" | "text" = "jsx",
+  label?: string,
+): JSX.Element | string => {
+  const fields = tiContextFields.filter((field) => field in context);
+
+  if (renderingMode === "text") {
+    const prefix = label === undefined ? "" : `${label} `;
+
+    return prefix + fields.map((field) => `${field}=${String(context[field])}`).join(" ");
+  }
+
+  return (
+    <chakra.span lineHeight={1.5} opacity={0.7}>
+      {label === undefined ? undefined : <chakra.span fontWeight="medium">{label}</chakra.span>}
+      {fields.map((field) => (
+        <Fragment key={field}>
+          {" "}
+          <span>
+            <chakra.span color="fg.info">{field}</chakra.span>={String(context[field])}
+          </span>
+        </Fragment>
+      ))}
+    </chakra.span>
+  );
+};
+
+const extractFromStructuredDatum = (
+  line: string | StructuredLogMessage,
+): Record<string, unknown> | undefined => {
+  if (typeof line === "string") {
+    return undefined;
+  }
+  const ctx: Record<string, unknown> = {};
+
+  for (const field of tiContextFields) {
+    if (Object.hasOwn(line, field) && line[field] !== undefined) {
+      ctx[field] = line[field];
+    }
+  }
+
+  return Object.keys(ctx).length > 0 ? ctx : undefined;
+};
+
+export const extractTIContext = (
+  data: TaskInstancesLogResponse["content"],
+): Record<string, unknown> | undefined => {
+  for (const datum of data) {
+    const ctx = extractFromStructuredDatum(datum);
+
+    if (ctx !== undefined) {
+      return ctx;
+    }
+  }
+
+  return undefined;
+};
+
+const renderStructuredLogImpl = ({
   index,
   logLevelFilters,
   logLink,
   logMessage,
+  renderingMode = "jsx",
   showSource = true,
   showTimestamp = true,
   sourceFilters,
   translate,
-}: RenderStructuredLogProps) => {
+}: RenderStructuredLogProps): JSX.Element | string => {
   if (typeof logMessage === "string") {
+    if (renderingMode === "text") {
+      return logMessage;
+    }
+
     return (
       <chakra.span key={index} lineHeight={1.5}>
-        {addLinks(logMessage)}
+        {addAnsiWithLinks(logMessage)}
       </chakra.span>
     );
   }
@@ -134,22 +217,32 @@ export const renderStructuredLog = ({
   }
 
   if (Boolean(timestamp) && showTimestamp) {
-    elements.push("[", <Time datetime={timestamp} key={0} />, "] ");
+    if (renderingMode === "text") {
+      elements.push(`[${timestamp}] `);
+    } else {
+      elements.push("[", <Time datetime={timestamp} key={0} />, "] ");
+    }
   }
 
   if (typeof level === "string") {
-    elements.push(
-      <Code
-        colorPalette={level.toUpperCase() in LogLevel ? logLevelColorMapping[level as LogLevel] : undefined}
-        key={1}
-        lineHeight={1.5}
-        minH={0}
-        px={0}
-      >
-        {level.toUpperCase()}
-      </Code>,
-      " - ",
-    );
+    const formattedLevel = level.toUpperCase();
+
+    if (renderingMode === "text") {
+      elements.push(`${formattedLevel} - `);
+    } else {
+      elements.push(
+        <Code
+          colorPalette={level.toUpperCase() in LogLevel ? logLevelColorMapping[level as LogLevel] : undefined}
+          key={1}
+          lineHeight={1.5}
+          minH={0}
+          px={0}
+        >
+          {formattedLevel}
+        </Code>,
+        " - ",
+      );
+    }
   }
 
   const { error_detail: errorDetail, ...reStructured } = structured;
@@ -157,13 +250,33 @@ export const renderStructuredLog = ({
 
   if (errorDetail !== undefined) {
     details = (errorDetail as Array<ErrorDetail>).map((error) => {
-      const errorLines = error.frames.map((frame) => (
-        <chakra.p key={`frame-${frame.name}-${frame.filename}-${frame.lineno}`}>
-          {translate("components:logs.file")}{" "}
-          <chakra.span color="fg.info">{JSON.stringify(frame.filename)}</chakra.span>,{" "}
-          {translate("components:logs.location", { line: frame.lineno, name: frame.name })}
-        </chakra.p>
-      ));
+      const errorLines = error.frames.map((frame) => {
+        if (renderingMode === "text") {
+          return `    ${translate("components:logs.file")} ${frame.filename}, ${translate("components:logs.location", { line: frame.lineno, name: frame.name })}\n`;
+        }
+
+        // Highlight user-code frames (DAG bundle, plugins, local files) in the info blue,
+        // and leave installed-package frames in the normal text color, so the frame the
+        // error actually came from stands out from the framework frames around it.
+        const userCode = isUserCodeFrame(frame.filename);
+
+        return (
+          <chakra.p key={`frame-${frame.name}-${frame.filename}-${frame.lineno}`}>
+            {translate("components:logs.file")}{" "}
+            <chakra.span
+              color={userCode ? "fg.info" : undefined}
+              data-frame-source={userCode ? "user" : "library"}
+            >
+              {JSON.stringify(frame.filename)}
+            </chakra.span>
+            , {translate("components:logs.location", { line: frame.lineno, name: frame.name })}
+          </chakra.p>
+        );
+      });
+
+      if (renderingMode === "text") {
+        return `${error.exc_type}: ${error.exc_value}\n${(errorLines as Array<string>).join("")}`;
+      }
 
       return (
         <chakra.details key={error.exc_type} ms="20em" open={true}>
@@ -179,9 +292,13 @@ export const renderStructuredLog = ({
   }
 
   elements.push(
-    <chakra.span className="event" key={2} whiteSpace="pre-wrap">
-      {addLinks(event)}
-    </chakra.span>,
+    renderingMode === "text" ? (
+      event
+    ) : (
+      <chakra.span className="event" key={2} whiteSpace="pre-wrap">
+        {addAnsiWithLinks(event)}
+      </chakra.span>
+    ),
   );
 
   if (Object.hasOwn(reStructured, "filename") && Object.hasOwn(reStructured, "lineno")) {
@@ -196,35 +313,46 @@ export const renderStructuredLog = ({
       if (!showSource && sourceFields.includes(key)) {
         continue; // eslint-disable-line no-continue
       }
+      if (tiContextFields.includes(key)) {
+        continue; // eslint-disable-line no-continue
+      }
       const val = reStructured[key] as boolean | number | object | string | null;
 
-      elements.push(
-        " ",
-        <span data-key={key}>
-          <chakra.span color="fg.info" key={`prop_${key}`}>
-            {key === "logger" ? "source" : key}
-          </chakra.span>
-          =
-          <span data-value>
-            {
-              // Let strings, ints, etc through as is, but JSON stringify anything more complex
-              val instanceof Object ? JSON.stringify(val) : val
-            }
-          </span>
-        </span>,
-      );
+      // Let strings, ints, etc through as is, but JSON stringify anything more complex
+      const stringifiedValue = val instanceof Object ? JSON.stringify(val) : val;
+
+      if (renderingMode === "text") {
+        elements.push(` ${key === "logger" ? "source" : key}=${stringifiedValue} `);
+      } else {
+        elements.push(
+          <Fragment key={`space_${key}`}> </Fragment>,
+          <span data-key={key} key={`struct_${key}`}>
+            <chakra.span color="fg.info">{key === "logger" ? "source" : key}</chakra.span>=
+            <span data-value>{stringifiedValue}</span>
+          </span>,
+        );
+      }
     }
   }
 
   elements.push(
-    <chakra.span className="event" key={3} whiteSpace="pre-wrap">
-      {details}
-    </chakra.span>,
+    renderingMode === "text" ? (
+      details
+    ) : (
+      <chakra.span className="event" key={3} whiteSpace="pre-wrap">
+        {details}
+      </chakra.span>
+    ),
   );
 
+  if (renderingMode === "text") {
+    return (elements as Array<string>).join("");
+  }
+
   return (
-    <chakra.div display="flex" key={index} lineHeight={1.5}>
+    <chakra.div alignItems="flex-start" display="flex" key={index} lineHeight={1.5}>
       <RouterLink
+        data-copy-exclude
         id={index.toString()}
         key={`line_${index}`}
         style={{
@@ -247,3 +375,12 @@ export const renderStructuredLog = ({
     </chakra.div>
   );
 };
+
+// Overloads for renderStructuredLog function for stick type safety
+type RenderStructuredLogOverloads = {
+  (props: { renderingMode: "jsx" } & Omit<RenderStructuredLogProps, "renderingMode">): JSX.Element | "";
+  (props: { renderingMode: "text" } & Omit<RenderStructuredLogProps, "renderingMode">): string;
+};
+
+export const renderStructuredLog: RenderStructuredLogOverloads =
+  renderStructuredLogImpl as unknown as RenderStructuredLogOverloads;

@@ -16,6 +16,7 @@
 # under the License.
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -25,19 +26,23 @@ from jwt import InvalidTokenError
 from airflow.api_fastapi.auth.managers.base_auth_manager import BaseAuthManager, T
 from airflow.api_fastapi.auth.managers.models.base_user import BaseUser
 from airflow.api_fastapi.auth.managers.models.resource_details import (
-    BackfillDetails,
+    AccessView,
     ConnectionDetails,
     DagDetails,
     PoolDetails,
+    TeamDetails,
     VariableDetails,
 )
 from airflow.api_fastapi.auth.tokens import JWTGenerator, JWTValidator
 from airflow.api_fastapi.common.types import MenuItem
+from airflow.exceptions import RemovedInAirflow4Warning
+from airflow.models.team import Team
+
+from tests_common.test_utils.config import conf_vars
 
 if TYPE_CHECKING:
     from airflow.api_fastapi.auth.managers.base_auth_manager import ResourceMethod
     from airflow.api_fastapi.auth.managers.models.resource_details import (
-        AccessView,
         AssetAliasDetails,
         AssetDetails,
         ConfigurationDetails,
@@ -91,15 +96,6 @@ class EmptyAuthManager(BaseAuthManager[BaseAuthManagerUserTest]):
     ) -> bool:
         raise NotImplementedError()
 
-    def is_authorized_backfill(
-        self,
-        *,
-        method: ResourceMethod,
-        details: BackfillDetails | None = None,
-        user: BaseAuthManagerUserTest | None = None,
-    ) -> bool:
-        raise NotImplementedError()
-
     def is_authorized_asset(
         self,
         *,
@@ -137,7 +133,11 @@ class EmptyAuthManager(BaseAuthManager[BaseAuthManagerUserTest]):
         raise NotImplementedError()
 
     def is_authorized_view(
-        self, *, access_view: AccessView, user: BaseAuthManagerUserTest | None = None
+        self,
+        *,
+        access_view: AccessView,
+        user: BaseAuthManagerUserTest | None = None,
+        team_name: str | None = None,
     ) -> bool:
         raise NotImplementedError()
 
@@ -159,11 +159,112 @@ def auth_manager():
 
 
 class TestBaseAuthManager:
+    def test_init_non_multi_team_mode(self, auth_manager):
+        assert auth_manager.init() is None
+
+    @patch.object(EmptyAuthManager, "is_authorized_view")
+    def test_authorize_view_passes_team_name_to_team_aware_manager(
+        self, mock_is_authorized_view, auth_manager
+    ):
+        mock_is_authorized_view.return_value = True
+
+        result = auth_manager.authorize_view(access_view=AccessView.DOCS, user=None, team_name="team_a")
+
+        assert result is True
+        mock_is_authorized_view.assert_called_once_with(
+            access_view=AccessView.DOCS, user=None, team_name="team_a"
+        )
+
+    def test_authorize_view_drops_team_name_and_warns_for_legacy_manager(self):
+        # A manager whose is_authorized_view predates team_name (out-of-tree, or a provider
+        # released before the argument existed) must keep working: authorize_view falls back
+        # to a global check and warns that some views are not team-restricted.
+        class LegacyAuthManager(EmptyAuthManager):
+            def is_authorized_view(self, *, access_view, user=None):  # old signature, no team_name
+                return True
+
+        manager = LegacyAuthManager()
+
+        with pytest.warns(RemovedInAirflow4Warning, match="not team-aware"):
+            result = manager.authorize_view(access_view=AccessView.DOCS, user=None, team_name="team_a")
+
+        assert result is True
+
+    def test_authorize_view_denies_a_view_the_manager_cannot_map(self):
+        # AccessView members are added by core, but auth managers ship as separately
+        # released providers, so a core newer than the installed manager can name a view
+        # the manager has never heard of. Managers that translate the enum through a lookup
+        # table raise KeyError on such a member, which would surface as a 500 on the
+        # endpoint. authorize_view denies instead -- the endpoint keeps working and the
+        # records these views gate stay closed.
+        class LookupTableAuthManager(EmptyAuthManager):
+            def is_authorized_view(self, *, access_view, user=None, team_name=None):
+                return {AccessView.WEBSITE: True}[access_view]
+
+        manager = LookupTableAuthManager()
+
+        with pytest.warns(UserWarning, match="cannot map the 'DOCS' view"):
+            result = manager.authorize_view(access_view=AccessView.DOCS, user=None)
+
+        assert result is False
+        # A view the manager does map is unaffected.
+        assert manager.authorize_view(access_view=AccessView.WEBSITE, user=None) is True
+
+    def test_authorize_view_treats_kwargs_override_as_team_aware(self):
+        class KwargsAuthManager(EmptyAuthManager):
+            def is_authorized_view(self, *, access_view, user=None, **kwargs):
+                return kwargs.get("team_name") == "team_a"
+
+        manager = KwargsAuthManager()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # a warning here would fail the test
+            result = manager.authorize_view(access_view=AccessView.DOCS, user=None, team_name="team_a")
+
+        assert result is True
+
+    @conf_vars({("core", "multi_team"): "True"})
+    @pytest.mark.parametrize(
+        ("auth_manager_teams", "db_teams", "expected"),
+        [
+            pytest.param({"teamA", "teamB"}, {"teamA", "teamB"}, "same", id="same teams"),
+            pytest.param({"teamA", "teamB"}, {"teamA", "teamB", "teamC"}, "extra_db", id="extra teams db"),
+            pytest.param(set(), set(), "same", id="no teams"),
+            pytest.param({"teamA", "teamB"}, {"teamA"}, "extra_auth", id="extra teams auth"),
+            pytest.param({"teamA", "teamB"}, {"teamA", "teamC"}, "extra_both", id="extra teams both"),
+        ],
+    )
+    @patch.object(Team, "get_all_team_names")
+    @patch.object(EmptyAuthManager, "_get_teams")
+    def test_init_multi_team_mode(
+        self, mock_get_teams, mock_get_all_team_names, auth_manager_teams, db_teams, expected, auth_manager
+    ):
+        mock_get_teams.return_value = auth_manager_teams
+        mock_get_all_team_names.return_value = db_teams
+
+        if expected == "same":
+            assert auth_manager.init() is None
+        elif expected == "extra_auth":
+            with pytest.warns(UserWarning, match="Teams defined in the auth manager"):
+                auth_manager.init()
+        elif expected == "extra_db":
+            with pytest.warns(UserWarning, match="Teams defined in the database"):
+                auth_manager.init()
+        else:
+            with (
+                pytest.warns(UserWarning, match="Teams defined in the database"),
+                pytest.warns(UserWarning, match="Teams defined in the auth manager"),
+            ):
+                auth_manager.init()
+
     def test_get_cli_commands_return_empty_list(self, auth_manager):
         assert auth_manager.get_cli_commands() == []
 
     def test_get_fastapi_app_return_none(self, auth_manager):
         assert auth_manager.get_fastapi_app() is None
+
+    def test_refresh_user_default_returns_none(self, auth_manager):
+        assert auth_manager.refresh_user(user=BaseAuthManagerUserTest(name="test")) is None
 
     def test_get_url_logout_return_none(self, auth_manager):
         assert auth_manager.get_url_logout() is None
@@ -173,6 +274,12 @@ class TestBaseAuthManager:
 
     def test_get_db_manager_return_none(self, auth_manager):
         assert auth_manager.get_db_manager() is None
+
+    def test_is_authorized_team(self, auth_manager):
+        with pytest.raises(
+            NotImplementedError, match="The auth manager you are using is not compatible with multi-team"
+        ):
+            auth_manager.is_authorized_team(method="GET", user=BaseAuthManagerUserTest(name="test"))
 
     @patch.object(EmptyAuthManager, "filter_authorized_menu_items")
     def test_get_authorized_menu_items(self, mock_filter_authorized_menu_items, auth_manager):
@@ -204,6 +311,29 @@ class TestBaseAuthManager:
         assert result == user
 
     @patch(
+        "airflow.models.revoked_token.RevokedToken.is_revoked",
+        return_value=True,
+    )
+    @patch(
+        "airflow.api_fastapi.auth.managers.base_auth_manager.BaseAuthManager._get_token_validator",
+        autospec=True,
+    )
+    @pytest.mark.asyncio
+    async def test_get_user_from_token_revoked(
+        self, mock__get_token_validator, mock_is_revoked, auth_manager
+    ):
+        token = "token"
+        payload = {"jti": "some-jti"}
+        signer = AsyncMock(spec=JWTValidator)
+        signer.avalidated_claims.return_value = payload
+        mock__get_token_validator.return_value = signer
+
+        with pytest.raises(InvalidTokenError, match="Token has been revoked"):
+            await auth_manager.get_user_from_token(token)
+
+        mock_is_revoked.assert_called_once_with("some-jti")
+
+    @patch(
         "airflow.api_fastapi.auth.managers.base_auth_manager.BaseAuthManager._get_token_validator",
         autospec=True,
     )
@@ -224,6 +354,89 @@ class TestBaseAuthManager:
         mock_deserialize_user.assert_called_once_with(payload)
         signer.avalidated_claims.assert_called_once_with(token)
 
+    @patch(
+        "airflow.api_fastapi.auth.managers.base_auth_manager.BaseAuthManager._get_token_validator",
+        autospec=True,
+    )
+    def test_revoke_token(self, mock__get_token_validator, auth_manager):
+        token = "token"
+        validator = Mock(spec=JWTValidator)
+        mock__get_token_validator.return_value = validator
+
+        auth_manager.revoke_token(token)
+
+        validator.revoke_token.assert_called_once_with(token)
+
+    @patch(
+        "airflow.api_fastapi.auth.managers.base_auth_manager.get_signing_args",
+        return_value={"secret_key": "k", "algorithm": "HS256"},
+    )
+    @patch("airflow.api_fastapi.auth.managers.base_auth_manager.JWTGenerator", autospec=True)
+    def test_token_signer_reads_audience_from_api_auth_section(
+        self, mock_jwt_generator, mock_get_signing_args, auth_manager
+    ):
+        """Signer and validator must read `jwt_audience` from the same `[api_auth]` section.
+
+        Regression test: the signer previously read `[api] jwt_audience` while the validator read
+        `[api_auth] jwt_audience` (the documented option). Both defaults are `apache-airflow` so
+        out-of-box behaviour was correct, but a custom audience set under the documented
+        `[api_auth]` section would silently mismatch.
+        """
+        EmptyAuthManager._get_token_signer.cache_clear()
+        try:
+            with conf_vars({("api_auth", "jwt_audience"): "configured-audience"}):
+                auth_manager._get_token_signer()
+        finally:
+            EmptyAuthManager._get_token_signer.cache_clear()
+        assert mock_jwt_generator.call_args.kwargs["audience"] == "configured-audience"
+
+    @patch(
+        "airflow.api_fastapi.auth.managers.base_auth_manager.get_signing_args",
+        return_value={"secret_key": "k", "algorithm": "HS256"},
+    )
+    @patch("airflow.api_fastapi.auth.managers.base_auth_manager.JWTGenerator", autospec=True)
+    def test_token_signer_falls_back_to_deprecated_api_section_with_warning(
+        self, mock_jwt_generator, mock_get_signing_args, auth_manager
+    ):
+        """Honour an audience set under the (deprecated) ``[api]`` section with a warning.
+
+        Deployments that hit the original bug worked around it by setting ``[api] jwt_audience``
+        so the signer would emit the configured value. Keep accepting that until the next major
+        release, but emit ``DeprecationWarning`` so operators move it to ``[api_auth]``.
+        """
+        EmptyAuthManager._get_token_signer.cache_clear()
+        try:
+            with conf_vars({("api", "jwt_audience"): "legacy-audience"}):
+                with pytest.warns(DeprecationWarning, match=r"\[api\] jwt_audience"):
+                    auth_manager._get_token_signer()
+        finally:
+            EmptyAuthManager._get_token_signer.cache_clear()
+        assert mock_jwt_generator.call_args.kwargs["audience"] == "legacy-audience"
+
+    @patch(
+        "airflow.api_fastapi.auth.managers.base_auth_manager.get_signing_args",
+        return_value={"secret_key": "k", "algorithm": "HS256"},
+    )
+    @patch("airflow.api_fastapi.auth.managers.base_auth_manager.JWTGenerator", autospec=True)
+    def test_token_signer_prefers_api_auth_over_deprecated_api_section(
+        self, mock_jwt_generator, mock_get_signing_args, auth_manager
+    ):
+        """When both sections are set, the documented ``[api_auth]`` option wins (no warning)."""
+        EmptyAuthManager._get_token_signer.cache_clear()
+        try:
+            with conf_vars(
+                {
+                    ("api_auth", "jwt_audience"): "documented-audience",
+                    ("api", "jwt_audience"): "legacy-audience",
+                }
+            ):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", DeprecationWarning)
+                    auth_manager._get_token_signer()
+        finally:
+            EmptyAuthManager._get_token_signer.cache_clear()
+        assert mock_jwt_generator.call_args.kwargs["audience"] == "documented-audience"
+
     @patch("airflow.api_fastapi.auth.managers.base_auth_manager.JWTGenerator", autospec=True)
     @patch.object(EmptyAuthManager, "serialize_user")
     def test_generate_jwt_token(self, mock_serialize_user, mock_jwt_generator, auth_manager):
@@ -242,7 +455,7 @@ class TestBaseAuthManager:
         assert result == token
 
     @pytest.mark.parametrize(
-        "return_values, expected",
+        ("return_values", "expected"),
         [
             ([False, False], False),
             ([True, False], False),
@@ -264,7 +477,7 @@ class TestBaseAuthManager:
         assert result == expected
 
     @pytest.mark.parametrize(
-        "return_values, expected",
+        ("return_values", "expected"),
         [
             ([False, False], False),
             ([True, False], False),
@@ -284,7 +497,7 @@ class TestBaseAuthManager:
         assert result == expected
 
     @pytest.mark.parametrize(
-        "return_values, expected",
+        ("return_values", "expected"),
         [
             ([False, False], False),
             ([True, False], False),
@@ -304,7 +517,7 @@ class TestBaseAuthManager:
         assert result == expected
 
     @pytest.mark.parametrize(
-        "return_values, expected",
+        ("return_values", "expected"),
         [
             ([False, False], False),
             ([True, False], False),
@@ -326,7 +539,7 @@ class TestBaseAuthManager:
         assert result == expected
 
     @pytest.mark.parametrize(
-        "access_per_dag, access_per_team, rows, expected",
+        ("access_per_dag", "access_per_team", "rows", "expected"),
         [
             # Without teams
             # No access to any dag
@@ -382,7 +595,7 @@ class TestBaseAuthManager:
         assert result == expected
 
     @pytest.mark.parametrize(
-        "access_per_connection, access_per_team, rows, expected",
+        ("access_per_connection", "access_per_team", "rows", "expected"),
         [
             # Without teams
             # No access to any connection
@@ -439,7 +652,42 @@ class TestBaseAuthManager:
         assert result == expected
 
     @pytest.mark.parametrize(
-        "access_per_variable, access_per_team, rows, expected",
+        ("access_per_team", "rows", "expected"),
+        [
+            # No access to any team
+            (
+                {},
+                ["team1", "team2"],
+                set(),
+            ),
+            # Access to specific teams
+            (
+                {"team1": True},
+                ["team1", "team2"],
+                {"team1"},
+            ),
+        ],
+    )
+    def test_get_authorized_teams(self, auth_manager, access_per_team: dict, rows: list, expected: set):
+        def side_effect_func(
+            *,
+            method: ResourceMethod,
+            user: BaseAuthManagerUserTest,
+            details: TeamDetails | None = None,
+        ):
+            if not details:
+                return False
+            return access_per_team.get(details.name, False)
+
+        auth_manager.is_authorized_team = MagicMock(side_effect=side_effect_func)
+        user = Mock()
+        session = Mock()
+        session.scalars.return_value.all.return_value = rows
+        result = auth_manager.get_authorized_teams(user=user, session=session)
+        assert result == expected
+
+    @pytest.mark.parametrize(
+        ("access_per_variable", "access_per_team", "rows", "expected"),
         [
             # Without teams
             # No access to any variable
@@ -496,7 +744,7 @@ class TestBaseAuthManager:
         assert result == expected
 
     @pytest.mark.parametrize(
-        "access_per_pool, access_per_team, rows, expected",
+        ("access_per_pool", "access_per_team", "rows", "expected"),
         [
             # Without teams
             # No access to any pool
@@ -548,4 +796,24 @@ class TestBaseAuthManager:
         session = Mock()
         session.execute.return_value.all.return_value = rows
         result = auth_manager.get_authorized_pools(user=user, session=session)
+        assert result == expected
+
+    @pytest.mark.parametrize(
+        ("user_id", "assigned_users", "expected"),
+        [
+            # User in assigned_users
+            ("user1", {"user1", "user2"}, True),
+            ("user2", {"user1", "user2"}, True),
+            # User not in assigned_users
+            ("user3", {"user1", "user2"}, False),
+            # Empty assigned_users
+            ("user1", set(), False),
+        ],
+    )
+    def test_is_authorized_hitl_task(
+        self, auth_manager, user_id: str, assigned_users: set[str], expected: bool
+    ):
+        """Test is_authorized_hitl_task method with the new signature."""
+        user = BaseAuthManagerUserTest(name=user_id)
+        result = auth_manager.is_authorized_hitl_task(assigned_users=assigned_users, user=user)
         assert result == expected

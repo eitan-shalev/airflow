@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-samba``
 
-Release: ``4.11.0``
+Release: ``4.13.0``
 
 
 `Samba <https://www.samba.org/>`__
@@ -36,7 +36,7 @@ This is a provider package for ``samba`` provider. All classes for this provider
 are in ``airflow.providers.samba`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-samba/4.11.0/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-samba/4.13.0/>`_.
 
 Installation
 ------------
@@ -45,20 +45,21 @@ You can install this package on top of an existing Airflow installation (see ``R
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-samba``
 
-The package supports the following python versions: 3.10,3.11,3.12,3.13
+The package supports the following python versions: 3.10,3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.10.0``
-``smbprotocol``     ``>=1.5.0``
-==================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.10.1``
+``smbprotocol``                             ``>=1.5.0``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified providers in order to use them.
@@ -76,5 +77,15 @@ Dependent package                                                               
 `apache-airflow-providers-google <https://airflow.apache.org/docs/apache-airflow-providers-google>`_  ``google``
 ====================================================================================================  ==========
 
+Optional dependencies
+----------------------
+
+============  =================================================
+Extra         Dependencies
+============  =================================================
+``google``    ``apache-airflow-providers-google``
+``kerberos``  ``krb5>=0.8.0``, ``smbprotocol[kerberos]>=1.5.0``
+============  =================================================
+
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-samba/4.11.0/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-samba/4.13.0/changelog.html>`_.

@@ -34,7 +34,7 @@ from functools import reduce
 from typing import TYPE_CHECKING
 
 from dateutil import parser
-from kubernetes.client import models as k8s
+from kubernetes.client import Configuration, models as k8s
 from kubernetes.client.api_client import ApiClient
 
 from airflow.exceptions import (
@@ -272,6 +272,10 @@ class PodGenerator:
                 base_spec.containers, client_spec.containers
             )
             merged_spec = extend_object_field(base_spec, client_spec, "init_containers")
+            if base_spec.init_containers and client_spec.init_containers:
+                merged_spec.init_containers = PodGenerator.reconcile_init_containers(
+                    base_spec.init_containers, client_spec.init_containers
+                )
             merged_spec = extend_object_field(base_spec, merged_spec, "volumes")
             return merge_objects(base_spec, merged_spec)
 
@@ -309,6 +313,49 @@ class PodGenerator:
             client_container,
             *PodGenerator.reconcile_containers(base_containers[1:], client_containers[1:]),
         ]
+
+    @staticmethod
+    def reconcile_init_containers(
+        base_containers: list[k8s.V1Container] | None,
+        client_containers: list[k8s.V1Container] | None,
+    ) -> list[k8s.V1Container]:
+        """
+        Merge Kubernetes init containers by name.
+
+        Containers with the same name are merged; others are appended.
+
+        :param base_containers: base init containers
+        :param client_containers: client init containers that override base
+        :return: the merged init containers
+        """
+        if not base_containers:
+            return client_containers or []
+        if not client_containers:
+            return base_containers
+
+        client_map = {c.name: c for c in client_containers}
+        merged = []
+        matched_names = set()
+
+        for base_container in base_containers:
+            if base_container.name in client_map:
+                client_container = client_map[base_container.name]
+                client_container = extend_object_field(base_container, client_container, "volume_mounts")
+                client_container = extend_object_field(base_container, client_container, "env")
+                client_container = extend_object_field(base_container, client_container, "env_from")
+                client_container = extend_object_field(base_container, client_container, "ports")
+                client_container = extend_object_field(base_container, client_container, "volume_devices")
+                client_container = merge_objects(base_container, client_container)
+                merged.append(client_container)
+                matched_names.add(base_container.name)
+            else:
+                merged.append(base_container)
+
+        for client_container in client_containers:
+            if client_container.name not in matched_names:
+                merged.append(client_container)
+
+        return merged
 
     @classmethod
     def construct_pod(
@@ -521,10 +568,15 @@ class PodGenerator:
         ``_ApiClient__deserialize_model`` from the kubernetes client.
         This issue is tracked here; https://github.com/kubernetes-client/python/issues/977.
 
+        A fresh ``Configuration`` is passed so that neither the pod nor any nested model captures the
+        process-global in-cluster ``Configuration``. In-cluster, that global carries a
+        ``refresh_api_key_hook`` local closure which ``pickle`` cannot serialize, and which would
+        otherwise break pickling a ``pod_override`` onto the KubernetesExecutor multiprocessing queue.
+
         :param pod_dict: Serialized dict of k8s.V1Pod object
         :return: De-serialized k8s.V1Pod
         """
-        api_client = ApiClient()
+        api_client = ApiClient(configuration=Configuration())
         return api_client._ApiClient__deserialize_model(pod_dict, k8s.V1Pod)
 
 

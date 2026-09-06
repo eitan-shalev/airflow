@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.10,<3.11"
 # dependencies = [
 #   "rich>=13.6.0",
 # ]
@@ -27,12 +27,11 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))  # make sure common_prek_utils is imported
 from common_prek_utils import (
     AIRFLOW_PROVIDERS_ROOT_PATH,
     AIRFLOW_ROOT_PATH,
-    KNOWN_SECOND_LEVEL_PATHS,
     console,
+    get_provider_namespace_from_path,
 )
 
 ACCEPTED_NON_INIT_DIRS = [
@@ -43,25 +42,33 @@ ACCEPTED_NON_INIT_DIRS = [
     "__pycache__",
     "static",
     "dist",
+    ".pnpm-store",
     "node_modules",
     "non_python_src",
+    # Agent Skills bundles (agentskills.io): a "skills" dir holds SKILL.md files
+    # and their assets, not a Python package.
+    "skills",
 ]
 
-IGNORE_DIR_PATTERNS = [
-    "airflow/providers/edge3/plugins",
-]
+IGNORE_DIR_PATTERNS = ["airflow/providers/edge3/plugins", "airflow/providers/common/ai/plugins"]
 
 PATH_EXTENSION_STRING = '__path__ = __import__("pkgutil").extend_path(__path__, __name__)'
 
 ALLOWED_SUB_FOLDERS_OF_TESTS = ["unit", "system", "integration"]
 
-should_fail = False
-fatal_error = False
+
+class _ErrorSignals:
+    should_fail: bool = False
+    fatal_error: bool = False
+
+
 missing_init_dirs: list[Path] = []
 missing_path_extension_dirs: list[Path] = []
 
 
-def _what_kind_of_test_init_py_needed(base_path: Path, folder: Path) -> tuple[bool, bool]:
+def _what_kind_of_test_init_py_needed(
+    base_path: Path, folder: Path, namespace: str | None
+) -> tuple[bool, bool]:
     """Returns a tuple of two booleans indicating need and type of __init__.py file.
 
     The first boolean is True if __init__.py is needed, False otherwise.
@@ -77,16 +84,26 @@ def _what_kind_of_test_init_py_needed(base_path: Path, folder: Path) -> tuple[bo
         if folder.name not in ALLOWED_SUB_FOLDERS_OF_TESTS:
             console.print(f"[red]Unexpected folder {folder} in {base_path}[/]")
             console.print(f"[yellow]Only {ALLOWED_SUB_FOLDERS_OF_TESTS} should be sub-folders of tests.[/]")
-            global should_fail
-            global fatal_error
-            should_fail = True
-            fatal_error = True
-        return False, False
+            _ErrorSignals.should_fail = True
+            _ErrorSignals.fatal_error = True
+        return True, True
     if depth == 2:
-        # For known sub-packages that can occur in several packages we need to add __path__ extension
-        return True, folder.name in KNOWN_SECOND_LEVEL_PATHS
+        # For sub-packages that can occur in several packages we need to add __path__ extension
+        return True, folder.name == namespace
     # all other sub-packages should have plain __init__.py
     return True, False
+
+
+def _needs_path_extension_in_src(relative_root_path: Path, namespace: str | None) -> bool:
+    """Whether a folder under ``src/airflow`` is also shipped by other distributions.
+
+    ``airflow`` and ``airflow/providers`` are shared by every distribution, and the namespace
+    package below them by every distribution of that namespace.
+    """
+    parts = relative_root_path.parts
+    if len(parts) < 2:
+        return True
+    return len(parts) == 2 and parts[0] == "providers" and parts[1] == namespace
 
 
 def _determine_init_py_action(need_path_extension: bool, root_path: Path):
@@ -105,27 +122,29 @@ def _determine_init_py_action(need_path_extension: bool, root_path: Path):
 
 
 def check_dir_init_test_folders(folders: list[Path]) -> None:
-    global should_fail
     folders = list(folders)
     for root_distribution_path in folders:
         # We need init folders for all folders and for the common ones we need path extension
         tests_folder = root_distribution_path / "tests"
+        namespace = get_provider_namespace_from_path(root_distribution_path / "provider.yaml")
         print("Checking for __init__.py files in distribution for tests: ", tests_folder)
         for root, dirs, _ in os.walk(tests_folder):
             # Edit it in place, so we don't recurse to folders we don't care about
             dirs[:] = [d for d in dirs if d not in ACCEPTED_NON_INIT_DIRS]
             root_path = Path(root)
-            need_init_py, need_path_extension = _what_kind_of_test_init_py_needed(tests_folder, root_path)
+            need_init_py, need_path_extension = _what_kind_of_test_init_py_needed(
+                tests_folder, root_path, namespace
+            )
             if need_init_py:
                 _determine_init_py_action(need_path_extension, root_path)
 
 
 def check_dir_init_src_folders(folders: list[Path]) -> None:
-    global should_fail
     folders = list(folders)
     for root_distribution_path in folders:
         # We need init folders for all folders and for the common ones we need path extension
         providers_base_folder = root_distribution_path / "src" / "airflow"
+        namespace = get_provider_namespace_from_path(root_distribution_path / "provider.yaml")
         print("Checking for __init__.py files in distribution for src: ", providers_base_folder)
         for root, dirs, _ in os.walk(providers_base_folder):
             print("Checking: ", root)
@@ -138,13 +157,7 @@ def check_dir_init_src_folders(folders: list[Path]) -> None:
                 and not any(pattern in root for pattern in IGNORE_DIR_PATTERNS)
             ]
             relative_root_path = root_path.relative_to(providers_base_folder)
-            need_path_extension = (
-                root_path == providers_base_folder
-                or len(relative_root_path.parts) == 1
-                or len(relative_root_path.parts) == 2
-                and relative_root_path.parts[1] in KNOWN_SECOND_LEVEL_PATHS
-                and relative_root_path.parts[0] == "providers"
-            )
+            need_path_extension = _needs_path_extension_in_src(relative_root_path, namespace)
             print("Needs path extension: ", need_path_extension)
             _determine_init_py_action(need_path_extension, root_path)
 
@@ -164,20 +177,20 @@ if __name__ == "__main__":
             init_file = missing_init_dir / "__init__.py"
             init_file.write_text("".join(prefixed_licensed_txt))
             console.print(f"[yellow]Added missing __init__.py file:[/] {init_file}")
-            should_fail = True
+            _ErrorSignals.should_fail = True
 
     for missing_extension_dir in missing_path_extension_dirs:
         init_file = missing_extension_dir / "__init__.py"
         init_file.write_text(init_file.read_text() + PATH_EXTENSION_STRING + "\n")
         console.print(f"[yellow]Added missing path extension to __init__.py file[/] {init_file}")
-        should_fail = True
+        _ErrorSignals.should_fail = True
 
-    if should_fail:
+    if _ErrorSignals.should_fail:
         console.print(
             "\n[yellow]The missing __init__.py files have been created. "
             "Please add these new files to a commit."
         )
-        if fatal_error:
+        if _ErrorSignals.fatal_error:
             console.print("[red]Also please remove the extra test folders listed above!")
         sys.exit(1)
     console.print("[green]All __init__.py files are present and have necessary extensions.[/]")

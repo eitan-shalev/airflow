@@ -22,7 +22,9 @@ There are several roles within the Airflow Open-Source community.
 
 For detailed information for each role, see: `Committers and PMC members <../COMMITTERS.rst>`__.
 
-**The outline for this document in GitHub is available at top-right corner button (with 3-dots and 3 lines).**
+.. contents:: Table of Contents
+   :depth: 2
+   :local:
 
 PMC Member
 ----------
@@ -51,14 +53,9 @@ refer to the role.
 
 The official list of committers can be found `here <https://airflow.apache.org/docs/apache-airflow/stable/project.html#committers>`__.
 
-Additionally, committers are listed in a few other places (some of these may only be visible to existing committers):
-
-* https://whimsy.apache.org/roster/committee/airflow
-* https://github.com/orgs/apache/teams/airflow-committers/members
-
 Committers are responsible for:
 
-* Championing one or more items on the `Roadmap <https://cwiki.apache.org/confluence/display/AIRFLOW/Airflow+Home>`__
+* Championing one or more items on the `Roadmap <https://cwiki.apache.org/confluence/display/AIRFLOW/Airflow+Wiki>`__
 * Reviewing & Merging Pull-Requests
 * Scanning and responding to GitHub issues
 * Responding to questions on the dev mailing list (dev@airflow.apache.org)
@@ -67,7 +64,7 @@ Release managers
 ----------------
 
 The task of release managers is to prepare and release Airflow artifacts (airflow, providers, Helm Chart, Python client).
-The release managers are usually PMC members and the process of releasing is described in the `dev <dev>`__
+The release managers are usually PMC members and the process of releasing is described in the `dev <../dev/README.md>`__
 documentation where we keep information and tools used for releasing.
 
 Contributors
@@ -80,7 +77,7 @@ Contributors are responsible for:
 
 * Fixing bugs
 * Adding features
-* Championing one or more items on the `Roadmap <https://cwiki.apache.org/confluence/display/AIRFLOW/Airflow+Home>`__.
+* Championing one or more items on the `Roadmap <https://cwiki.apache.org/confluence/display/AIRFLOW/Airflow+Wiki>`__.
 
 Security Team
 -------------

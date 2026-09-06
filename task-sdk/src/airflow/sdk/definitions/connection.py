@@ -17,17 +17,16 @@
 # under the License.
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from json import JSONDecodeError
-from typing import Any
+from typing import Any, overload
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
 import attrs
 
-from airflow.exceptions import AirflowException, AirflowNotFoundException
-from airflow.sdk.exceptions import AirflowRuntimeError, ErrorType
+from airflow.sdk.exceptions import AirflowException, AirflowNotFoundException, AirflowRuntimeError, ErrorType
+from airflow.sdk.providers_manager_runtime import ProvidersManagerTaskRuntime
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +93,7 @@ def _prune_dict(val: Any, mode="strict"):
     return val
 
 
-@attrs.define
+@attrs.define(slots=False)
 class Connection:
     """
     A connection to an external data source.
@@ -109,10 +108,11 @@ class Connection:
     :param port: The port number.
     :param extra: Extra metadata. Non-standard data such as private/SSH keys can be saved here. JSON
         encoded object.
+    :param uri: URI address describing connection parameters.
     """
 
     conn_id: str
-    conn_type: str
+    conn_type: str | None = None
     description: str | None = None
     host: str | None = None
     schema: str | None = None
@@ -123,15 +123,40 @@ class Connection:
 
     EXTRA_KEY = "__extra__"
 
+    @overload
+    def __init__(self, *, conn_id: str, uri: str) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        *,
+        conn_id: str,
+        conn_type: str | None = None,
+        description: str | None = None,
+        host: str | None = None,
+        schema: str | None = None,
+        login: str | None = None,
+        password: str | None = None,
+        port: int | None = None,
+        extra: str | None = None,
+    ) -> None: ...
+
+    def __init__(self, *, conn_id: str, uri: str | None = None, **kwargs) -> None:
+        if uri is not None and kwargs:
+            raise AirflowException(
+                "You must create an object using the URI or individual values "
+                "(conn_type, host, login, password, schema, port or extra). "
+                "You can't mix these two ways to create this object."
+            )
+        if uri is None:
+            self.__attrs_init__(conn_id=conn_id, **kwargs)  # type: ignore[attr-defined]
+        else:
+            self.__dict__.update(attrs.asdict(self.from_uri(uri, conn_id=conn_id), recurse=False))
+
     def get_uri(self) -> str:
         """Generate and return connection in URI format."""
         from urllib.parse import parse_qsl
 
-        if self.conn_type and "_" in self.conn_type:
-            log.warning(
-                "Connection schemes (type: %s) shall not contain '_' according to RFC3986.",
-                self.conn_type,
-            )
         if self.conn_type:
             uri = f"{self.conn_type.lower().replace('_', '-')}://"
         else:
@@ -190,10 +215,9 @@ class Connection:
 
     def get_hook(self, *, hook_params=None):
         """Return hook based on conn_type."""
-        from airflow.providers_manager import ProvidersManager
-        from airflow.sdk.module_loading import import_string
+        from airflow.sdk._shared.module_loading import import_string
 
-        hook = ProvidersManager().hooks.get(self.conn_type, None)
+        hook = ProvidersManagerTaskRuntime().hooks.get(self.conn_type, None)
 
         if hook is None:
             raise AirflowException(f'Unknown hook type "{self.conn_type}"')
@@ -211,6 +235,36 @@ class Connection:
             hook_params = {}
         return hook_class(**{hook.connection_id_attribute_name: self.conn_id}, **hook_params)
 
+    def test_connection(self) -> tuple[bool, str]:
+        """
+        Call ``get_hook`` and execute ``test_connection`` on the resulting hook.
+
+        Pre-warms ``_preset_connections`` with ``self`` so the hook can resolve
+        this connection by ``conn_id`` from inside ``hook.test_connection`` even
+        when no metadata-DB or secrets backend has it yet (used by the async
+        connection-test workflow where the worker holds the connection in memory).
+        """
+        from airflow.sdk.execution_time.context import _preset_connections
+
+        outer = _preset_connections.get() or {}
+        reset_token = _preset_connections.set({**outer, self.conn_id: self})
+        try:
+            try:
+                hook = self.get_hook()
+            except AirflowException as e:
+                return False, str(e)
+            if not getattr(hook, "test_connection", None):
+                return (
+                    False,
+                    f"Hook {type(hook).__name__} doesn't implement or inherit test_connection method",
+                )
+            try:
+                return hook.test_connection()
+            except Exception as e:
+                return False, str(e)
+        finally:
+            _preset_connections.reset(reset_token)
+
     @classmethod
     def _handle_connection_error(cls, e: AirflowRuntimeError, conn_id: str) -> None:
         """Handle connection retrieval errors."""
@@ -226,24 +280,6 @@ class Connection:
             return _get_connection(conn_id)
         except AirflowRuntimeError as e:
             cls._handle_connection_error(e, conn_id)
-        except RuntimeError as e:
-            # The error from async_to_sync is a RuntimeError, so we have to fall back to text matching
-            if str(e).startswith("You cannot use AsyncToSync in the same thread as an async event loop"):
-                import greenback
-
-                task = asyncio.current_task()
-                if greenback.has_portal(task):
-                    import warnings
-
-                    warnings.warn(
-                        "You should not use sync calls here -- use `await Conn.async_get` instead",
-                        stacklevel=2,
-                    )
-
-                    return greenback.await_(cls.async_get(conn_id))
-
-            log.exception("async_to_sync failed")
-            raise
 
     @classmethod
     async def async_get(cls, conn_id: str) -> Any:
@@ -312,12 +348,6 @@ class Connection:
     @classmethod
     def from_json(cls, value, conn_id=None) -> Connection:
         kwargs = json.loads(value)
-        conn_type = kwargs.get("conn_type", None)
-        if not conn_type:
-            raise ValueError(
-                "Connection type (conn_type) is required but missing from connection configuration. "
-                "Please add 'conn_type' field to your connection definition."
-            )
         extra = kwargs.pop("extra", None)
         if extra:
             kwargs["extra"] = extra if isinstance(extra, str) else json.dumps(extra)

@@ -22,16 +22,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseOperator
 from airflow.providers.telegram.hooks.telegram import TelegramHook
-from airflow.providers.telegram.version_compat import BaseOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class TelegramOperator(BaseOperator):
@@ -108,7 +103,7 @@ class TelegramFileOperator(BaseOperator):
     :param telegram_kwargs: Extra args to be passed to telegram client
     """
 
-    template_fields: Sequence[str] = "chat_id"
+    template_fields: Sequence[str] = ("chat_id",)
     ui_color = "#FFBA40"
 
     def __init__(

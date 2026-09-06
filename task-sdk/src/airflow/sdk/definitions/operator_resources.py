@@ -17,8 +17,7 @@
 # under the License.
 from __future__ import annotations
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.sdk.configuration import conf
 
 # Constants for resources (megabytes are the base unit)
 MB = 1
@@ -41,7 +40,7 @@ class Resource:
 
     def __init__(self, name, units_str, qty):
         if qty < 0:
-            raise AirflowException(
+            raise ValueError(
                 f"Received resource quantity {qty} for resource {name}, "
                 f"but resource quantity must be non-negative."
             )
@@ -54,6 +53,9 @@ class Resource:
         if not isinstance(other, self.__class__):
             return NotImplemented
         return self.__dict__ == other.__dict__
+
+    def __hash__(self):
+        return hash(self.__dict__)
 
     def __repr__(self):
         return str(self.__dict__)
@@ -123,20 +125,23 @@ class Resources:
 
     def __init__(
         self,
-        cpus=conf.getint("operators", "default_cpus"),
-        ram=conf.getint("operators", "default_ram"),
-        disk=conf.getint("operators", "default_disk"),
-        gpus=conf.getint("operators", "default_gpus"),
+        cpus=None,
+        ram=None,
+        disk=None,
+        gpus=None,
     ):
-        self.cpus = CpuResource(cpus)
-        self.ram = RamResource(ram)
-        self.disk = DiskResource(disk)
-        self.gpus = GpuResource(gpus)
+        self.cpus = CpuResource(cpus if cpus is not None else conf.getint("operators", "default_cpus"))
+        self.ram = RamResource(ram if ram is not None else conf.getint("operators", "default_ram"))
+        self.disk = DiskResource(disk if disk is not None else conf.getint("operators", "default_disk"))
+        self.gpus = GpuResource(gpus if gpus is not None else conf.getint("operators", "default_gpus"))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return NotImplemented
         return self.__dict__ == other.__dict__
+
+    def __hash__(self):
+        return hash(self.__dict__)
 
     def __repr__(self):
         return str(self.__dict__)

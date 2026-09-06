@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from unittest.mock import call
 
 import pytest
 
@@ -29,6 +30,7 @@ from tests_common.test_utils.common_msg_queue import (
     collect_queue_param_deprecation_warning,
     mark_common_msg_queue_test,
 )
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_3_PLUS
 
 USED_FIXTURES = [collect_queue_param_deprecation_warning]
 
@@ -48,6 +50,22 @@ class MockedMessage:
     def error(*args, **kwargs):
         return False
 
+    def value(*args, **kwargs):
+        return b"test_message"
+
+
+class MockedTombstoneMessage:
+    """A message with a null payload, e.g. a deletion marker from a log-compacted topic."""
+
+    def __init__(*args, **kwargs):
+        pass
+
+    def error(*args, **kwargs):
+        return False
+
+    def value(*args, **kwargs):
+        return None
+
 
 class MockedConsumer:
     def __init__(*args, **kwargs) -> None:
@@ -58,6 +76,9 @@ class MockedConsumer:
 
     def commit(*args, **kwargs):
         return True
+
+    def close(*args, **kwargs):
+        return None
 
 
 class TestTrigger:
@@ -73,6 +94,21 @@ class TestTrigger:
             )
         )
 
+    def test_trigger_initializes_base_state(self):
+        trigger = AwaitMessageTrigger(
+            kafka_config_id="kafka_d",
+            apply_function="test.noop",
+            topics=["noop"],
+        )
+
+        if AIRFLOW_V_3_3_PLUS:
+            # The trigger._task_instance attribute was introduced in https://github.com/apache/airflow/pull/55068
+            assert trigger._task_instance is None
+            assert trigger.task_instance is None
+        else:
+            assert not hasattr(trigger, "_task_instance")
+            assert trigger.task_instance is None
+
     def test_trigger_serialization(self):
         trigger = AwaitMessageTrigger(
             kafka_config_id="kafka_d",
@@ -82,6 +118,7 @@ class TestTrigger:
             apply_function_kwargs=dict(one=1, two=2),
             poll_timeout=10,
             poll_interval=5,
+            commit_offset=True,
         )
 
         assert isinstance(trigger, AwaitMessageTrigger)
@@ -97,6 +134,7 @@ class TestTrigger:
             apply_function_kwargs=dict(one=1, two=2),
             poll_timeout=10,
             poll_interval=5,
+            commit_offset=True,
         )
 
     @pytest.mark.parametrize(
@@ -139,6 +177,96 @@ class TestTrigger:
         await asyncio.sleep(1.0)
         assert task.done() is False
         asyncio.get_event_loop().stop()
+
+    @pytest.mark.asyncio
+    async def test_trigger_run_tombstone_message_keeps_polling(self, mocker):
+        """
+        A tombstone (null-value) message must not crash the trigger when no apply_function is set.
+
+        Regression test: the trigger previously raised
+        ``AttributeError: 'NoneType' object has no attribute 'decode'`` on ``message.value()``
+        returning ``None``. A tombstone carries no payload to emit, so the trigger should
+        commit the offset (when ``commit_offset`` is enabled) and keep polling.
+        """
+        message = MockedTombstoneMessage()
+        consumer = MockedConsumer()
+        mocker.patch.object(consumer, "poll", return_value=message)
+        commit_mock = mocker.patch.object(consumer, "commit")
+        mocker.patch.object(KafkaConsumerHook, "get_consumer", return_value=consumer)
+
+        trigger = AwaitMessageTrigger(
+            kafka_config_id="kafka_d",
+            apply_function=None,
+            topics=["noop"],
+            poll_timeout=0.0001,
+            poll_interval=5,
+        )
+
+        task = asyncio.create_task(trigger.run().__anext__())
+        await asyncio.sleep(1.0)
+        try:
+            # The task must neither raise nor yield an event: the tombstone is skipped
+            # and the trigger sleeps through poll_interval waiting for the next message.
+            assert task.done() is False
+            # The tombstone offset is still committed, like any other non-matching message.
+            assert commit_mock.mock_calls == [call(message=message, asynchronous=False)]
+        finally:
+            task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_trigger_run_without_apply_function_yields_message_value(self, mocker):
+        """A regular message with no apply_function yields the decoded message value."""
+        consumer = MockedConsumer()
+        mocker.patch.object(consumer, "poll", return_value=MockedMessage())
+        mocker.patch.object(consumer, "commit")
+        mocker.patch.object(KafkaConsumerHook, "get_consumer", return_value=consumer)
+
+        trigger = AwaitMessageTrigger(
+            kafka_config_id="kafka_d",
+            apply_function=None,
+            topics=["noop"],
+            poll_timeout=0.0001,
+            poll_interval=5,
+        )
+
+        task = asyncio.create_task(trigger.run().__anext__())
+        await asyncio.sleep(1.0)
+        assert task.done() is True
+        assert task.result().payload == "test_message"
+
+    @pytest.mark.asyncio
+    async def test_cleanup_closes_consumer(self, mocker):
+        consumer = MockedConsumer()
+        close_mock = mocker.patch.object(consumer, "close")
+
+        mocker.patch.object(KafkaConsumerHook, "get_consumer", return_value=consumer)
+
+        trigger = AwaitMessageTrigger(
+            kafka_config_id="kafka_d",
+            apply_function="unit.apache.kafka.triggers.test_await_message.apply_function_true",
+            topics=["noop"],
+            poll_timeout=0.0001,
+            poll_interval=5,
+        )
+
+        generator = trigger.run()
+        await generator.__anext__()
+        await trigger.cleanup()
+        await generator.aclose()
+
+        assert close_mock.mock_calls == [call()]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_does_not_raise_without_consumer(self):
+        trigger = AwaitMessageTrigger(
+            kafka_config_id="kafka_d",
+            apply_function="unit.apache.kafka.triggers.test_await_message.apply_function_true",
+            topics=["noop"],
+            poll_timeout=0.0001,
+            poll_interval=5,
+        )
+
+        await trigger.cleanup()
 
 
 @mark_common_msg_queue_test

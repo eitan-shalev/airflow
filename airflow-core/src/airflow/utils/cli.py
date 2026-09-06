@@ -36,9 +36,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from airflow import settings
 from airflow._shared.timezones import timezone
 from airflow.dag_processing.bundles.manager import DagBundlesManager
-from airflow.dag_processing.dagbag import DagBag
 from airflow.exceptions import AirflowException
-from airflow.sdk.definitions._internal.dag_parsing_context import _airflow_parsing_context_manager
 from airflow.utils import cli_action_loggers
 from airflow.utils.log.non_caching_file_handler import NonCachingFileHandler
 from airflow.utils.platform import getuser, is_terminal_support_colors
@@ -47,7 +45,7 @@ T = TypeVar("T", bound=Callable)
 
 if TYPE_CHECKING:
     from airflow.sdk import DAG
-    from airflow.serialization.serialized_objects import SerializedDAG
+    from airflow.serialization.definitions.dag import SerializedDAG
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +110,18 @@ def action_cli(func=None, check_db=True):
                     if conf.getboolean("database", "check_migrations"):
                         check_and_run_migrations()
                     synchronize_log_template()
-                return f(*args, **kwargs)
+                    # Set server context so validation logic (e.g. DagBundlesManager) runs correctly
+                    original_ctx = os.environ.pop("_AIRFLOW_PROCESS_CONTEXT", None)
+                    try:
+                        os.environ["_AIRFLOW_PROCESS_CONTEXT"] = "server"
+                        return f(*args, **kwargs)
+                    finally:
+                        if original_ctx is None:
+                            os.environ.pop("_AIRFLOW_PROCESS_CONTEXT", None)
+                        else:
+                            os.environ["_AIRFLOW_PROCESS_CONTEXT"] = original_ctx
+                else:
+                    return f(*args, **kwargs)
             except Exception as e:
                 metrics["error"] = e
                 raise
@@ -240,6 +249,7 @@ def get_dag_by_file_location(dag_id: str):
         raise AirflowException(
             f"Dag {dag_id!r} could not be found; either it does not exist or it failed to parse."
         )
+    # This method is called only when we explicitly do not have a bundle name
     dagbag = DagBag(dag_folder=dag_model.fileloc)
     return dagbag.dags[dag_id]
 
@@ -273,14 +283,17 @@ def get_bagged_dag(bundle_names: list | None, dag_id: str, dagfile_path: str | N
     find the correct path (assuming it's a file) and failing that, use the configured
     dags folder.
     """
-    from airflow.dag_processing.dagbag import sync_bag_to_db
+    from airflow.dag_processing.dagbag import BundleDagBag, sync_bag_to_db
+    from airflow.sdk.definitions._internal.dag_parsing_context import _airflow_parsing_context_manager
 
     manager = DagBundlesManager()
     for bundle_name in bundle_names or ():
         bundle = manager.get_bundle(bundle_name)
         with _airflow_parsing_context_manager(dag_id=dag_id):
-            dagbag = DagBag(
-                dag_folder=dagfile_path or bundle.path, bundle_path=bundle.path, include_examples=False
+            dagbag = BundleDagBag(
+                dag_folder=dagfile_path or bundle.path,
+                bundle_path=bundle.path,
+                bundle_name=bundle.name,
             )
         if dag := dagbag.dags.get(dag_id):
             return dag
@@ -289,8 +302,10 @@ def get_bagged_dag(bundle_names: list | None, dag_id: str, dagfile_path: str | N
     for bundle in manager.get_all_dag_bundles():
         bundle.initialize()
         with _airflow_parsing_context_manager(dag_id=dag_id):
-            dagbag = DagBag(
-                dag_folder=dagfile_path or bundle.path, bundle_path=bundle.path, include_examples=False
+            dagbag = BundleDagBag(
+                dag_folder=dagfile_path or bundle.path,
+                bundle_path=bundle.path,
+                bundle_name=bundle.name,
             )
             sync_bag_to_db(dagbag, bundle.name, bundle.version)
         if dag := dagbag.dags.get(dag_id):
@@ -317,7 +332,7 @@ def get_db_dag(bundle_names: list | None, dag_id: str, dagfile_path: str | None 
 
 def get_dags(bundle_names: list | None, dag_id: str, use_regex: bool = False, from_db: bool = False):
     """Return DAG(s) matching a given regex or dag_id."""
-    from airflow.dag_processing.dagbag import DagBag
+    from airflow.dag_processing.dagbag import BundleDagBag
 
     bundle_names = bundle_names or []
 
@@ -327,7 +342,7 @@ def get_dags(bundle_names: list | None, dag_id: str, use_regex: bool = False, fr
         return [get_bagged_dag(bundle_names=bundle_names, dag_id=dag_id)]
 
     def _find_dag(bundle):
-        dagbag = DagBag(dag_folder=bundle.path, bundle_path=bundle.path)
+        dagbag = BundleDagBag(dag_folder=bundle.path, bundle_path=bundle.path, bundle_name=bundle.name)
         matched_dags = [dag for dag in dagbag.dags.values() if re.search(dag_id, dag.dag_id)]
         return matched_dags
 
@@ -377,9 +392,17 @@ def setup_logging(filename):
     formatter = logging.Formatter(settings.SIMPLE_LOG_FORMAT)
     handler.setFormatter(formatter)
     root.addHandler(handler)
-    root.setLevel(settings.LOGGING_LEVEL)
+    root.setLevel(logging.INFO)
 
     return handler.stream
+
+
+def print_banner() -> None:
+    """Print the Airflow ASCII art banner, unless JSON logging is enabled."""
+    from airflow.configuration import conf
+
+    if not conf.getboolean("logging", "json_logs", fallback=False):
+        print(settings.HEADER)
 
 
 def sigint_handler(sig, frame):
@@ -466,3 +489,10 @@ def validate_dag_bundle_arg(bundle_names: list[str]) -> None:
     unknown_bundles: set[str] = set(bundle_names) - known_bundles
     if unknown_bundles:
         raise SystemExit(f"Bundles not found: {', '.join(unknown_bundles)}")
+
+
+def should_enable_hot_reload(args) -> bool:
+    """Check whether hot-reload should be enabled based on --dev flag or DEV_MODE env var."""
+    if getattr(args, "dev", False):
+        return True
+    return os.getenv("DEV_MODE", "false").lower() == "true"

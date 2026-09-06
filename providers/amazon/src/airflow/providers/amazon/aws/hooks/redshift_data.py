@@ -28,6 +28,7 @@ from pendulum import duration
 
 from airflow.providers.amazon.aws.hooks.base_aws import AwsGenericHook
 from airflow.providers.amazon.aws.utils import trim_none_values
+from airflow.providers.common.sql.hooks.lineage import send_sql_hook_lineage
 
 if TYPE_CHECKING:
     from mypy_boto3_redshift_data import RedshiftDataAPIServiceClient  # noqa: F401
@@ -154,6 +155,19 @@ class RedshiftDataHook(AwsGenericHook["RedshiftDataAPIServiceClient"]):
 
         statement_id = resp["Id"]
 
+        send_sql_hook_lineage(
+            context=self,
+            sql="; ".join(sql) if isinstance(sql, list) else sql,
+            sql_parameters=parameters or None,
+            job_id=statement_id,
+            default_db=database,
+            extra={
+                "cluster_identifier": cluster_identifier,
+                "workgroup_name": workgroup_name,
+                "session_id": session_id or resp.get("SessionId"),
+            },
+        )
+
         if wait_for_completion:
             self.wait_for_results(statement_id, poll_interval=poll_interval)
 
@@ -254,7 +268,7 @@ class RedshiftDataHook(AwsGenericHook["RedshiftDataAPIServiceClient"]):
         pk_columns = []
         token = ""
         while True:
-            kwargs = {"Id": stmt_id}
+            kwargs: dict[str, Any] = {"Id": stmt_id}
             if token:
                 kwargs["NextToken"] = token
             response = self.conn.get_statement_result(**kwargs)

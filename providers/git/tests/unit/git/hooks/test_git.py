@@ -17,12 +17,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import warnings
 
 import pytest
 from git import Repo
 
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.models import Connection
 from airflow.providers.git.hooks.git import GitHook
 
@@ -38,10 +40,13 @@ def bundle_temp_dir(tmp_path):
 GIT_DEFAULT_BRANCH = "main"
 
 AIRFLOW_HTTPS_URL = "https://github.com/apache/airflow.git"
+AIRFLOW_HTTP_URL = "http://github.com/apache/airflow.git"
 AIRFLOW_GIT = "git@github.com:apache/airflow.git"
 ACCESS_TOKEN = "my_access_token"
 CONN_DEFAULT = "git_default"
 CONN_HTTPS = "my_git_conn"
+CONN_HTTP = "my_git_conn_http"
+CONN_HTTP_NO_AUTH = "my_git_conn_http_no_auth"
 CONN_ONLY_PATH = "my_git_conn_only_path"
 CONN_ONLY_INLINE_KEY = "my_git_conn_only_inline_key"
 CONN_BOTH_PATH_INLINE = "my_git_conn_both_path_inline"
@@ -87,6 +92,21 @@ class TestGitHook:
         )
         create_connection_without_db(
             Connection(
+                conn_id=CONN_HTTP,
+                host=AIRFLOW_HTTP_URL,
+                password=ACCESS_TOKEN,
+                conn_type="git",
+            )
+        )
+        create_connection_without_db(
+            Connection(
+                conn_id=CONN_HTTP_NO_AUTH,
+                host=AIRFLOW_HTTP_URL,
+                conn_type="git",
+            )
+        )
+        create_connection_without_db(
+            Connection(
                 conn_id=CONN_ONLY_PATH,
                 host="path/to/repo",
                 conn_type="git",
@@ -104,27 +124,55 @@ class TestGitHook:
         )
 
     @pytest.mark.parametrize(
-        "conn_id, hook_kwargs, expected_repo_url",
+        ("conn_id", "hook_kwargs", "expected_repo_url", "warns_on_default"),
         [
-            (CONN_DEFAULT, {}, AIRFLOW_GIT),
-            (CONN_HTTPS, {}, f"https://user:{ACCESS_TOKEN}@github.com/apache/airflow.git"),
+            (CONN_DEFAULT, {}, AIRFLOW_GIT, True),
+            (CONN_HTTPS, {}, f"https://user:{ACCESS_TOKEN}@github.com/apache/airflow.git", False),
             (
                 CONN_HTTPS,
                 {"repo_url": "https://github.com/apache/zzzairflow"},
                 f"https://user:{ACCESS_TOKEN}@github.com/apache/zzzairflow",
+                False,
             ),
-            (CONN_ONLY_PATH, {}, "path/to/repo"),
+            (
+                CONN_HTTPS,
+                {"repo_url": AIRFLOW_GIT},
+                AIRFLOW_GIT,
+                True,
+            ),
+            (CONN_HTTP, {}, f"http://user:{ACCESS_TOKEN}@github.com/apache/airflow.git", False),
+            (
+                CONN_HTTP,
+                {"repo_url": "http://github.com/apache/zzzairflow"},
+                f"http://user:{ACCESS_TOKEN}@github.com/apache/zzzairflow",
+                False,
+            ),
+            (CONN_HTTP_NO_AUTH, {}, AIRFLOW_HTTP_URL, False),
+            (
+                CONN_HTTP_NO_AUTH,
+                {"repo_url": "http://github.com/apache/zzzairflow"},
+                "http://github.com/apache/zzzairflow",
+                False,
+            ),
+            (CONN_ONLY_PATH, {}, "path/to/repo", False),
         ],
     )
-    def test_correct_repo_urls(self, conn_id, hook_kwargs, expected_repo_url):
-        hook = GitHook(git_conn_id=conn_id, **hook_kwargs)
+    def test_correct_repo_urls(self, conn_id, hook_kwargs, expected_repo_url, warns_on_default):
+        warning_context = (
+            pytest.warns(AirflowProviderDeprecationWarning, match="accept-new")
+            if warns_on_default
+            else contextlib.nullcontext()
+        )
+        with warning_context:
+            hook = GitHook(git_conn_id=conn_id, **hook_kwargs)
         assert hook.repo_url == expected_repo_url
 
     def test_env_var_with_configure_hook_env(self, create_connection_without_db):
-        default_hook = GitHook(git_conn_id=CONN_DEFAULT)
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            default_hook = GitHook(git_conn_id=CONN_DEFAULT)
         with default_hook.configure_hook_env():
             assert default_hook.env == {
-                "GIT_SSH_COMMAND": "ssh -i /files/pkey.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
+                "GIT_SSH_COMMAND": "ssh -i /files/pkey.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
             }
         create_connection_without_db(
             Connection(
@@ -155,30 +203,33 @@ class TestGitHook:
         )
 
         with pytest.raises(
-            AirflowException, match="Both 'key_file' and 'private_key' cannot be provided at the same time"
+            ValueError, match="Both 'key_file' and 'private_key' cannot be provided at the same time"
         ):
             GitHook(git_conn_id=CONN_BOTH_PATH_INLINE)
 
     def test_key_file_git_hook_has_env_with_configure_hook_env(self):
-        hook = GitHook(git_conn_id=CONN_DEFAULT)
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id=CONN_DEFAULT)
 
         assert hasattr(hook, "env")
         with hook.configure_hook_env():
             assert hook.env == {
-                "GIT_SSH_COMMAND": "ssh -i /files/pkey.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
+                "GIT_SSH_COMMAND": "ssh -i /files/pkey.pem -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
             }
 
     def test_private_key_lazy_env_var(self):
-        hook = GitHook(git_conn_id=CONN_ONLY_INLINE_KEY)
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id=CONN_ONLY_INLINE_KEY)
         assert hook.env == {}
 
         hook.set_git_env("dummy_inline_key")
         assert hook.env == {
-            "GIT_SSH_COMMAND": "ssh -i dummy_inline_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
+            "GIT_SSH_COMMAND": "ssh -i dummy_inline_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
         }
 
     def test_configure_hook_env(self):
-        hook = GitHook(git_conn_id=CONN_ONLY_INLINE_KEY)
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id=CONN_ONLY_INLINE_KEY)
         assert hasattr(hook, "private_key")
 
         hook.set_git_env("dummy_inline_key")
@@ -189,3 +240,176 @@ class TestGitHook:
             assert os.path.exists(temp_key_path)
 
         assert not os.path.exists(temp_key_path)
+
+    def test_ssh_port(self, create_connection_without_db):
+        create_connection_without_db(
+            Connection(
+                conn_id="git_with_port",
+                host=AIRFLOW_GIT,
+                conn_type="git",
+                extra={"key_file": "/files/pkey.pem", "ssh_port": "2222"},
+            )
+        )
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id="git_with_port")
+        with hook.configure_hook_env():
+            cmd = hook.env["GIT_SSH_COMMAND"]
+            assert "-p 2222" in cmd
+
+    def test_proxy_command(self, create_connection_without_db):
+        create_connection_without_db(
+            Connection(
+                conn_id="git_with_proxy",
+                host=AIRFLOW_GIT,
+                conn_type="git",
+                extra={
+                    "key_file": "/files/pkey.pem",
+                    "host_proxy_cmd": "ssh -W %h:%p bastion.example.com",
+                },
+            )
+        )
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id="git_with_proxy")
+        with hook.configure_hook_env():
+            cmd = hook.env["GIT_SSH_COMMAND"]
+            assert "ProxyCommand='ssh -W %h:%p bastion.example.com'" in cmd
+
+    def test_known_hosts_file(self, create_connection_without_db):
+        create_connection_without_db(
+            Connection(
+                conn_id="git_known_hosts",
+                host=AIRFLOW_GIT,
+                conn_type="git",
+                extra={
+                    "key_file": "/files/pkey.pem",
+                    "strict_host_key_checking": "yes",
+                    "known_hosts_file": "/etc/ssh/known_hosts",
+                },
+            )
+        )
+        hook = GitHook(git_conn_id="git_known_hosts")
+        with hook.configure_hook_env():
+            cmd = hook.env["GIT_SSH_COMMAND"]
+            assert "-o StrictHostKeyChecking=yes" in cmd
+            assert "-o UserKnownHostsFile=/etc/ssh/known_hosts" in cmd
+            assert "/dev/null" not in cmd
+
+    def test_ssh_config_file(self, create_connection_without_db):
+        create_connection_without_db(
+            Connection(
+                conn_id="git_ssh_config",
+                host=AIRFLOW_GIT,
+                conn_type="git",
+                extra={
+                    "key_file": "/files/pkey.pem",
+                    "ssh_config_file": "/home/user/.ssh/config",
+                },
+            )
+        )
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id="git_ssh_config")
+        with hook.configure_hook_env():
+            cmd = hook.env["GIT_SSH_COMMAND"]
+            assert "-F /home/user/.ssh/config" in cmd
+
+    def test_no_key_with_ssh_options_sets_env(self, create_connection_without_db):
+        """SSH options without a key still produce GIT_SSH_COMMAND."""
+        create_connection_without_db(
+            Connection(
+                conn_id="git_proxy_only",
+                host=AIRFLOW_GIT,
+                conn_type="git",
+                extra={"host_proxy_cmd": "ssh -W %h:%p bastion"},
+            )
+        )
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id="git_proxy_only")
+        assert hook.env == {}
+        with hook.configure_hook_env():
+            cmd = hook.env["GIT_SSH_COMMAND"]
+            assert cmd.startswith("ssh ")
+            assert "-i " not in cmd
+            assert "ProxyCommand" in cmd
+
+    def test_user_known_hosts_devnull_when_strict_checking_disabled(self, create_connection_without_db):
+        """When strict_host_key_checking=no and no known_hosts_file, /dev/null is used."""
+        create_connection_without_db(
+            Connection(
+                conn_id="git_strict_no",
+                host=AIRFLOW_GIT,
+                conn_type="git",
+                extra={"key_file": "/files/pkey.pem", "strict_host_key_checking": "no"},
+            )
+        )
+        hook = GitHook(git_conn_id="git_strict_no")
+        with hook.configure_hook_env():
+            cmd = hook.env["GIT_SSH_COMMAND"]
+            assert "-o StrictHostKeyChecking=no" in cmd
+            assert "-o UserKnownHostsFile=/dev/null" in cmd
+
+    def test_default_strict_host_key_checking_is_accept_new(self):
+        """Relying on the default verifies host keys (accept-new) and warns about the change."""
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id=CONN_DEFAULT)
+        assert hook.strict_host_key_checking == "accept-new"
+        with hook.configure_hook_env():
+            cmd = hook.env["GIT_SSH_COMMAND"]
+            assert "-o StrictHostKeyChecking=accept-new" in cmd
+            assert "/dev/null" not in cmd
+
+    def test_explicit_strict_host_key_checking_does_not_warn(self, create_connection_without_db):
+        """Setting strict_host_key_checking explicitly suppresses the deprecation warning."""
+        create_connection_without_db(
+            Connection(
+                conn_id="git_strict_explicit",
+                host=AIRFLOW_GIT,
+                conn_type="git",
+                extra={"key_file": "/files/pkey.pem", "strict_host_key_checking": "accept-new"},
+            )
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", AirflowProviderDeprecationWarning)
+            hook = GitHook(git_conn_id="git_strict_explicit")
+        assert hook.strict_host_key_checking == "accept-new"
+
+    def test_passphrase_sets_askpass_env(self, create_connection_without_db):
+        create_connection_without_db(
+            Connection(
+                conn_id="git_passphrase",
+                host=AIRFLOW_GIT,
+                conn_type="git",
+                extra={
+                    "key_file": "/files/pkey.pem",
+                    "private_key_passphrase": "my_secret",
+                },
+            )
+        )
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id="git_passphrase")
+        with hook.configure_hook_env():
+            assert "SSH_ASKPASS" in hook.env
+            assert hook.env["SSH_ASKPASS_REQUIRE"] == "force"
+            askpass_path = hook.env["SSH_ASKPASS"]
+            assert os.path.exists(askpass_path)
+
+    def test_passphrase_askpass_cleaned_up(self, create_connection_without_db):
+        create_connection_without_db(
+            Connection(
+                conn_id="git_passphrase_cleanup",
+                host=AIRFLOW_GIT,
+                conn_type="git",
+                extra={
+                    "private_key": "inline_key",
+                    "private_key_passphrase": "my_secret",
+                },
+            )
+        )
+        with pytest.warns(AirflowProviderDeprecationWarning, match="accept-new"):
+            hook = GitHook(git_conn_id="git_passphrase_cleanup")
+        askpass_path = None
+        with hook.configure_hook_env():
+            askpass_path = hook.env.get("SSH_ASKPASS")
+            assert askpass_path is not None
+            assert os.path.exists(askpass_path)
+        # Both the askpass script and the temp key file should be cleaned up
+        assert not os.path.exists(askpass_path)

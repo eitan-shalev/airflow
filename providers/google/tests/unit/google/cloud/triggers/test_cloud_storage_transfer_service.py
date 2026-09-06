@@ -21,13 +21,15 @@ from unittest import mock
 import pytest
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud.storage_transfer_v1 import TransferOperation
+from google.protobuf import struct_pb2
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.cloud_storage_transfer_service import (
     CloudDataTransferServiceAsyncHook,
     GcpTransferOperationStatus,
 )
 from airflow.providers.google.cloud.triggers.cloud_storage_transfer_service import (
+    CloudDataTransferServiceRunJobTrigger,
     CloudStorageTransferServiceCheckJobStatusTrigger,
     CloudStorageTransferServiceCreateJobsTrigger,
 )
@@ -89,6 +91,7 @@ class TestCloudStorageTransferServiceCreateJobsTrigger:
             "job_names": JOB_NAMES,
             "poll_interval": POLL_INTERVAL,
             "gcp_conn_id": GCP_CONN_ID,
+            "files": None,
         }
 
     def test_get_async_hook(self, trigger):
@@ -116,6 +119,31 @@ class TestCloudStorageTransferServiceCreateJobsTrigger:
         actual_event = await generator.asend(None)
 
         assert actual_event == expected_event
+
+    @pytest.mark.asyncio
+    @mock.patch(ASYNC_HOOK_CLASS_PATH + ".get_latest_operation")
+    @mock.patch(ASYNC_HOOK_CLASS_PATH + ".get_jobs")
+    async def test_run_includes_files_in_success_event(self, get_jobs, get_latest_operation):
+        """When trigger has files, success event includes them for operator to return via XCom."""
+        TRANSFERRED_FILES = ["path/file1.csv", "path/file2.csv"]
+        trigger_with_files = CloudStorageTransferServiceCreateJobsTrigger(
+            project_id=PROJECT_ID,
+            job_names=JOB_NAMES,
+            poll_interval=POLL_INTERVAL,
+            gcp_conn_id=GCP_CONN_ID,
+            files=TRANSFERRED_FILES,
+        )
+        get_jobs.return_value = mock_jobs(names=JOB_NAMES, latest_operation_names=LATEST_OPERATION_NAMES)
+        get_latest_operation.side_effect = [
+            create_mock_operation(status=TransferOperation.Status.SUCCESS, name="operation_" + job_name)
+            for job_name in JOB_NAMES
+        ]
+
+        generator = trigger_with_files.run()
+        actual_event = await generator.asend(None)
+
+        assert actual_event.payload["status"] == "success"
+        assert actual_event.payload["files"] == TRANSFERRED_FILES
 
     @pytest.mark.parametrize(
         "status",
@@ -155,7 +183,7 @@ class TestCloudStorageTransferServiceCreateJobsTrigger:
         mock_sleep.assert_called_once_with(POLL_INTERVAL)
 
     @pytest.mark.parametrize(
-        "latest_operations_names, expected_failed_job",
+        ("latest_operations_names", "expected_failed_job"),
         [
             ([None, LATEST_OPERATION_NAME_1], JOB_0),
             ([LATEST_OPERATION_NAME_0, None], JOB_1),
@@ -187,7 +215,7 @@ class TestCloudStorageTransferServiceCreateJobsTrigger:
         assert actual_event == expected_event
 
     @pytest.mark.parametrize(
-        "job_statuses, failed_operation, expected_status",
+        ("job_statuses", "failed_operation", "expected_status"),
         [
             (
                 [TransferOperation.Status.ABORTED, TransferOperation.Status.SUCCESS],
@@ -334,7 +362,7 @@ class TestCloudStorageTransferServiceCheckJobStatusTrigger:
         }
 
     @pytest.mark.parametrize(
-        "attr, expected_value",
+        ("attr", "expected_value"),
         [
             ("gcp_conn_id", GCP_CONN_ID),
             ("impersonation_chain", IMPERSONATION_CHAIN),
@@ -385,6 +413,97 @@ class TestCloudStorageTransferServiceCheckJobStatusTrigger:
             {
                 "status": "error",
                 "message": "Transfer operation failed",
+            }
+        )
+
+        actual_event = await trigger.run().asend(None)
+
+        assert actual_event == expected_event
+
+
+class TestCloudDataTransferServiceRunJobTrigger:
+    @pytest.fixture
+    def trigger(self):
+        return CloudDataTransferServiceRunJobTrigger(
+            project_id=PROJECT_ID,
+            job_name=JOB_0,
+            poke_interval=POLL_INTERVAL,
+            gcp_conn_id=GCP_CONN_ID,
+            impersonation_chain=IMPERSONATION_CHAIN,
+        )
+
+    def test_serialize(self, trigger):
+        class_path, serialized = trigger.serialize()
+        assert class_path == (
+            "airflow.providers.google.cloud.triggers.cloud_storage_transfer_service"
+            ".CloudDataTransferServiceRunJobTrigger"
+        )
+        assert serialized == {
+            "project_id": PROJECT_ID,
+            "job_name": JOB_0,
+            "poke_interval": POLL_INTERVAL,
+            "gcp_conn_id": GCP_CONN_ID,
+            "impersonation_chain": IMPERSONATION_CHAIN,
+        }
+
+    @pytest.mark.parametrize(
+        ("attr", "expected_value"),
+        [
+            ("gcp_conn_id", GCP_CONN_ID),
+            ("impersonation_chain", IMPERSONATION_CHAIN),
+        ],
+    )
+    def test_get_async_hook(self, attr, expected_value, trigger):
+        hook = trigger._get_async_hook()
+        actual_value = hook._hook_kwargs.get(attr)
+        assert isinstance(hook, CloudDataTransferServiceAsyncHook)
+        assert hook._hook_kwargs is not None
+        assert actual_value == expected_value
+
+    @pytest.mark.asyncio
+    @mock.patch(ASYNC_HOOK_CLASS_PATH + ".run_transfer_job")
+    async def test_run_returns_success_event(
+        self,
+        run_transfer_job,
+        trigger,
+    ):
+        test_metadata = struct_pb2.Struct()
+        test_metadata.update({"test": "test_metadata"})
+        test_response = struct_pb2.Struct()
+        test_response.update({"test": "test_response"})
+        test_operation = mock.Mock(metadata=test_metadata, response=test_response)
+        test_operation.name = "test_name"
+        run_transfer_job.return_value.operation = test_operation
+        run_transfer_job.done.side_effect = True
+        expected_event = TriggerEvent(
+            {
+                "status": "success",
+                "message": "Transfer operation run completed successfully",
+                "job_result": {
+                    "name": "test_name",
+                    "metadata": {"test": "test_metadata"},
+                    "response": {"test": "test_response"},
+                },
+            }
+        )
+
+        actual_event = await trigger.run().asend(None)
+
+        assert actual_event == expected_event
+        assert run_transfer_job.call_count == 1
+
+    @pytest.mark.asyncio
+    @mock.patch(ASYNC_HOOK_CLASS_PATH + ".run_transfer_job")
+    async def test_run_returns_exception_event(
+        self,
+        run_transfer_job,
+        trigger,
+    ):
+        run_transfer_job.side_effect = Exception("Run transfer job operation failed")
+        expected_event = TriggerEvent(
+            {
+                "status": "error",
+                "message": "Run transfer job operation failed",
             }
         )
 

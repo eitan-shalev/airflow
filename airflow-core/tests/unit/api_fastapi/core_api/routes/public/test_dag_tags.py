@@ -28,6 +28,7 @@ from airflow.utils.session import provide_session
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
+from tests_common.test_utils.asserts import assert_queries_count
 from tests_common.test_utils.db import (
     clear_db_dag_bundles,
     clear_db_dags,
@@ -99,14 +100,12 @@ class TestDagEndpoint:
 
     def _create_dag_tags(self, session=None):
         session.add(DagTag(dag_id=DAG1_ID, name="tag_2"))
-        session.add(DagTag(dag_id=DAG2_ID, name="tag_1"))
         session.add(DagTag(dag_id=DAG3_ID, name="tag_1"))
+        session.add(DagTag(dag_id=DAG3_ID, name="stale_only"))
 
     @pytest.fixture(autouse=True)
     @provide_session
-    def setup(self, dag_maker, session=None) -> None:
-        self._clear_db()
-
+    def setup(self, dag_maker, *, session=None) -> None:
         with dag_maker(
             DAG1_ID,
             dag_display_name=DAG1_DISPLAY_NAME,
@@ -129,6 +128,7 @@ class TestDagEndpoint:
             params={"foo": 1},
             max_active_tasks=16,
             max_active_runs=16,
+            tags=["tag_1"],
         ):
             EmptyOperator(task_id=TASK_ID)
 
@@ -148,7 +148,7 @@ class TestDagTags(TestDagEndpoint):
     """Unit tests for Get DAG Tags."""
 
     @pytest.mark.parametrize(
-        "query_params, expected_status_code, expected_dag_tags, expected_total_entries",
+        ("query_params", "expected_status_code", "expected_dag_tags", "expected_total_entries"),
         [
             # test with offset, limit, and without any tag_name_pattern
             (
@@ -196,6 +196,12 @@ class TestDagTags(TestDagEndpoint):
                 0,
             ),
             (
+                {"tag_name_pattern": "stale_only"},
+                200,
+                [],
+                0,
+            ),
+            (
                 {"tag_name_pattern": "1"},
                 200,
                 ["tag_1"],
@@ -206,6 +212,25 @@ class TestDagTags(TestDagEndpoint):
                 200,
                 ["tag_1", "tag_2"],
                 2,
+            ),
+            # tag_name_prefix_pattern counterpart
+            (
+                {"tag_name_prefix_pattern": "invalid"},
+                200,
+                [],
+                0,
+            ),
+            (
+                {"tag_name_prefix_pattern": "tag"},
+                200,
+                ["tag_1", "tag_2"],
+                2,
+            ),
+            (
+                {"tag_name_prefix_pattern": "~"},
+                200,
+                ["example", "tag_1", "tag_2"],
+                3,
             ),
             # test order_by
             (
@@ -245,7 +270,8 @@ class TestDagTags(TestDagEndpoint):
     def test_get_dag_tags(
         self, test_client, query_params, expected_status_code, expected_dag_tags, expected_total_entries
     ):
-        response = test_client.get("/dagTags", params=query_params)
+        with assert_queries_count(3 if expected_status_code == 200 else 2):
+            response = test_client.get("/dagTags", params=query_params)
         assert response.status_code == expected_status_code
         if expected_status_code != 200:
             return

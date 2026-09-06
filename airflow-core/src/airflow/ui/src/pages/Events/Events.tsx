@@ -16,11 +16,10 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { ButtonGroup, Code, Flex, Heading, IconButton, useDisclosure, VStack } from "@chakra-ui/react";
+import { Code, useDisclosure } from "@chakra-ui/react";
 import type { ColumnDef } from "@tanstack/react-table";
 import dayjs from "dayjs";
 import { useTranslation } from "react-i18next";
-import { MdCompress, MdExpand } from "react-icons/md";
 import { useParams, useSearchParams } from "react-router-dom";
 
 import { useEventLogServiceGetEventLogs } from "openapi/queries";
@@ -28,9 +27,12 @@ import type { EventLogResponse } from "openapi/requests/types.gen";
 import { DataTable } from "src/components/DataTable";
 import { useTableURLState } from "src/components/DataTable/useTableUrlState";
 import { ErrorAlert } from "src/components/ErrorAlert";
+import { ExpandCollapseButtons } from "src/components/ExpandCollapseButtons";
 import RenderedJsonField from "src/components/RenderedJsonField";
 import Time from "src/components/Time";
 import { SearchParamsKeys, type SearchParamsKeysType } from "src/constants/searchParams";
+import { useAdvancedSearchArg } from "src/hooks/useAdvancedSearch";
+import { useDocumentTitle } from "src/utils";
 
 import { EventsFilters } from "./EventsFilters";
 
@@ -64,6 +66,7 @@ const eventsColumn = (
   },
   {
     accessorKey: "owner",
+    cell: ({ row: { original } }) => original.owner_display_name,
     enableSorting: true,
     header: translate("auditLog.columns.user"),
     meta: {
@@ -77,7 +80,7 @@ const eventsColumn = (
         try {
           const parsed = JSON.parse(original.extra) as Record<string, unknown>;
 
-          return <RenderedJsonField content={parsed} jsonProps={{ collapsed: !open }} />;
+          return <RenderedJsonField collapsed={!open} content={parsed} />;
         } catch {
           return <Code>{original.extra}</Code>;
         }
@@ -158,8 +161,12 @@ const {
 }: SearchParamsKeysType = SearchParamsKeys;
 
 export const Events = () => {
-  const { t: translate } = useTranslation("browse");
+  const { t: translate } = useTranslation(["browse", "common"]);
   const { dagId, runId, taskId } = useParams();
+
+  // Only the standalone audit-log page owns the tab title; nested tabs inherit their parent page's title.
+  useDocumentTitle(dagId === undefined ? translate("common:browse.auditLog") : undefined);
+
   const [searchParams] = useSearchParams();
   const { setTableURLState, tableURLState } = useTableURLState();
   const { pagination, sorting } = tableURLState;
@@ -184,6 +191,37 @@ export const Events = () => {
   const afterDate = afterFilter !== null && dayjs(afterFilter).isValid() ? afterFilter : undefined;
   const beforeDate = beforeFilter !== null && dayjs(beforeFilter).isValid() ? beforeFilter : undefined;
 
+  const dagIdArg = useAdvancedSearchArg({
+    patternApiKey: "dagIdPattern",
+    prefixApiKey: "dagIdPrefixPattern",
+    storageKey: DAG_ID_PARAM,
+    value: dagIdFilter,
+  });
+  const eventArg = useAdvancedSearchArg({
+    patternApiKey: "eventPattern",
+    prefixApiKey: "eventPrefixPattern",
+    storageKey: EVENT_TYPE_PARAM,
+    value: eventTypeFilter,
+  });
+  const ownerArg = useAdvancedSearchArg({
+    patternApiKey: "ownerDisplayNamePattern",
+    prefixApiKey: "ownerDisplayNamePrefixPattern",
+    storageKey: USER_PARAM,
+    value: userFilter,
+  });
+  const runIdArg = useAdvancedSearchArg({
+    patternApiKey: "runIdPattern",
+    prefixApiKey: "runIdPrefixPattern",
+    storageKey: RUN_ID_PARAM,
+    value: runIdFilter,
+  });
+  const taskIdArg = useAdvancedSearchArg({
+    patternApiKey: "taskIdPattern",
+    prefixApiKey: "taskIdPrefixPattern",
+    storageKey: TASK_ID_PARAM,
+    value: taskIdFilter,
+  });
+
   const { data, error, isFetching, isLoading } = useEventLogServiceGetEventLogs(
     {
       after: afterDate,
@@ -191,62 +229,52 @@ export const Events = () => {
       // Use exact match for URL params (dag/run/task context)
       dagId: dagId ?? undefined,
       // Use pattern search for filter inputs (partial matching)
-      dagIdPattern: dagIdFilter ?? undefined,
-      eventPattern: eventTypeFilter ?? undefined,
+      ...dagIdArg,
+      ...eventArg,
       limit: pagination.pageSize,
       mapIndex: mapIndexNumber,
       offset: pagination.pageIndex * pagination.pageSize,
       orderBy,
-      ownerPattern: userFilter ?? undefined,
+      ...ownerArg,
       runId: runId ?? undefined,
-      runIdPattern: runIdFilter ?? undefined,
+      ...runIdArg,
       taskId: taskId ?? undefined,
-      taskIdPattern: taskIdFilter ?? undefined,
+      ...taskIdArg,
       tryNumber: tryNumberNumber,
     },
     undefined,
   );
 
-  return (
-    <VStack alignItems="stretch">
-      {dagId === undefined && runId === undefined && taskId === undefined ? (
-        <Heading size="md">{translate("auditLog.title")}</Heading>
-      ) : undefined}
-      <Flex alignItems="center" justifyContent="space-between">
-        <EventsFilters urlDagId={dagId} urlRunId={runId} urlTaskId={taskId} />
-        <ButtonGroup attached mt="1" size="sm" variant="surface">
-          <IconButton
-            aria-label={translate("auditLog.actions.expandAllExtra")}
-            onClick={onOpen}
-            size="sm"
-            title={translate("auditLog.actions.expandAllExtra")}
-          >
-            <MdExpand />
-          </IconButton>
-          <IconButton
-            aria-label={translate("auditLog.actions.collapseAllExtra")}
-            onClick={onClose}
-            size="sm"
-            title={translate("auditLog.actions.collapseAllExtra")}
-          >
-            <MdCompress />
-          </IconButton>
-        </ButtonGroup>
-      </Flex>
+  const eventLogs = data?.event_logs ?? [];
+  const columns = eventsColumn({ dagId, open, runId, taskId }, translate);
 
+  return (
+    <>
       <ErrorAlert error={error} />
       <DataTable
-        columns={eventsColumn({ dagId, open, runId, taskId }, translate)}
-        data={data?.event_logs ?? []}
+        columns={columns}
+        data={eventLogs}
         displayMode="table"
+        filterActions={<EventsFilters urlDagId={dagId} urlRunId={runId} urlTaskId={taskId} />}
         initialState={tableURLState}
         isFetching={isFetching}
         isLoading={isLoading}
-        modelName={translate("auditLog.columns.event")}
+        modelName="common:event"
         onStateChange={setTableURLState}
+        presentationActions={
+          eventLogs.length > 0 ? (
+            <ExpandCollapseButtons
+              collapseLabel={translate("common:collapseAllExtra")}
+              expandLabel={translate("common:expandAllExtra")}
+              isExpanded={open}
+              onCollapse={onClose}
+              onExpand={onOpen}
+            />
+          ) : undefined
+        }
         skeletonCount={undefined}
         total={data?.total_entries ?? 0}
       />
-    </VStack>
+    </>
   );
 };

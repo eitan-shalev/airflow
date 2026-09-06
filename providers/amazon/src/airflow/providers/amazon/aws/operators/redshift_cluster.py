@@ -21,11 +21,13 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from botocore.exceptions import ClientError, WaiterError
+from tenacity import Retrying, retry_if_exception, stop_after_delay, wait_fixed
+
 from airflow.providers.amazon.aws.hooks.redshift_cluster import RedshiftHook
 from airflow.providers.amazon.aws.operators.base_aws import AwsBaseOperator
 from airflow.providers.amazon.aws.triggers.redshift_cluster import (
+    RedshiftClusterSettledTrigger,
     RedshiftCreateClusterSnapshotTrigger,
     RedshiftCreateClusterTrigger,
     RedshiftDeleteClusterTrigger,
@@ -34,10 +36,11 @@ from airflow.providers.amazon.aws.triggers.redshift_cluster import (
 )
 from airflow.providers.amazon.aws.utils import validate_execute_complete_event
 from airflow.providers.amazon.aws.utils.mixins import aws_template_fields
+from airflow.providers.common.compat.sdk import AirflowException, conf
 from airflow.utils.helpers import prune_dict
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class RedshiftCreateClusterOperator(AwsBaseOperator[RedshiftHook]):
@@ -106,7 +109,12 @@ class RedshiftCreateClusterOperator(AwsBaseOperator[RedshiftHook]):
     :param wait_for_completion: Whether wait for the cluster to be in ``available`` state
     :param max_attempt: The maximum number of attempts to be made. Default: 5
     :param poll_interval: The amount of time in seconds to wait between attempts. Default: 60
-    :param deferrable: If True, the operator will run in deferrable mode
+    :param deferrable: If True, the operator will run in deferrable mode.
+    :param delete_cluster_on_failure: If True, best-effort deletion of the redshift cluster will be attempted
+        after post-creation failure. Default: True.
+    :param cleanup_timeout_seconds: Maximum time in seconds to attempt
+        best-effort deletion of the cluster when post-creation failure occurs.
+        Default: 300 seconds.
     """
 
     template_fields: Sequence[str] = aws_template_fields(
@@ -189,6 +197,8 @@ class RedshiftCreateClusterOperator(AwsBaseOperator[RedshiftHook]):
         max_attempt: int = 5,
         poll_interval: int = 60,
         deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
+        delete_cluster_on_failure: bool = True,
+        cleanup_timeout_seconds: int = 300,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -230,6 +240,66 @@ class RedshiftCreateClusterOperator(AwsBaseOperator[RedshiftHook]):
         self.poll_interval = poll_interval
         self.deferrable = deferrable
         self.kwargs = kwargs
+        self.delete_cluster_on_failure = delete_cluster_on_failure
+        self.cleanup_timeout_seconds = cleanup_timeout_seconds
+
+    @staticmethod
+    def _retry_if_cluster_busy(exc: BaseException) -> bool:
+        if isinstance(exc, ClientError):
+            return exc.response["Error"]["Code"] in {
+                "InvalidClusterStateFault",
+                "InvalidClusterState",
+            }
+        return False
+
+    def _attempt_cleanup_with_retry(self) -> None:
+        """
+        Attempt bounded best-effort deletion of the cluster.
+
+        This method is only invoked during task failure handling.
+        It does not block until deletion completes and will not
+        mask the original exception.
+        """
+        RETRY_INTERVAL_SECONDS = 60
+
+        retrying = Retrying(
+            retry=retry_if_exception(self._retry_if_cluster_busy),
+            wait=wait_fixed(RETRY_INTERVAL_SECONDS),
+            stop=stop_after_delay(self.cleanup_timeout_seconds),
+            reraise=True,
+        )
+
+        try:
+            for attempt in retrying:
+                with attempt:
+                    self.log.info(
+                        "Attempt %s: Deleting Redshift cluster %s.",
+                        attempt.retry_state.attempt_number,
+                        self.cluster_identifier,
+                    )
+
+                    # Do not wait for deletion to complete; cleanup is best-effort.
+                    self.hook.delete_cluster(cluster_identifier=self.cluster_identifier)
+
+                    self.log.info(
+                        "Successfully initiated deletion of Redshift cluster %s.",
+                        self.cluster_identifier,
+                    )
+
+                    return
+
+        except Exception as e:
+            if self._retry_if_cluster_busy(e):
+                self.log.exception(
+                    "Timed out after %s seconds while trying to delete Redshift cluster %s.",
+                    self.cleanup_timeout_seconds,
+                    self.cluster_identifier,
+                )
+            else:
+                self.log.exception(
+                    "Unexpected error while attempting to delete Redshift cluster %s.",
+                    self.cluster_identifier,
+                )
 
     def execute(self, context: Context):
         self.log.info("Creating Redshift cluster %s", self.cluster_identifier)
@@ -309,20 +379,42 @@ class RedshiftCreateClusterOperator(AwsBaseOperator[RedshiftHook]):
                     waiter_delay=self.poll_interval,
                     waiter_max_attempts=self.max_attempt,
                     aws_conn_id=self.aws_conn_id,
+                    region_name=self.region_name,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
                 ),
                 method_name="execute_complete",
             )
-        if self.wait_for_completion:
-            self.hook.get_conn().get_waiter("cluster_available").wait(
-                ClusterIdentifier=self.cluster_identifier,
-                WaiterConfig={
-                    "Delay": self.poll_interval,
-                    "MaxAttempts": self.max_attempt,
-                },
-            )
 
-        self.log.info("Created Redshift cluster %s", self.cluster_identifier)
-        self.log.info(cluster)
+        try:
+            if self.wait_for_completion:
+                self.hook.get_conn().get_waiter("cluster_available").wait(
+                    ClusterIdentifier=self.cluster_identifier,
+                    WaiterConfig={
+                        "Delay": self.poll_interval,
+                        "MaxAttempts": self.max_attempt,
+                    },
+                )
+
+            self.log.info("Created Redshift cluster %s", self.cluster_identifier)
+            self.log.info(cluster)
+        except WaiterError:
+            # Best-effort cleanup when post-initiation steps fail (e.g. IAM/permission errors).
+            if cluster:
+                self.log.warning(
+                    "Execution failed after Redshift cluster %s was started by this task instance.",
+                    self.cluster_identifier,
+                )
+
+                if self.delete_cluster_on_failure:
+                    try:
+                        self._attempt_cleanup_with_retry()
+                    except Exception:
+                        self.log.exception(
+                            "Failed while attempting to delete Redshift cluster %s.",
+                            self.cluster_identifier,
+                        )
+            raise
 
     def execute_complete(self, context: Context, event: dict[str, Any] | None = None) -> None:
         validated_event = validate_execute_complete_event(event)
@@ -409,6 +501,9 @@ class RedshiftCreateClusterSnapshotOperator(AwsBaseOperator[RedshiftHook]):
                     waiter_delay=self.poll_interval,
                     waiter_max_attempts=self.max_attempt,
                     aws_conn_id=self.aws_conn_id,
+                    region_name=self.region_name,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
                 ),
                 method_name="execute_complete",
                 # timeout is set to ensure that if a trigger dies, the timeout does not restart
@@ -580,6 +675,9 @@ class RedshiftResumeClusterOperator(AwsBaseOperator[RedshiftHook]):
                             waiter_delay=self.poll_interval,
                             waiter_max_attempts=self.max_attempts,
                             aws_conn_id=self.aws_conn_id,
+                            region_name=self.region_name,
+                            verify=self.verify,
+                            botocore_config=self.botocore_config,
                         ),
                         method_name="execute_complete",
                         # timeout is set to ensure that if a trigger dies, the timeout does not restart
@@ -687,6 +785,9 @@ class RedshiftPauseClusterOperator(AwsBaseOperator[RedshiftHook]):
                             waiter_delay=self.poll_interval,
                             waiter_max_attempts=self.max_attempts,
                             aws_conn_id=self.aws_conn_id,
+                            region_name=self.region_name,
+                            verify=self.verify,
+                            botocore_config=self.botocore_config,
                         ),
                         method_name="execute_complete",
                         # timeout is set to ensure that if a trigger dies, the timeout does not restart
@@ -736,7 +837,9 @@ class RedshiftDeleteClusterOperator(AwsBaseOperator[RedshiftHook]):
         https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
     :param poll_interval: Time (in seconds) to wait between two consecutive calls to check cluster state
     :param deferrable: Run operator in the deferrable mode.
-    :param max_attempts: (Deferrable mode only) The maximum number of attempts to be made
+    :param max_attempts: The maximum number of attempts to be made, both when retrying the delete while
+        the cluster is busy and when waiting for deletion to complete; combined with ``poll_interval``
+        the default gives a ~15 minute window, long enough to outlast a pause/resize.
     """
 
     template_fields: Sequence[str] = aws_template_fields(
@@ -764,16 +867,18 @@ class RedshiftDeleteClusterOperator(AwsBaseOperator[RedshiftHook]):
         self.final_cluster_snapshot_identifier = final_cluster_snapshot_identifier
         self.wait_for_completion = wait_for_completion
         self.poll_interval = poll_interval
-        # These parameters are added to keep trying if there is a running operation in the cluster
-        # If there is a running operation in the cluster while trying to delete it, a InvalidClusterStateFault
-        # is thrown. In such case, retrying
-        self._attempts = 10
-        self._attempt_interval = 15
         self.deferrable = deferrable
         self.max_attempts = max_attempts
 
     def execute(self, context: Context):
-        while self._attempts:
+        if self.deferrable:
+            self._delete_or_defer_until_settled()
+            return
+
+        # Retry the delete while the cluster is mid-transition (InvalidClusterStateFault) until it
+        # settles into a deletable state.
+        attempts = self.max_attempts
+        while attempts:
             try:
                 self.hook.delete_cluster(
                     cluster_identifier=self.cluster_identifier,
@@ -782,47 +887,97 @@ class RedshiftDeleteClusterOperator(AwsBaseOperator[RedshiftHook]):
                 )
                 break
             except self.hook.conn.exceptions.InvalidClusterStateFault:
-                self._attempts -= 1
+                attempts -= 1
 
-                if self._attempts:
+                if attempts:
                     current_state = self.hook.conn.describe_clusters(
                         ClusterIdentifier=self.cluster_identifier
                     )["Clusters"][0]["ClusterStatus"]
                     self.log.error(
                         "Cluster in %s state, unable to delete. %d attempts remaining.",
                         current_state,
-                        self._attempts,
+                        attempts,
                     )
-                    time.sleep(self._attempt_interval)
+                    time.sleep(self.poll_interval)
                 else:
                     raise
 
-        if self.deferrable:
-            cluster_state = self.hook.cluster_status(cluster_identifier=self.cluster_identifier)
-            if cluster_state == "cluster_not_found":
-                self.log.info("Cluster deleted successfully")
-            elif cluster_state in ("creating", "modifying"):
-                raise AirflowException(
-                    f"Unable to delete cluster since cluster is currently in status: {cluster_state}"
-                )
-            else:
-                self.defer(
-                    timeout=timedelta(seconds=self.max_attempts * self.poll_interval + 60),
-                    trigger=RedshiftDeleteClusterTrigger(
-                        cluster_identifier=self.cluster_identifier,
-                        waiter_delay=self.poll_interval,
-                        waiter_max_attempts=self.max_attempts,
-                        aws_conn_id=self.aws_conn_id,
-                    ),
-                    method_name="execute_complete",
-                )
-
-        elif self.wait_for_completion:
+        if self.wait_for_completion:
             waiter = self.hook.conn.get_waiter("cluster_deleted")
             waiter.wait(
                 ClusterIdentifier=self.cluster_identifier,
                 WaiterConfig={"Delay": self.poll_interval, "MaxAttempts": self.max_attempts},
             )
+
+    def _delete_or_defer_until_settled(self) -> None:
+        """
+        Issue the delete once (deferrable mode), then defer.
+
+        If accepted, defer to :class:`RedshiftDeleteClusterTrigger` to await deletion. If the cluster is
+        busy (``InvalidClusterStateFault``), defer to :class:`RedshiftClusterSettledTrigger`; the
+        ``_retry_delete_when_settled`` callback re-issues the delete once it settles.
+        """
+        try:
+            self.hook.delete_cluster(
+                cluster_identifier=self.cluster_identifier,
+                skip_final_cluster_snapshot=self.skip_final_cluster_snapshot,
+                final_cluster_snapshot_identifier=self.final_cluster_snapshot_identifier,
+            )
+        except self.hook.conn.exceptions.InvalidClusterStateFault:
+            self.log.info(
+                "Cluster %s is busy; deferring until it settles into a deletable state.",
+                self.cluster_identifier,
+            )
+            self.defer(
+                timeout=timedelta(seconds=self.max_attempts * self.poll_interval + 60),
+                trigger=RedshiftClusterSettledTrigger(
+                    cluster_identifier=self.cluster_identifier,
+                    waiter_delay=self.poll_interval,
+                    waiter_max_attempts=self.max_attempts,
+                    aws_conn_id=self.aws_conn_id,
+                    region_name=self.region_name,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
+                ),
+                method_name="_retry_delete_when_settled",
+            )
+            return
+
+        self._defer_until_deleted()
+
+    def _defer_until_deleted(self) -> None:
+        """Defer to the delete-completion waiter, short-circuiting if the cluster is already gone."""
+        cluster_state = self.hook.cluster_status(cluster_identifier=self.cluster_identifier)
+        if cluster_state == "cluster_not_found":
+            self.log.info("Cluster deleted successfully")
+            return
+        self.defer(
+            timeout=timedelta(seconds=self.max_attempts * self.poll_interval + 60),
+            trigger=RedshiftDeleteClusterTrigger(
+                cluster_identifier=self.cluster_identifier,
+                waiter_delay=self.poll_interval,
+                waiter_max_attempts=self.max_attempts,
+                aws_conn_id=self.aws_conn_id,
+                region_name=self.region_name,
+                verify=self.verify,
+                botocore_config=self.botocore_config,
+            ),
+            method_name="execute_complete",
+        )
+
+    def _retry_delete_when_settled(self, context: Context, event: dict[str, Any] | None = None) -> None:
+        """
+        Re-issue the delete once the cluster has settled, then defer until deletion completes.
+
+        Callback for :class:`RedshiftClusterSettledTrigger`. If the delete is still rejected because of a
+        race (the cluster re-entered a transitional state), defer to the settle-wait trigger again.
+        """
+        validated_event = validate_execute_complete_event(event)
+        if validated_event["status"] != "success":
+            raise AirflowException(f"Error waiting for cluster to become deletable: {validated_event}")
+
+        self.cluster_identifier = validated_event["cluster_identifier"]
+        self._delete_or_defer_until_settled()
 
     def execute_complete(self, context: Context, event: dict[str, Any] | None = None) -> None:
         validated_event = validate_execute_complete_event(event)

@@ -76,7 +76,6 @@ file:
     from airflow.sdk import DAG
     from airflow.example_dags.plugins.workday import AfterWorkdayTimetable
 
-
     with DAG(
         dag_id="example_after_workday_timetable_dag",
         start_date=pendulum.datetime(2021, 3, 10, tz="UTC"),
@@ -145,6 +144,15 @@ how the Dag and its tasks specify the schedule, and contains three attributes:
     (the *start* of the data interval), not when the run will be scheduled
     (usually after the end of the data interval).
 
+.. note::
+
+    ``last_automated_data_interval`` is only ever ``None`` when the Dag is
+    first picked up by the Dag processor: the first run is calculated at
+    parsing time, before any Dag run exists, and the result is stored on the
+    Dag. During scheduling, ``next_dagrun_info`` is always called with the
+    previous run's data interval already populated, so the ``None`` case does
+    not appear in scheduler logs when a Dag is unpaused for the first time.
+
 If there was a run scheduled previously, we should now schedule for the next
 non-holiday weekday by looping through subsequent days to find one that is not
 a Saturday, Sunday, or US holiday. If there was not a previous scheduled run,
@@ -198,7 +206,6 @@ For reference, here's our plugin and Dag files in their entirety:
     from airflow.example_dags.plugins.workday import AfterWorkdayTimetable
     from airflow.providers.standard.operators.empty import EmptyOperator
 
-
     with DAG(
         dag_id="example_workday_timetable",
         start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
@@ -230,6 +237,13 @@ purpose, we'd want to do something like:
                 data_interval=DataInterval(start=start, end=end),
                 run_after=DateTime.combine(end.date(), self._schedule_at).replace(tzinfo=UTC),
             )
+
+If you adapt the first-run logic from ``AfterWorkdayTimetable`` for a custom
+``schedule_at`` value, compare the candidate time with ``self._schedule_at``.
+The midnight-specific check in the earlier example is only correct when runs
+are scheduled at ``00:00``. For example, an earliest time of ``06:00`` should
+still allow an ``08:00`` same-day run, while an earliest time of ``09:00`` should
+move to the next workday.
 
 However, since the timetable is a part of the Dag, we need to tell Airflow how
 to serialize it with the context we provide in ``__init__``. This is done by

@@ -25,16 +25,11 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseOperator
 from airflow.providers.databricks.hooks.databricks import DatabricksHook
-from airflow.providers.databricks.version_compat import BaseOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class DatabricksReposCreateOperator(BaseOperator):
@@ -56,8 +51,10 @@ class DatabricksReposCreateOperator(BaseOperator):
         connection and create the key ``host`` and leave the ``host`` field empty. (templated)
     :param databricks_retry_limit: Amount of times retry if the Databricks backend is
         unreachable. Its value must be greater than or equal to 1.
-    :param databricks_retry_delay: Number of seconds to wait between retries (it
-            might be a floating point number).
+    :param databricks_retry_delay: Minimum wait in seconds between retryable attempts when
+        using the default retry strategy. The wait uses exponential backoff (doubling after
+        each failure, capped at ``2 ** databricks_retry_limit`` seconds). May be a floating
+        point number.
     """
 
     # Used in airflow.models.BaseOperator
@@ -147,15 +144,40 @@ class DatabricksReposCreateOperator(BaseOperator):
                 )
             payload["path"] = self.repo_path
         existing_repo_id = None
+
         if self.repo_path is not None:
             existing_repo_id = self._hook.get_repo_by_path(self.repo_path)
             if existing_repo_id is not None and not self.ignore_existing_repo:
                 raise AirflowException(f"Repo with path '{self.repo_path}' already exists")
+
         if existing_repo_id is None:
-            result = self._hook.create_repo(payload)
-            repo_id = result["id"]
+            try:
+                result = self._hook.create_repo(payload)
+                repo_id = result["id"]
+            except Exception:
+                # If ignore_existing_repo is False, preserve existing behavior
+                # and propagate the original create failure.
+                if not self.ignore_existing_repo:
+                    raise
+
+                # When ignore_existing_repo=True, attempt to recover from a possible
+                # create-time conflict (e.g., repo created concurrently).
+                if self.repo_path is not None:
+                    repo_id = self._hook.get_repo_by_path(self.repo_path)
+
+                # Only treat this as success if the repo now exists.
+                # If it still does not exist, re-raise the original exception
+                # to avoid masking genuine create failures.
+                if repo_id is None:
+                    raise
+
+                self.log.info(
+                    "Repository at path '%s' already exists; continuing because ignore_existing_repo=True.",
+                    self.repo_path,
+                )
         else:
             repo_id = existing_repo_id
+
         # update repo if necessary
         if self.branch is not None:
             self._hook.update_repo(str(repo_id), {"branch": str(self.branch)})
@@ -181,8 +203,10 @@ class DatabricksReposUpdateOperator(BaseOperator):
         connection and create the key ``host`` and leave the ``host`` field empty.  (templated)
     :param databricks_retry_limit: Amount of times retry if the Databricks backend is
         unreachable. Its value must be greater than or equal to 1.
-    :param databricks_retry_delay: Number of seconds to wait between retries (it
-            might be a floating point number).
+    :param databricks_retry_delay: Minimum wait in seconds between retryable attempts when
+        using the default retry strategy. The wait uses exponential backoff (doubling after
+        each failure, capped at ``2 ** databricks_retry_limit`` seconds). May be a floating
+        point number.
     """
 
     # Used in airflow.models.BaseOperator
@@ -255,8 +279,10 @@ class DatabricksReposDeleteOperator(BaseOperator):
         connection and create the key ``host`` and leave the ``host`` field empty. (templated)
     :param databricks_retry_limit: Amount of times retry if the Databricks backend is
         unreachable. Its value must be greater than or equal to 1.
-    :param databricks_retry_delay: Number of seconds to wait between retries (it
-            might be a floating point number).
+    :param databricks_retry_delay: Minimum wait in seconds between retryable attempts when
+        using the default retry strategy. The wait uses exponential backoff (doubling after
+        each failure, capped at ``2 ** databricks_retry_limit`` seconds). May be a floating
+        point number.
     """
 
     # Used in airflow.models.BaseOperator

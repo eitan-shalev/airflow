@@ -71,17 +71,52 @@ class CronMixin:
         self._timezone = timezone
 
         try:
-            descriptor = ExpressionDescriptor(
-                expression=self._expression, casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
-            )
             # checking for more than 5 parameters in Cron and avoiding evaluation for now,
             # as Croniter has inconsistent evaluation with other libraries
             if len(croniter(self._expression).expanded) > 5:
                 raise FormatException()
-            interval_description: str = descriptor.get_description()
+
+            self.description = self._describe_with_dom_dow_fix(self._expression)
+
         except (CroniterBadCronError, FormatException, MissingFieldException):
-            interval_description = ""
-        self.description: str = interval_description
+            self.description = ""
+
+    def _describe_with_dom_dow_fix(self, expression: str) -> str:
+        """
+        Return cron description with fix for DOM+DOW conflicts.
+
+        If both DOM and DOW are restricted, explain them as OR.
+        """
+        cron_fields = expression.split()
+
+        if len(cron_fields) < 5:
+            return ExpressionDescriptor(
+                expression, casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
+            ).get_description()
+
+        dom = cron_fields[2]
+        dow = cron_fields[4]
+
+        if dom != "*" and dow != "*":
+            # Case: conflict → DOM OR DOW
+            cron_fields_dom = cron_fields.copy()
+            cron_fields_dom[4] = "*"
+            day_of_month_desc = ExpressionDescriptor(
+                " ".join(cron_fields_dom), casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
+            ).get_description()
+
+            cron_fields_dow = cron_fields.copy()
+            cron_fields_dow[2] = "*"
+            day_of_week_desc = ExpressionDescriptor(
+                " ".join(cron_fields_dow), casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
+            ).get_description()
+
+            return f"{day_of_month_desc} (or) {day_of_week_desc}"
+
+        # no conflict → return normal description
+        return ExpressionDescriptor(
+            expression, casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
+        ).get_description()
 
     def __eq__(self, other: object) -> bool:
         """
@@ -89,9 +124,14 @@ class CronMixin:
 
         This is only for testing purposes and should not be relied on otherwise.
         """
-        if not isinstance(other, type(self)):
+        from airflow.serialization.encoders import coerce_to_core_timetable
+
+        if not isinstance(other := coerce_to_core_timetable(other), type(self)):
             return NotImplemented
         return self._expression == other._expression and self._timezone == other._timezone
+
+    def __hash__(self):
+        return hash((self._expression, self._timezone))
 
     @property
     def summary(self) -> str:
@@ -102,6 +142,16 @@ class CronMixin:
             croniter(self._expression)
         except (CroniterBadCronError, CroniterBadDateError) as e:
             raise AirflowTimetableInvalid(str(e))
+
+    def localize_partition_datetime(self, dt: datetime.datetime) -> DateTime:
+        """
+        Re-interpret *dt*'s wall-clock reading as a moment in this timetable's timezone.
+
+        Overrides the base (UTC pass-through) so partition-date filter bounds are
+        evaluated in the timetable's local timezone rather than at the raw UTC
+        instant, while preserving sub-day precision.
+        """
+        return convert_to_utc(make_aware(dt.replace(tzinfo=None), self._timezone))
 
     def _get_next(self, current: DateTime) -> DateTime:
         """Get the first schedule after specified time, with DST fixed."""
@@ -116,14 +166,21 @@ class CronMixin:
         return convert_to_utc(current.in_timezone(self._timezone) + delta)
 
     def _get_prev(self, current: DateTime) -> DateTime:
-        """Get the first schedule before specified time, with DST fixed."""
+        """Get the first schedule strictly before specified time, with DST fixed."""
         naive = make_naive(current, self._timezone)
         cron = croniter(self._expression, start_time=naive)
         scheduled = cron.get_prev(datetime.datetime)
         if TYPE_CHECKING:
             assert isinstance(scheduled, datetime.datetime)
         if not _covers_every_hour(cron):
-            return convert_to_utc(make_aware(scheduled, self._timezone))
+            prev = convert_to_utc(make_aware(scheduled, self._timezone))
+            # croniter steps back on naive wall clock, but make_aware can map a tick inside
+            # a DST transition forward onto current or later. Keep stepping until strictly
+            # earlier; get_prev is strictly decreasing, so this terminates.
+            while prev >= current:
+                scheduled = cron.get_prev(datetime.datetime)
+                prev = convert_to_utc(make_aware(scheduled, self._timezone))
+            return prev
         delta = naive - scheduled
         return convert_to_utc(current.in_timezone(self._timezone) - delta)
 

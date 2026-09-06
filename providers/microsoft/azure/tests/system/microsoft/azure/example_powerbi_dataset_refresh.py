@@ -50,6 +50,8 @@ def create_connection(conn_id_name: str):
         password=CLIENT_SECRET,
         extra={"tenant_id": TENANT_ID},
     )
+    if settings.Session is None:
+        raise RuntimeError("Session not configured. Call configure_orm() first.")
     session = settings.Session()
     session.add(conn)
     session.commit()
@@ -95,5 +97,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

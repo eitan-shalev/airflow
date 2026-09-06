@@ -18,20 +18,21 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import pathlib
 import sys
 import textwrap
 import typing
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from socket import socketpair
-from typing import TYPE_CHECKING, BinaryIO
-from unittest import mock
+from typing import TYPE_CHECKING, Any, BinaryIO
 from unittest.mock import MagicMock, patch
 
 import pytest
 import structlog
 from pydantic import TypeAdapter
+from sqlalchemy import select
 from structlog.typing import FilteringBoundLogger
 
 from airflow._shared.timezones import timezone
@@ -45,36 +46,45 @@ from airflow.callbacks.callback_requests import (
     CallbackRequest,
     DagCallbackRequest,
     DagRunContext,
-    EmailNotificationRequest,
+    EmailRequest,
     TaskCallbackRequest,
 )
 from airflow.dag_processing.dagbag import DagBag
-from airflow.dag_processing.manager import process_parse_results
+from airflow.dag_processing.manager import DagFileProcessorManager, process_parse_results
 from airflow.dag_processing.processor import (
     DagFileParseRequest,
     DagFileParsingResult,
     DagFileProcessorProcess,
     ToDagProcessor,
     ToManager,
+    _execute_callbacks,
     _execute_dag_callbacks,
     _execute_email_callbacks,
     _execute_task_callbacks,
     _parse_file,
+    _parse_file_entrypoint,
     _pre_import_airflow_modules,
 )
 from airflow.models import DagRun
 from airflow.sdk import DAG, BaseOperator
 from airflow.sdk.api.client import Client
-from airflow.sdk.api.datamodels._generated import DagRunState
-from airflow.sdk.execution_time import comms
+from airflow.sdk.api.datamodels._generated import ConnectionResponse, DagRunState, VariableResponse
+from airflow.sdk.execution_time import comms, supervisor
 from airflow.sdk.execution_time.comms import (
+    GetConnection,
+    GetTaskStates,
+    GetTICount,
+    GetVariable,
     GetXCom,
     GetXComSequenceSlice,
+    TaskStatesResult,
+    TICount,
     ToSupervisor,
     ToTask,
     XComResult,
     XComSequenceSliceResult,
 )
+from airflow.sdk.execution_time.task_runner import RuntimeTaskInstance
 from airflow.utils.session import create_session
 from airflow.utils.state import TaskInstanceState
 
@@ -84,6 +94,19 @@ if TYPE_CHECKING:
     from kgb import SpyAgency
 
 pytestmark = pytest.mark.db_test
+
+
+@pytest.fixture(autouse=True)
+def _force_bare_fork(monkeypatch):
+    """
+    Keep the parsing child on a bare ``os.fork`` on every platform.
+
+    On macOS the DAG processor forks+execs a clean interpreter for fork-safety
+    (see ``DagFileProcessorProcess.start``).  Forcing bare fork keeps local macOS
+    runs aligned with Linux/CI behavior.
+    """
+    monkeypatch.setattr(supervisor, "_should_use_exec", lambda: False)
+
 
 DEFAULT_DATE = timezone.datetime(2016, 1, 1)
 
@@ -117,6 +140,7 @@ class TestDagFileProcessor:
             DagFileParseRequest(
                 file=file_path,
                 bundle_path=TEST_DAG_FOLDER,
+                bundle_name="testing",
                 callback_requests=callback_requests or [],
             ),
             log=structlog.get_logger(),
@@ -156,6 +180,8 @@ class TestDagFileProcessor:
             id=1,
             path=path,
             bundle_path=tmp_path,
+            bundle_name="testing",
+            dag_file_rel_path=str(path.relative_to(tmp_path)),
             callbacks=[],
             logger=logger,
             logger_filehandle=logger_filehandle,
@@ -191,6 +217,8 @@ class TestDagFileProcessor:
             id=1,
             path=path,
             bundle_path=tmp_path,
+            bundle_name="testing",
+            dag_file_rel_path=str(path.relative_to(tmp_path)),
             callbacks=[],
             logger=logger,
             logger_filehandle=logger_filehandle,
@@ -224,6 +252,8 @@ class TestDagFileProcessor:
             id=1,
             path=path,
             bundle_path=tmp_path,
+            bundle_name="testing",
+            dag_file_rel_path=str(path.relative_to(tmp_path)),
             callbacks=[],
             logger=logger,
             logger_filehandle=logger_filehandle,
@@ -239,7 +269,7 @@ class TestDagFileProcessor:
             assert result.import_errors == {}
             assert result.serialized_dags[0].dag_id == "test_myvalue"
 
-            all_vars = session.query(VariableORM).all()
+            all_vars = session.scalars(select(VariableORM)).all()
             assert len(all_vars) == 1
             assert all_vars[0].key == "mykey"
 
@@ -267,6 +297,8 @@ class TestDagFileProcessor:
             id=1,
             path=path,
             bundle_path=tmp_path,
+            bundle_name="testing",
+            dag_file_rel_path=str(path.relative_to(tmp_path)),
             callbacks=[],
             logger=logger,
             logger_filehandle=logger_filehandle,
@@ -282,7 +314,7 @@ class TestDagFileProcessor:
             assert result.import_errors == {}
             assert result.serialized_dags[0].dag_id == "not-found"
 
-            all_vars = session.query(VariableORM).all()
+            all_vars = session.scalars(select(VariableORM)).all()
             assert len(all_vars) == 0
 
     def test_top_level_connection_access(
@@ -304,6 +336,8 @@ class TestDagFileProcessor:
             id=1,
             path=path,
             bundle_path=tmp_path,
+            bundle_name="testing",
+            dag_file_rel_path=str(path.relative_to(tmp_path)),
             callbacks=[],
             logger=logger,
             logger_filehandle=logger_filehandle,
@@ -333,6 +367,8 @@ class TestDagFileProcessor:
             id=1,
             path=path,
             bundle_path=tmp_path,
+            bundle_name="testing",
+            dag_file_rel_path=str(path.relative_to(tmp_path)),
             callbacks=[],
             logger=logger,
             logger_filehandle=logger_filehandle,
@@ -366,6 +402,8 @@ class TestDagFileProcessor:
             id=1,
             path=dag1_path,
             bundle_path=tmp_path,
+            bundle_name="testing",
+            dag_file_rel_path=str(dag1_path.relative_to(tmp_path)),
             callbacks=[],
             logger=MagicMock(spec=FilteringBoundLogger),
             logger_filehandle=MagicMock(spec=BinaryIO),
@@ -402,23 +440,28 @@ class TestDagFileProcessor:
         mock_import.assert_called_once_with("airflow.models")
         logger.warning.assert_not_called()
 
-    def test__pre_import_airflow_modules_warns_on_missing_module(self):
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            ModuleNotFoundError("module not found"),
+            RuntimeError("import failed"),
+            ImportError("import error"),
+        ],
+    )
+    def test__pre_import_airflow_modules_warns_on_import_errors(self, exception):
+        """Test that pre-import logs warnings for any import exception type."""
         logger = MagicMock(spec=FilteringBoundLogger)
         with (
             env_vars({"AIRFLOW__DAG_PROCESSOR__PARSING_PRE_IMPORT_MODULES": "true"}),
-            patch(
-                "airflow.dag_processing.processor.iter_airflow_imports", return_value=["non_existent_module"]
-            ),
-            patch(
-                "airflow.dag_processing.processor.importlib.import_module", side_effect=ModuleNotFoundError()
-            ),
+            patch("airflow.dag_processing.processor.iter_airflow_imports", return_value=["some_module"]),
+            patch("airflow.dag_processing.processor.importlib.import_module", side_effect=exception),
         ):
             _pre_import_airflow_modules("test.py", logger)
 
         logger.warning.assert_called_once()
         warning_args = logger.warning.call_args[0]
         assert "Error when trying to pre-import module" in warning_args[0]
-        assert "non_existent_module" in warning_args[1]
+        assert "some_module" in warning_args[1]
         assert "test.py" in warning_args[2]
 
     def test__pre_import_airflow_modules_partial_success_and_warning(self):
@@ -437,6 +480,36 @@ class TestDagFileProcessor:
             _pre_import_airflow_modules("test.py", logger)
 
         assert logger.warning.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("platform_uses_exec", "target", "expected_use_exec"),
+    [
+        (True, _parse_file_entrypoint, True),
+        (False, _parse_file_entrypoint, False),
+        (True, lambda: None, False),
+    ],
+)
+def test_start_opts_into_fork_exec(monkeypatch, mocker, platform_uses_exec, target, expected_use_exec):
+    """start() forks+execs only for the real parse entry point on fork-unsafe platforms."""
+    monkeypatch.setattr(supervisor, "_should_use_exec", lambda: platform_uses_exec)
+    base_start = mocker.patch(
+        "airflow.sdk.execution_time.supervisor.WatchedSubprocess.start", return_value=MagicMock()
+    )
+    mocker.patch("airflow.dag_processing.processor._pre_import_airflow_modules")
+
+    DagFileProcessorProcess.start(
+        path="some_dag.py",
+        bundle_path=pathlib.Path("/tmp/bundle"),
+        bundle_name="testing",
+        dag_file_rel_path="some_dag.py",
+        callbacks=[],
+        client=MagicMock(spec=Client),
+        target=target,
+        logger=MagicMock(),
+    )
+
+    assert base_start.call_args.kwargs["use_exec"] is expected_use_exec
 
 
 def write_dag_in_a_fn_to_file(fn: Callable[[], None], folder: pathlib.Path) -> pathlib.Path:
@@ -472,6 +545,7 @@ def test_parse_file_entrypoint_parses_dag_callbacks(mocker):
         body={
             "file": "/files/dags/wait.py",
             "bundle_path": "/files/dags",
+            "bundle_name": "testing",
             "callback_requests": [
                 {
                     "filepath": "wait.py",
@@ -538,7 +612,9 @@ def test_parse_file_with_dag_callbacks(spy_agency):
         )
     ]
     _parse_file(
-        DagFileParseRequest(file="A", bundle_path="no matter", callback_requests=requests),
+        DagFileParseRequest(
+            file="A", bundle_path="no matter", bundle_name="testing", callback_requests=requests
+        ),
         log=structlog.get_logger(),
     )
 
@@ -581,23 +657,98 @@ def test_parse_file_with_task_callbacks(spy_agency):
         )
     ]
     _parse_file(
-        DagFileParseRequest(file="A", bundle_path="test", callback_requests=requests),
+        DagFileParseRequest(file="A", bundle_path="test", bundle_name="testing", callback_requests=requests),
         log=structlog.get_logger(),
     )
 
     assert called is True
 
 
-def test_callback_processing_does_not_update_timestamps(session):
+@conf_vars({("dag_processor", "dag_version_inflation_check_level"): "error"})
+def test_parse_file_static_check_with_error():
+    result = _parse_file(
+        DagFileParseRequest(
+            file=f"{TEST_DAG_FOLDER}/test_dag_version_inflation_check.py",
+            bundle_path=TEST_DAG_FOLDER,
+            bundle_name="testing",
+        ),
+        log=structlog.get_logger(),
+    )
+
+    assert result.serialized_dags == []
+    assert list(result.import_errors.keys()) == ["test_dag_version_inflation_check.py"]
+    assert result.warnings is None
+    assert "Don't use the variables as arguments" in next(iter(result.import_errors.values()))
+
+
+@conf_vars({("dag_processor", "dag_version_inflation_check_level"): "error"})
+def test_parse_file_static_check_error_still_executes_callbacks(spy_agency):
+    """Callbacks for already-scheduled runs must run even when the stability check blocks parsing."""
+    from airflow import DAG
+
+    called = False
+
+    def on_failure(context):
+        nonlocal called
+        called = True
+
+    dag = DAG(dag_id="a", on_failure_callback=on_failure)
+
+    def fake_collect_dags(self, *args, **kwargs):
+        self.dags[dag.dag_id] = dag
+
+    spy_agency.spy_on(DagBag.collect_dags, call_fake=fake_collect_dags, owner=DagBag)
+
+    requests = [
+        DagCallbackRequest(
+            filepath="test_dag_version_inflation_check.py",
+            msg="Message",
+            dag_id="a",
+            run_id="b",
+            bundle_name="testing",
+            bundle_version=None,
+        )
+    ]
+    result = _parse_file(
+        DagFileParseRequest(
+            file=f"{TEST_DAG_FOLDER}/test_dag_version_inflation_check.py",
+            bundle_path=TEST_DAG_FOLDER,
+            bundle_name="testing",
+            callback_requests=requests,
+        ),
+        log=structlog.get_logger(),
+    )
+
+    assert result is None
+    assert called is True
+
+
+def test_parse_file_static_check_with_default_warning():
+    result = _parse_file(
+        DagFileParseRequest(
+            file=f"{TEST_DAG_FOLDER}/test_dag_version_inflation_check.py",
+            bundle_path=TEST_DAG_FOLDER,
+            bundle_name="testing",
+        ),
+        log=structlog.get_logger(),
+    )
+
+    assert len(result.serialized_dags) > 0
+    assert len(result.warnings) == len(result.serialized_dags)
+    assert all(
+        warning.get("dag_id") and warning.get("warning_type") and warning.get("message")
+        for warning in result.warnings
+    )
+
+
+def test_callback_processing_does_not_update_timestamps():
     """Callback processing should not update last_finish_time to prevent stale DAG detection."""
     stat = process_parse_results(
         run_duration=1.0,
         finish_time=timezone.utcnow(),
         run_count=5,
         bundle_name="test",
-        bundle_version=None,
         parsing_result=None,
-        session=session,
         is_callback_only=True,
     )
 
@@ -605,7 +756,7 @@ def test_callback_processing_does_not_update_timestamps(session):
     assert stat.run_count == 5
 
 
-def test_normal_parsing_updates_timestamps(session):
+def test_normal_parsing_updates_timestamps():
     """last_finish_time should be updated when parsing a dag file."""
     finish_time = timezone.utcnow()
 
@@ -614,9 +765,7 @@ def test_normal_parsing_updates_timestamps(session):
         finish_time=finish_time,
         run_count=3,
         bundle_name="test-bundle",
-        bundle_version="v1",
         parsing_result=DagFileParsingResult(fileloc="test.py", serialized_dags=[]),
-        session=session,
         is_callback_only=False,
     )
 
@@ -625,7 +774,7 @@ def test_normal_parsing_updates_timestamps(session):
     assert stat.import_errors == 0
 
 
-def test_import_error_updates_timestamps(session):
+def test_import_error_updates_timestamps():
     """last_finish_time should be updated when parsing a dag file results in import errors."""
     finish_time = timezone.utcnow()
 
@@ -634,15 +783,114 @@ def test_import_error_updates_timestamps(session):
         finish_time=finish_time,
         run_count=2,
         bundle_name="test-bundle",
-        bundle_version="v1",
         parsing_result=None,
-        session=session,
         is_callback_only=False,
     )
 
     assert stat.last_finish_time == finish_time
     assert stat.run_count == 3
     assert stat.import_errors == 1
+
+
+def test_persist_parsing_result_calls_update_db():
+    """persist_parsing_result should delegate to update_dag_parsing_results_in_db with transformed args."""
+    parsing_result = DagFileParsingResult(
+        fileloc="test.py",
+        serialized_dags=[],
+        import_errors={"dags/broken.py": "SyntaxError"},
+        warnings=[],
+    )
+
+    manager = MagicMock(spec=DagFileProcessorManager)
+    session = MagicMock()
+    # Call the real method on the mock instance
+    with patch(
+        "airflow.dag_processing.manager.update_dag_parsing_results_in_db", autospec=True
+    ) as mock_update:
+        DagFileProcessorManager.persist_parsing_result(
+            manager,
+            bundle_name="test-bundle",
+            bundle_version="v1",
+            version_data=None,
+            parsing_result=parsing_result,
+            run_duration=1.5,
+            relative_fileloc="dags/test.py",
+            session=session,
+        )
+
+    mock_update.assert_called_once()
+    call_kwargs = mock_update.call_args.kwargs
+    assert call_kwargs["bundle_name"] == "test-bundle"
+    assert call_kwargs["bundle_version"] == "v1"
+    assert call_kwargs["parse_duration"] == 1.5
+    assert call_kwargs["session"] is session
+    assert call_kwargs["import_errors"] == {("test-bundle", "dags/broken.py"): "SyntaxError"}
+    assert ("test-bundle", "dags/test.py") in call_kwargs["files_parsed"]
+    assert ("test-bundle", "dags/broken.py") in call_kwargs["files_parsed"]
+
+
+class TestExecuteCallbacks:
+    def test_execute_callbacks_locks_bundle_version(self):
+        callbacks = [
+            DagCallbackRequest(
+                filepath="test.py",
+                dag_id="test_dag",
+                run_id="test_run",
+                bundle_name="testing",
+                bundle_version="some_commit_hash",
+                is_failure_callback=False,
+                msg=None,
+            )
+        ]
+        log = MagicMock(spec=FilteringBoundLogger)
+        dagbag = MagicMock(spec=DagBag)
+
+        with (
+            patch("airflow.dag_processing.processor.BundleVersionLock") as mock_lock,
+            patch("airflow.dag_processing.processor._execute_dag_callbacks") as mock_execute,
+        ):
+            _execute_callbacks(dagbag, callbacks, log)
+
+        mock_lock.assert_called_once_with(bundle_name="testing", bundle_version="some_commit_hash")
+        mock_lock.return_value.__enter__.assert_called_once()
+        mock_lock.return_value.__exit__.assert_called_once()
+        mock_execute.assert_called_once_with(dagbag, callbacks[0], log)
+
+    def test_execute_callbacks_continues_after_failed_request(self, spy_agency):
+        """A request for a removed Dag must not abort the remaining requests in the batch."""
+        called = False
+
+        def on_failure(context):
+            nonlocal called
+            called = True
+
+        dag = DAG(dag_id="a", on_failure_callback=on_failure)
+
+        def fake_collect_dags(self, *args, **kwargs):
+            self.dags[dag.dag_id] = dag
+
+        spy_agency.spy_on(DagBag.collect_dags, call_fake=fake_collect_dags, owner=DagBag)
+        dagbag = DagBag()
+        dagbag.collect_dags()
+
+        def make_request(dag_id):
+            return DagCallbackRequest(
+                filepath="test.py",
+                dag_id=dag_id,
+                run_id="test_run",
+                bundle_name="testing",
+                bundle_version=None,
+                is_failure_callback=True,
+                msg="Message",
+            )
+
+        log = MagicMock(spec=FilteringBoundLogger)
+        _execute_callbacks(dagbag, [make_request("removed_dag"), make_request("a")], log)
+
+        assert called is True
+        log.exception.assert_called_once()
+        assert log.exception.call_args.kwargs["dag_id"] == "removed_dag"
+        assert "context_from_server" not in log.exception.call_args.kwargs["request"]
 
 
 class TestExecuteDagCallbacks:
@@ -682,6 +930,7 @@ class TestExecuteDagCallbacks:
             run_type="manual",
             state="running",
             consumed_asset_events=[],
+            partition_key=None,
         )
 
         ti_data = TIDataModel(
@@ -720,6 +969,72 @@ class TestExecuteDagCallbacks:
         # Check that we have template context variables from RuntimeTaskInstance
         assert "ts" in context_received
         assert "params" in context_received
+
+    def test_execute_dag_callbacks_missing_last_ti_task_falls_back_to_minimal_context(self, spy_agency):
+        """A removed last_ti task must not drop the callback; it runs with the minimal context."""
+        called = False
+        context_received = None
+
+        def on_failure(context):
+            nonlocal called, context_received
+            called = True
+            context_received = context
+
+        with DAG(dag_id="test_dag", on_failure_callback=on_failure) as dag:
+            BaseOperator(task_id="test_task")
+
+        def fake_collect_dags(self, *args, **kwargs):
+            self.dags[dag.dag_id] = dag
+
+        spy_agency.spy_on(DagBag.collect_dags, call_fake=fake_collect_dags, owner=DagBag)
+        dagbag = DagBag()
+        dagbag.collect_dags()
+
+        current_time = timezone.utcnow()
+        dag_run_data = DRDataModel(
+            dag_id="test_dag",
+            run_id="test_run",
+            logical_date=current_time,
+            data_interval_start=current_time,
+            data_interval_end=current_time,
+            run_after=current_time,
+            start_date=current_time,
+            end_date=None,
+            run_type="manual",
+            state="running",
+            consumed_asset_events=[],
+            partition_key=None,
+        )
+        ti_data = TIDataModel(
+            id=uuid.uuid4(),
+            dag_id="test_dag",
+            task_id="removed_task",
+            run_id="test_run",
+            map_index=-1,
+            try_number=1,
+            dag_version_id=uuid.uuid4(),
+        )
+
+        request = DagCallbackRequest(
+            filepath="test.py",
+            dag_id="test_dag",
+            run_id="test_run",
+            bundle_name="testing",
+            bundle_version=None,
+            context_from_server=DagRunContext(dag_run=dag_run_data, last_ti=ti_data),
+            is_failure_callback=True,
+            msg="Test failure message",
+        )
+
+        _execute_dag_callbacks(dagbag, request, structlog.get_logger())
+
+        assert called is True
+        assert context_received is not None
+        assert context_received["dag"] is dag
+        assert context_received["run_id"] == "test_run"
+        assert context_received["reason"] == "Test failure message"
+        # The rich template context requires the task; the fallback has none of it
+        assert "ts" not in context_received
 
     def test_execute_dag_callbacks_without_context_from_server(self, spy_agency):
         """Test _execute_dag_callbacks falls back to simple context when context_from_server is None"""
@@ -801,6 +1116,7 @@ class TestExecuteDagCallbacks:
             run_type="manual",
             state="success",
             consumed_asset_events=[],
+            partition_key=None,
         )
 
         ti_data = TIDataModel(
@@ -901,8 +1217,27 @@ class TestExecuteDagCallbacks:
         # Should log warning about no callback found
         log.warning.assert_called_once_with("Callback requested, but dag didn't have any", dag_id="test_dag")
 
+    def test_execute_dag_callbacks_missing_dag(self):
+        """Test _execute_dag_callbacks raises ValueError for missing DAG"""
+        dagbag = DagBag()
+
+        request = DagCallbackRequest(
+            filepath="test.py",
+            dag_id="missing_dag",
+            run_id="test_run",
+            bundle_name="testing",
+            bundle_version=None,
+            is_failure_callback=True,
+            msg="Test failure message",
+        )
+
+        log = structlog.get_logger()
+
+        with pytest.raises(ValueError, match="DAG 'missing_dag' not found in DagBag"):
+            _execute_dag_callbacks(dagbag, request, log)
+
     @pytest.mark.parametrize(
-        "xcom_operation,expected_message_type,expected_message,mock_response",
+        ("xcom_operation", "expected_message_type", "expected_message", "mock_response"),
         [
             (
                 lambda ti, task_ids: ti.xcom_pull(key="report_df", task_ids=task_ids),
@@ -1003,6 +1338,7 @@ class TestExecuteDagCallbacks:
                     run_type="manual",
                     state="success",
                     consumed_asset_events=[],
+                    partition_key=None,
                 ),
                 last_ti=TIDataModel(
                     id=uuid.uuid4(),
@@ -1021,6 +1357,99 @@ class TestExecuteDagCallbacks:
         _execute_dag_callbacks(dagbag, request, structlog.get_logger())
 
         mock_supervisor_comms.send.assert_called_once_with(msg=expected_message)
+
+    @pytest.mark.parametrize(
+        ("request_operation", "operation_type", "mock_response", "operation_response"),
+        [
+            (
+                lambda context: context["task_instance"].get_ti_count(dag_id="test_dag"),
+                GetTICount(dag_id="test_dag"),
+                TICount(count=2),
+                "Got response 2",
+            ),
+            (
+                lambda context: context["task_instance"].get_task_states(
+                    dag_id="test_dag", task_ids=["test_task"]
+                ),
+                GetTaskStates(
+                    dag_id="test_dag",
+                    task_ids=["test_task"],
+                ),
+                TaskStatesResult(task_states={"test_run": {"task1": "running"}}),
+                "Got response {'test_run': {'task1': 'running'}}",
+            ),
+        ],
+    )
+    def test_dagfileprocessorprocess_request_handler_operations(
+        self,
+        spy_agency,
+        mock_supervisor_comms,
+        request_operation,
+        operation_type,
+        mock_response,
+        operation_response,
+        caplog,
+    ):
+        """Test that DagFileProcessorProcess Request Handler Operations"""
+
+        mock_supervisor_comms.send.return_value = mock_response
+
+        def callback_fn(context):
+            log = structlog.get_logger()
+            log.info("Callback started..")
+            log.info("Got response %s", request_operation(context))
+
+        with DAG(dag_id="test_dag", on_success_callback=callback_fn) as dag:
+            BaseOperator(task_id="test_task")
+
+        def fake_collect_dags(self, *args, **kwargs):
+            self.dags[dag.dag_id] = dag
+
+        spy_agency.spy_on(DagBag.collect_dags, call_fake=fake_collect_dags, owner=DagBag)
+
+        dagbag = DagBag()
+        dagbag.collect_dags()
+
+        current_time = timezone.utcnow()
+        request = DagCallbackRequest(
+            filepath="test.py",
+            dag_id="test_dag",
+            run_id="test_run",
+            bundle_name="testing",
+            bundle_version=None,
+            context_from_server=DagRunContext(
+                dag_run=DRDataModel(
+                    dag_id="test_dag",
+                    run_id="test_run",
+                    logical_date=current_time,
+                    data_interval_start=current_time,
+                    data_interval_end=current_time,
+                    run_after=current_time,
+                    start_date=current_time,
+                    end_date=None,
+                    run_type="manual",
+                    state="success",
+                    consumed_asset_events=[],
+                    partition_key=None,
+                ),
+                last_ti=TIDataModel(
+                    id=uuid.uuid4(),
+                    dag_id="test_dag",
+                    task_id="test_task",
+                    run_id="test_run",
+                    map_index=-1,
+                    try_number=1,
+                    dag_version_id=uuid.uuid4(),
+                ),
+            ),
+            is_failure_callback=False,
+            msg="Test success message",
+        )
+
+        _execute_dag_callbacks(dagbag, request, structlog.get_logger())
+
+        mock_supervisor_comms.send.assert_called_once_with(msg=operation_type)
+        assert operation_response in caplog.text
 
 
 class TestExecuteTaskCallbacks:
@@ -1277,16 +1706,86 @@ class TestExecuteTaskCallbacks:
 
         assert call_count == 2
 
+    @pytest.mark.parametrize(
+        ("dag_exists", "task_exists", "expected_error"),
+        [
+            (False, False, "DAG 'missing_dag' not found in DagBag"),
+            (True, False, "Task 'missing_task' not found in DAG 'test_dag'"),
+        ],
+    )
+    def test_execute_task_callbacks_missing_dag_or_task(
+        self, spy_agency, dag_exists, task_exists, expected_error
+    ):
+        """Test _execute_task_callbacks raises ValueError for missing DAG or task"""
+        if dag_exists:
+            with DAG(dag_id="test_dag") as dag:
+                BaseOperator(task_id="existing_task")
+
+            def fake_collect_dags(self, *args, **kwargs):
+                self.dags[dag.dag_id] = dag
+
+            spy_agency.spy_on(DagBag.collect_dags, call_fake=fake_collect_dags, owner=DagBag)
+
+            dagbag = DagBag()
+            dagbag.collect_dags()
+            dag_id = "test_dag"
+            task_id = "missing_task"
+        else:
+            dagbag = DagBag()
+            dag_id = "missing_dag"
+            task_id = "test_task"
+
+        ti_data = TIDataModel(
+            id=uuid.uuid4(),
+            dag_id=dag_id,
+            task_id=task_id,
+            run_id="test_run",
+            try_number=1,
+            dag_version_id=uuid.uuid4(),
+        )
+
+        request = TaskCallbackRequest(
+            filepath="test.py",
+            msg="Task failed",
+            ti=ti_data,
+            bundle_name="testing",
+            bundle_version=None,
+            task_callback_type=TaskInstanceState.FAILED,
+        )
+
+        log = structlog.get_logger()
+
+        with pytest.raises(ValueError, match=expected_error):
+            _execute_task_callbacks(dagbag, request, log)
+
+
+def _recording_email_backend(
+    to: list[str] | Iterable[str],
+    subject: str,
+    html_content: str,
+    files: list[str] | None = None,
+    dryrun: bool = False,
+    cc: str | Iterable[str] | None = None,
+    bcc: str | Iterable[str] | None = None,
+    mime_subtype: str = "mixed",
+    mime_charset: str = "utf-8",
+    conn_id: str | None = None,
+    custom_headers: dict[str, Any] | None = None,
+    **kwargs,
+) -> None:
+    """Legacy ``[email] email_backend`` stub, patched with a spec'd mock in tests."""
+    raise AssertionError("should be patched in the test")
+
 
 class TestExecuteEmailCallbacks:
     """Test the email callback execution functionality."""
 
-    @patch("airflow.dag_processing.processor._send_task_error_email")
+    @patch("airflow.dag_processing.processor._send_error_email_notification")
     def test_execute_email_callbacks_failure(self, mock_send_email):
         """Test email callback execution for task failure."""
         dagbag = MagicMock(spec=DagBag)
         with DAG(dag_id="test_dag") as dag:
-            BaseOperator(task_id="test_task", email="test@example.com")
+            task = BaseOperator(task_id="test_task", email="test@example.com")
         dagbag.dags = {"test_dag": dag}
 
         # Create TI data
@@ -1303,7 +1802,7 @@ class TestExecuteEmailCallbacks:
         )
 
         current_time = timezone.utcnow()
-        request = EmailNotificationRequest(
+        request = EmailRequest(
             filepath="/path/to/dag.py",
             bundle_name="test_bundle",
             bundle_version="1.0.0",
@@ -1321,6 +1820,7 @@ class TestExecuteEmailCallbacks:
                     run_type="manual",
                     state="running",
                     consumed_asset_events=[],
+                    partition_key=None,
                 ),
                 max_tries=2,
             ),
@@ -1329,24 +1829,34 @@ class TestExecuteEmailCallbacks:
         )
 
         log = MagicMock(spec=FilteringBoundLogger)
+        runtime_ti = RuntimeTaskInstance.model_construct(
+            **request.ti.model_dump(exclude_unset=True),
+            task=task,
+            _ti_context_from_server=request.context_from_server,
+            max_tries=request.context_from_server.max_tries,
+        )
 
         # Execute email callbacks
         _execute_email_callbacks(dagbag, request, log)
 
         # Verify email was sent
-        mock_send_email.assert_called_once_with(
-            "test@example.com",
-            mock.ANY,  # mocked Runtime TI
-            "Task failed",
-            log,
-        )
+        mock_send_email.assert_called_once()
+        call_args = mock_send_email.call_args[0]
 
-    @patch("airflow.dag_processing.processor._send_task_error_email")
+        assert call_args[0] == task
+        assert call_args[1].task_id == runtime_ti.task_id
+        assert call_args[1].dag_id == runtime_ti.dag_id
+        assert call_args[2] is not None  # context
+        assert isinstance(call_args[3], Exception)
+        assert call_args[3].args[0] == request.msg
+        assert call_args[4] == log
+
+    @patch("airflow.dag_processing.processor._send_error_email_notification")
     def test_execute_email_callbacks_retry(self, mock_send_email):
         """Test email callback execution for task retry."""
         dagbag = MagicMock(spec=DagBag)
         with DAG(dag_id="test_dag") as dag:
-            BaseOperator(task_id="test_task", email=["test@example.com"])
+            task = BaseOperator(task_id="test_task", email=["test@example.com"])
         dagbag.dags = {"test_dag": dag}
 
         ti_data = TIDataModel(
@@ -1363,7 +1873,7 @@ class TestExecuteEmailCallbacks:
 
         current_time = timezone.utcnow()
 
-        request = EmailNotificationRequest(
+        request = EmailRequest(
             filepath="/path/to/dag.py",
             bundle_name="test_bundle",
             bundle_version="1.0.0",
@@ -1382,6 +1892,7 @@ class TestExecuteEmailCallbacks:
                     run_type="manual",
                     state="running",
                     consumed_asset_events=[],
+                    partition_key=None,
                 ),
                 max_tries=2,
             ),
@@ -1389,19 +1900,28 @@ class TestExecuteEmailCallbacks:
         )
 
         log = MagicMock(spec=FilteringBoundLogger)
+        runtime_ti = RuntimeTaskInstance.model_construct(
+            **request.ti.model_dump(exclude_unset=True),
+            task=task,
+            _ti_context_from_server=request.context_from_server,
+            max_tries=request.context_from_server.max_tries,
+        )
 
         # Execute email callbacks
         _execute_email_callbacks(dagbag, request, log)
 
-        # Verify email was sent
-        mock_send_email.assert_called_once_with(
-            ["test@example.com"],
-            mock.ANY,  # mocked Runtime TI
-            "Task retry",
-            log,
-        )
+        mock_send_email.assert_called_once()
+        call_args = mock_send_email.call_args[0]
 
-    @patch("airflow.dag_processing.processor._send_task_error_email")
+        assert call_args[0] == task
+        assert call_args[1].task_id == runtime_ti.task_id
+        assert call_args[1].dag_id == runtime_ti.dag_id
+        assert call_args[2] is not None  # context
+        assert isinstance(call_args[3], Exception)
+        assert call_args[3].args[0] == request.msg
+        assert call_args[4] == log
+
+    @patch("airflow.dag_processing.processor._send_error_email_notification")
     def test_execute_email_callbacks_no_email_configured(self, mock_send_email):
         """Test email callback when no email is configured."""
         dagbag = MagicMock(spec=DagBag)
@@ -1422,7 +1942,7 @@ class TestExecuteEmailCallbacks:
         )
 
         current_time = timezone.utcnow()
-        request = EmailNotificationRequest(
+        request = EmailRequest(
             filepath="/path/to/dag.py",
             bundle_name="test_bundle",
             bundle_version="1.0.0",
@@ -1440,6 +1960,7 @@ class TestExecuteEmailCallbacks:
                     run_type="manual",
                     state="running",
                     consumed_asset_events=[],
+                    partition_key=None,
                 ),
                 max_tries=2,
             ),
@@ -1457,8 +1978,7 @@ class TestExecuteEmailCallbacks:
         assert "Email callback requested but no email configured" in warning_call
         mock_send_email.assert_not_called()
 
-    @patch("airflow.dag_processing.processor._send_task_error_email")
-    def test_execute_email_callbacks_email_disabled_for_type(self, mock_send_email):
+    def test_execute_email_callbacks_email_disabled_for_type(self):
         """Test email callback when email is disabled for the specific type."""
         dagbag = MagicMock(spec=DagBag)
         with DAG(dag_id="test_dag") as dag:
@@ -1480,7 +2000,7 @@ class TestExecuteEmailCallbacks:
         current_time = timezone.utcnow()
 
         # Create request for failure (but email_on_failure is False)
-        request = EmailNotificationRequest(
+        request = EmailRequest(
             filepath="/path/to/dag.py",
             bundle_name="test_bundle",
             bundle_version="1.0.0",
@@ -1498,6 +2018,7 @@ class TestExecuteEmailCallbacks:
                     run_type="manual",
                     state="running",
                     consumed_asset_events=[],
+                    partition_key=None,
                 ),
                 max_tries=2,
             ),
@@ -1509,13 +2030,168 @@ class TestExecuteEmailCallbacks:
         # Execute email callbacks
         _execute_email_callbacks(dagbag, request, log)
 
-        # Verify no email was sent
-        mock_send_email.assert_not_called()
-
         # Verify info log about email being disabled
         log.info.assert_called_once()
         info_call = log.info.call_args[0][0]
         assert "Email not sent - task configured with email_on_" in info_call
+
+    @pytest.mark.parametrize(
+        ("dag_exists", "task_exists", "expected_error"),
+        [
+            (False, False, "DAG 'missing_dag' not found in DagBag"),
+            (True, False, "Task 'missing_task' not found in DAG 'test_dag'"),
+        ],
+    )
+    def test_execute_email_callbacks_missing_dag_or_task(
+        self, spy_agency, dag_exists, task_exists, expected_error
+    ):
+        """Test _execute_email_callbacks raises ValueError for missing DAG or task"""
+        if dag_exists:
+            with DAG(dag_id="test_dag") as dag:
+                BaseOperator(task_id="existing_task", email="test@example.com")
+
+            def fake_collect_dags(self, *args, **kwargs):
+                self.dags[dag.dag_id] = dag
+
+            spy_agency.spy_on(DagBag.collect_dags, call_fake=fake_collect_dags, owner=DagBag)
+
+            dagbag = DagBag()
+            dagbag.collect_dags()
+            dag_id = "test_dag"
+            task_id = "missing_task"
+        else:
+            dagbag = DagBag()
+            dag_id = "missing_dag"
+            task_id = "test_task"
+
+        ti_data = TIDataModel(
+            id=uuid.uuid4(),
+            dag_id=dag_id,
+            task_id=task_id,
+            run_id="test_run",
+            try_number=1,
+            dag_version_id=uuid.uuid4(),
+        )
+
+        current_time = timezone.utcnow()
+        request = EmailRequest(
+            filepath="test.py",
+            bundle_name="testing",
+            bundle_version=None,
+            ti=ti_data,
+            context_from_server=TIRunContext(
+                dag_run=DRDataModel(
+                    dag_id=dag_id,
+                    run_id="test_run",
+                    logical_date=current_time,
+                    data_interval_start=current_time,
+                    data_interval_end=current_time,
+                    run_after=current_time,
+                    start_date=current_time,
+                    end_date=None,
+                    run_type="manual",
+                    state="running",
+                    consumed_asset_events=[],
+                    partition_key=None,
+                ),
+                max_tries=2,
+            ),
+            email_type="failure",
+            msg="Task failed",
+        )
+
+        log = structlog.get_logger()
+
+        with pytest.raises(ValueError, match=expected_error):
+            _execute_email_callbacks(dagbag, request, log)
+
+    def test_parse_file_passes_bundle_name_to_dagbag(self):
+        """Test that _parse_file() creates BundleDagBag with correct bundle_name parameter"""
+        # Mock the BundleDagBag constructor to capture its arguments
+        with patch("airflow.dag_processing.processor.BundleDagBag") as mock_dagbag_class:
+            # Create a mock instance with proper attributes for Pydantic validation
+            mock_dagbag_instance = MagicMock()
+            mock_dagbag_instance.dags = {}
+            mock_dagbag_instance.import_errors = {}  # Must be a dict, not MagicMock for Pydantic validation
+            mock_dagbag_class.return_value = mock_dagbag_instance
+
+            request = DagFileParseRequest(
+                file="/test/dag.py",
+                bundle_path=pathlib.Path("/test"),
+                bundle_name="test_bundle",
+                callback_requests=[],
+            )
+
+            _parse_file(request, log=structlog.get_logger())
+
+            # Verify BundleDagBag was called with correct bundle_name
+            mock_dagbag_class.assert_called_once()
+            call_kwargs = mock_dagbag_class.call_args.kwargs
+            assert call_kwargs["bundle_name"] == "test_bundle"
+
+    def test_execute_email_callbacks_uses_custom_email_backend(self):
+        """The Dag-processor path honours a custom ``[email] email_backend``, like the worker path."""
+        backend = MagicMock(spec=_recording_email_backend)
+        dagbag = MagicMock(spec=DagBag)
+        with DAG(dag_id="test_dag") as dag:
+            BaseOperator(task_id="test_task", email=["test@example.com"])
+        dagbag.dags = {"test_dag": dag}
+
+        current_time = timezone.utcnow()
+        request = EmailRequest(
+            filepath="/path/to/dag.py",
+            bundle_name="test_bundle",
+            bundle_version="1.0.0",
+            ti=TIDataModel(
+                id=str(uuid.uuid4()),
+                task_id="test_task",
+                dag_id="test_dag",
+                run_id="test_run",
+                logical_date="2023-01-01T00:00:00Z",
+                try_number=1,
+                attempt_number=1,
+                state="failed",
+                dag_version_id=str(uuid.uuid4()),
+            ),
+            context_from_server=TIRunContext(
+                dag_run=DRDataModel(
+                    dag_id="test_dag",
+                    run_id="test_run",
+                    logical_date="2023-01-01T00:00:00Z",
+                    data_interval_start=current_time,
+                    data_interval_end=current_time,
+                    run_after=current_time,
+                    start_date=current_time,
+                    end_date=None,
+                    run_type="manual",
+                    state="running",
+                    consumed_asset_events=[],
+                    partition_key=None,
+                ),
+                max_tries=2,
+            ),
+            email_type="failure",
+            msg="Task failed",
+        )
+
+        conf_overrides = {
+            ("email", "email_backend"): f"{__name__}._recording_email_backend",
+            ("email", "email_conn_id"): "my_smtp",
+            ("email", "from_email"): "from@airflow",
+        }
+        with conf_vars(conf_overrides):
+            with patch(f"{__name__}._recording_email_backend", backend):
+                with patch(
+                    "airflow.providers.smtp.notifications.smtp.SmtpNotifier", autospec=True
+                ) as mock_smtp_notifier:
+                    _execute_email_callbacks(dagbag, request, MagicMock(spec=FilteringBoundLogger))
+
+        mock_smtp_notifier.assert_not_called()
+        backend.assert_called_once()
+        args, kwargs = backend.call_args
+        assert args[0] == ["test@example.com"]
+        assert kwargs["conn_id"] == "my_smtp"
+        assert kwargs["from_email"] == "from@airflow"
 
 
 class TestDagProcessingMessageTypes:
@@ -1538,14 +2214,19 @@ class TestDagProcessingMessageTypes:
         dag_processor_types = get_type_names(ToDagProcessor)
 
         in_supervisor_but_not_in_manager = {
+            "AwaitInputTask",
             "DeferTask",
             "DeleteXCom",
             "GetAssetByName",
             "GetAssetByUri",
+            "GetAssetsByAlias",
             "GetAssetEventByAsset",
             "GetAssetEventByAssetAlias",
+            "GetDagRun",
             "GetDagRunState",
+            "GetDag",
             "GetDRCount",
+            "GetTaskBreadcrumbs",
             "GetTaskRescheduleStartDate",
             "GetTICount",
             "GetTaskStates",
@@ -1562,21 +2243,42 @@ class TestDagProcessingMessageTypes:
             "CreateHITLDetailPayload",
             "UpdateHITLDetail",
             "GetHITLDetailResponse",
+            "SetRenderedMapIndex",
+            # AIP-103 task/asset store — Dag processor has no task execution context.
+            "GetTaskStateStore",
+            "SetTaskStateStore",
+            "DeleteTaskStateStore",
+            "ClearTaskStateStore",
+            "GetAssetStateStoreByName",
+            "GetAssetStateStoreByUri",
+            "SetAssetStateStoreByName",
+            "SetAssetStateStoreByUri",
+            "DeleteAssetStateStoreByName",
+            "DeleteAssetStateStoreByUri",
+            "ClearAssetStateStoreByName",
+            "ClearAssetStateStoreByUri",
         }
 
         in_task_runner_but_not_in_dag_processing_process = {
             "AssetResult",
+            "AssetsByAliasResult",
             "AssetEventsResult",
+            "DagResult",
+            "DagRunResult",
             "DagRunStateResult",
             "DRCount",
             "SentFDs",
             "StartupDetails",
+            "TaskBreadcrumbsResult",
             "TaskRescheduleStartDate",
             "TICount",
             "TaskStatesResult",
             "InactiveAssetsResult",
             "CreateHITLDetailPayload",
             "HITLDetailRequestResult",
+            # AIP-103 task/asset store results — worker-only responses to the above messages.
+            "TaskStateStoreResult",
+            "AssetStateStoreResult",
         }
 
         supervisor_diff = supervisor_types - manager_types - in_supervisor_but_not_in_manager
@@ -1594,4 +2296,211 @@ class TestDagProcessingMessageTypes:
             f"{len(task_diff)} types found:\n"
             + "\n".join(f"  - {t}" for t in sorted(task_diff))
             + "\n\nEither handle these types in ToDagProcessor or update in_task_runner_but_not_in_dag_processing_process list."
+        )
+
+
+class TestDagFileProcessorProcess:
+    @pytest.fixture
+    def proc(self):
+        from socket import socketpair
+        from unittest.mock import MagicMock
+
+        proc_mock = MagicMock()
+        proc_mock.create_time.return_value = 0.0
+        r, w = socketpair()
+        instance = DagFileProcessorProcess(
+            process_log=structlog.get_logger().bind(),
+            id=uuid.uuid4(),
+            pid=1234,
+            process=proc_mock,
+            stdin=w,
+            logger_filehandle=MagicMock(spec=BinaryIO),
+            client=MagicMock(spec=Client),
+            bundle_name="mybundle",
+            dag_file_rel_path="dags/my_dag.py",
+        )
+        instance._open_sockets.clear()
+        r.close()
+        w.close()
+        return instance
+
+    def test_get_target_loggers_file_mode_no_context_added(self, proc):
+        proc.subprocess_logs_to_stdout = False
+        loggers = proc._get_target_loggers()
+        assert len(loggers) == 1
+        with structlog.testing.capture_logs() as cap:
+            loggers[0].info("test")
+        assert "dag_file" not in cap[0]
+        assert "bundle_name" not in cap[0]
+
+    def test_get_target_loggers_stdout_mode_binds_dag_file_context(self, proc):
+        proc.subprocess_logs_to_stdout = True
+        loggers = proc._get_target_loggers()
+        with structlog.testing.capture_logs() as cap:
+            for bound_logger in loggers:
+                bound_logger.info("test")
+        assert all(e.get("dag_file") == "dags/my_dag.py" for e in cap)
+        assert all(e.get("bundle_name") == "mybundle" for e in cap)
+
+    def test_create_log_forwarder_rewrites_task_prefix_to_dag_processor(self, proc):
+        from airflow.sdk.execution_time.supervisor import WatchedSubprocess
+
+        with patch.object(WatchedSubprocess, "_create_log_forwarder") as mock_base:
+            proc._create_log_forwarder((), "task.stdout", data=b"")
+        mock_base.assert_called_once_with((), "dag_processor.stdout", data=b"", log_level=logging.INFO)
+
+    def test_handle_request_get_connection_masks_password_and_extra(self, proc):
+        proc.client.connections.get.return_value = ConnectionResponse(
+            conn_id="test_conn",
+            conn_type="mysql",
+            password="super-secret-password",
+            extra='{"api_key":"super-secret-extra"}',
+            host=None,
+            schema=None,
+            login=None,
+            port=None,
+        )
+
+        with (
+            patch("airflow.dag_processing.processor.mask_secret") as mock_mask_secret,
+            patch.object(DagFileProcessorProcess, "send_msg", autospec=True) as mock_send_msg,
+        ):
+            proc._handle_request(
+                GetConnection(conn_id="test_conn"),
+                structlog.get_logger(),
+                req_id=123,
+            )
+
+        proc.client.connections.get.assert_called_once_with("test_conn")
+        mock_mask_secret.assert_any_call("super-secret-password")
+        mock_mask_secret.assert_any_call('{"api_key":"super-secret-extra"}')
+        assert mock_mask_secret.call_count == 2
+
+        mock_send_msg.assert_called_once()
+        _, args, kwargs = mock_send_msg.mock_calls[0]
+        assert args[0] is proc
+        msg = args[1]
+        assert kwargs["request_id"] == 123
+        assert kwargs["error"] is None
+        assert kwargs["exclude_unset"] is True
+        assert kwargs["by_alias"] is True
+        assert msg.model_dump(by_alias=True, exclude_unset=True) == {
+            "conn_id": "test_conn",
+            "conn_type": "mysql",
+            "password": "super-secret-password",
+            "extra": '{"api_key":"super-secret-extra"}',
+            "host": None,
+            "schema": None,
+            "login": None,
+            "port": None,
+            "type": "ConnectionResult",
+        }
+
+    def test_handle_request_get_variable_masks_value_with_key(self, proc):
+        proc.client.variables.get.return_value = VariableResponse(
+            key="test_key",
+            value="super-secret-value",
+        )
+
+        with (
+            patch("airflow.dag_processing.processor.mask_secret") as mock_mask_secret,
+            patch.object(DagFileProcessorProcess, "send_msg", autospec=True) as mock_send_msg,
+        ):
+            proc._handle_request(
+                GetVariable(key="test_key"),
+                structlog.get_logger(),
+                req_id=456,
+            )
+
+        proc.client.variables.get.assert_called_once_with("test_key")
+        mock_mask_secret.assert_called_once_with("super-secret-value", "test_key")
+
+        mock_send_msg.assert_called_once()
+        _, args, kwargs = mock_send_msg.mock_calls[0]
+        assert args[0] is proc
+        msg = args[1]
+        assert kwargs["request_id"] == 456
+        assert kwargs["error"] is None
+        assert kwargs["exclude_unset"] is True
+        assert msg.model_dump(exclude_unset=True) == {
+            "key": "test_key",
+            "value": "super-secret-value",
+            "type": "VariableResult",
+        }
+
+
+class TestMultiTeamCallbackMetrics:
+    """Tests for team_name tag on dag.callback_exceptions in multi-team mode."""
+
+    @conf_vars({("core", "multi_team"): "true"})
+    @patch("airflow.dag_processing.processor.DagModel.get_team_name", return_value="team_alpha")
+    @patch("airflow.dag_processing.processor.stats.incr")
+    def test_callback_exception_includes_team_name(self, mock_incr, mock_get_team_name, spy_agency):
+        def failing_callback(context):
+            raise RuntimeError("boom")
+
+        with DAG(dag_id="test_dag", on_failure_callback=failing_callback) as dag:
+            BaseOperator(task_id="test_task")
+
+        @spy_agency.spy_for(DagBag.collect_dags, owner=DagBag)
+        def fake_collect_dags(self, *args, **kwargs):
+            self.dags[dag.dag_id] = dag
+
+        dagbag = DagBag()
+        dagbag.collect_dags()
+
+        request = DagCallbackRequest(
+            filepath="test.py",
+            dag_id="test_dag",
+            run_id="test_run",
+            bundle_name="testing",
+            bundle_version=None,
+            is_failure_callback=True,
+            msg="Test failure",
+        )
+
+        log = structlog.get_logger()
+        _execute_dag_callbacks(dagbag, request, log)
+
+        mock_incr.assert_called_once_with(
+            "dag.callback_exceptions",
+            tags={"dag_id": "test_dag", "team_name": "team_alpha"},
+        )
+
+    @conf_vars({("core", "multi_team"): "false"})
+    @patch("airflow.dag_processing.processor.DagModel.get_team_name")
+    @patch("airflow.dag_processing.processor.stats.incr")
+    def test_callback_exception_omits_team_name_when_not_multi_team(
+        self, mock_incr, mock_get_team_name, spy_agency
+    ):
+        def failing_callback(context):
+            raise RuntimeError("boom")
+
+        with DAG(dag_id="test_dag", on_failure_callback=failing_callback) as dag:
+            BaseOperator(task_id="test_task")
+
+        @spy_agency.spy_for(DagBag.collect_dags, owner=DagBag)
+        def fake_collect_dags(self, *args, **kwargs):
+            self.dags[dag.dag_id] = dag
+
+        dagbag = DagBag()
+        dagbag.collect_dags()
+
+        request = DagCallbackRequest(
+            filepath="test.py",
+            dag_id="test_dag",
+            run_id="test_run",
+            bundle_name="testing",
+            bundle_version=None,
+            is_failure_callback=True,
+            msg="Test failure",
+        )
+
+        log = structlog.get_logger()
+        _execute_dag_callbacks(dagbag, request, log)
+
+        mock_get_team_name.assert_not_called()
+        mock_incr.assert_called_once_with(
+            "dag.callback_exceptions",
+            tags={"dag_id": "test_dag"},
         )

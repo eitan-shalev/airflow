@@ -16,16 +16,18 @@
 # under the License.
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock, call, patch
+import datetime
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.triggers.eks import (
     EksCreateClusterTrigger,
     EksDeleteClusterTrigger,
+    EksPodTrigger,
 )
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.triggers.base import TriggerEvent
 
 EXCEPTION_MOCK = AirflowException("MOCK ERROR")
@@ -173,6 +175,20 @@ class TestEksDeleteClusterTriggerRun(TestEksTrigger):
         assert exception._excinfo[1].operation_name == operation_name
 
     @pytest.mark.asyncio
+    @patch("asyncio.sleep", return_value=None)
+    async def test_run_retries_on_resource_in_use(self, mock_sleep):
+        in_use = ClientError({"Error": {"Code": "ResourceInUseException"}}, "delete_eks_cluster")
+        delete_cluster_mock = AsyncMock(side_effect=[in_use, in_use, None])
+        self.mock_client.delete_cluster = delete_cluster_mock
+
+        generator = self.trigger.run()
+        response = await generator.asend(None)
+
+        assert delete_cluster_mock.call_count == 3
+        delete_cluster_mock.assert_called_with(name=CLUSTER_NAME)
+        assert response == TriggerEvent({"status": "deleted"})
+
+    @pytest.mark.asyncio
     async def test_run_parameterizes_async_wait_correctly(self):
         self.mock_client.get_waiter = Mock(return_value="waiter")
 
@@ -244,6 +260,36 @@ class TestEksDeleteClusterTriggerDeleteNodegroupsAndFargateProfiles(TestEksTrigg
             status_message="Deleting nodegroups associated with the cluster",
             status_args=["nodegroups"],
         )
+
+    @pytest.mark.asyncio
+    @patch("asyncio.sleep", return_value=None)
+    async def test_delete_nodegroups_retries_on_resource_in_use(self, mock_sleep):
+        in_use = ClientError({"Error": {"Code": "ResourceInUseException"}}, "DeleteNodegroup")
+        mock_list_node_groups = AsyncMock(return_value={"nodegroups": ["g1"]})
+        mock_delete_nodegroup = AsyncMock(side_effect=[in_use, in_use, None])
+        mock_client = AsyncMock(list_nodegroups=mock_list_node_groups, delete_nodegroup=mock_delete_nodegroup)
+
+        await self.trigger.delete_any_nodegroups(mock_client)
+
+        assert mock_delete_nodegroup.call_count == 3
+        mock_delete_nodegroup.assert_called_with(clusterName=CLUSTER_NAME, nodegroupName="g1")
+
+    @pytest.mark.asyncio
+    @patch("asyncio.sleep", return_value=None)
+    async def test_delete_fargate_profiles_retries_on_resource_in_use(self, mock_sleep):
+        in_use = ClientError({"Error": {"Code": "ResourceInUseException"}}, "DeleteFargateProfile")
+        mock_list_fargate_profiles = AsyncMock(return_value={"fargateProfileNames": ["p1"]})
+        mock_delete_fargate_profile = AsyncMock(side_effect=[in_use, in_use, None])
+        mock_client = AsyncMock(
+            list_fargate_profiles=mock_list_fargate_profiles,
+            delete_fargate_profile=mock_delete_fargate_profile,
+            get_waiter=self.mock_waiter,
+        )
+
+        await self.trigger.delete_any_fargate_profiles(mock_client)
+
+        assert mock_delete_fargate_profile.call_count == 3
+        mock_delete_fargate_profile.assert_called_with(clusterName=CLUSTER_NAME, fargateProfileName="p1")
 
     @pytest.mark.asyncio
     async def test_when_there_are_no_nodegroups_it_should_only_log_message(self):
@@ -318,3 +364,127 @@ class TestEksDeleteClusterTriggerDeleteNodegroupsAndFargateProfiles(TestEksTrigg
         self.trigger.log.info.assert_called_once_with(
             "No Fargate profiles associated with cluster %s", CLUSTER_NAME
         )
+
+
+class TestEksPodTrigger:
+    """Tests for EksPodTrigger."""
+
+    TRIGGER_START_TIME = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+
+    def _create_trigger(self, **overrides):
+        """Create an EksPodTrigger with sensible defaults."""
+        defaults = {
+            "eks_cluster_name": CLUSTER_NAME,
+            "aws_conn_id": AWS_CONN_ID,
+            "region": REGION_NAME,
+            "pod_name": "test-pod",
+            "pod_namespace": "default",
+            "trigger_start_time": self.TRIGGER_START_TIME,
+            "base_container_name": "base",
+            "config_dict": {"old": "stale-config"},
+        }
+        defaults.update(overrides)
+        return EksPodTrigger(**defaults)
+
+    def test_serialize_includes_eks_fields(self):
+        """serialize() should include eks_cluster_name, aws_conn_id, and region."""
+        trigger = self._create_trigger()
+        classpath, kwargs = trigger.serialize()
+
+        assert classpath == "airflow.providers.amazon.aws.triggers.eks.EksPodTrigger"
+        assert kwargs["eks_cluster_name"] == CLUSTER_NAME
+        assert kwargs["aws_conn_id"] == AWS_CONN_ID
+        assert kwargs["region"] == REGION_NAME
+        # Also verify parent fields are present
+        assert kwargs["pod_name"] == "test-pod"
+        assert kwargs["pod_namespace"] == "default"
+
+    def test_serialize_roundtrip(self):
+        """A trigger created from serialized kwargs should serialize identically."""
+        trigger = self._create_trigger()
+        classpath, kwargs = trigger.serialize()
+
+        trigger2 = EksPodTrigger(**kwargs)
+        classpath2, kwargs2 = trigger2.serialize()
+
+        assert classpath == classpath2
+        assert kwargs == kwargs2
+
+    @pytest.mark.asyncio
+    @patch("airflow.providers.cncf.kubernetes.triggers.pod.KubernetesPodTrigger.run")
+    @patch("airflow.providers.amazon.aws.hooks.eks.EksHook.generate_config_file")
+    @patch("airflow.providers.amazon.aws.hooks.eks.EksHook._secure_credential_context")
+    @patch("airflow.providers.amazon.aws.hooks.eks.EksHook.get_session")
+    @patch("airflow.providers.amazon.aws.hooks.eks.EksHook.__init__", return_value=None)
+    async def test_run_generates_fresh_kubeconfig(
+        self,
+        mock_eks_hook_init,
+        mock_get_session,
+        mock_secure_credential_context,
+        mock_generate_config_file,
+        mock_parent_run,
+    ):
+        """run() should get fresh credentials, generate kubeconfig, and delegate to parent."""
+        # Set up credential mocks
+        mock_session = MagicMock()
+        mock_credentials = MagicMock()
+        mock_frozen = MagicMock()
+        mock_frozen.access_key = "AKIATEST"
+        mock_frozen.secret_key = "secret123"
+        mock_frozen.token = "token456"
+        mock_get_session.return_value = mock_session
+        mock_session.get_credentials.return_value = mock_credentials
+        mock_credentials.get_frozen_credentials.return_value = mock_frozen
+
+        # Set up context manager mocks
+        mock_secure_credential_context.return_value.__enter__.return_value = "/tmp/test.aws_creds"
+        mock_generate_config_file.return_value.__enter__.return_value = "/tmp/test_kubeconfig"
+
+        # Mock reading the kubeconfig file
+        with patch("pathlib.Path.read_text", return_value="apiVersion: v1\nkind: Config\nclusters: []"):
+
+            async def mock_gen():
+                yield TriggerEvent({"status": "success"})
+
+            mock_parent_run.return_value = mock_gen()
+
+            trigger = self._create_trigger()
+            events = []
+            async for event in trigger.run():
+                events.append(event)
+
+        assert len(events) == 1
+        assert events[0] == TriggerEvent({"status": "success"})
+
+        # Verify credentials were fetched
+        mock_eks_hook_init.assert_called_once_with(aws_conn_id=AWS_CONN_ID, region_name=REGION_NAME)
+        mock_get_session.assert_called_once()
+        mock_session.get_credentials.assert_called_once()
+        mock_credentials.get_frozen_credentials.assert_called_once()
+
+        # Verify credential context and config generation
+        mock_secure_credential_context.assert_called_once_with("AKIATEST", "secret123", "token456")
+        mock_generate_config_file.assert_called_once_with(
+            eks_cluster_name=CLUSTER_NAME,
+            pod_namespace="default",
+            credentials_file="/tmp/test.aws_creds",
+        )
+
+    @pytest.mark.asyncio
+    @patch("airflow.providers.amazon.aws.hooks.eks.EksHook.get_session")
+    @patch("airflow.providers.amazon.aws.hooks.eks.EksHook.__init__", return_value=None)
+    async def test_run_raises_when_credentials_unavailable(
+        self,
+        mock_eks_hook_init,
+        mock_get_session,
+    ):
+        """run() should raise RuntimeError when credentials cannot be retrieved."""
+        mock_session = MagicMock()
+        mock_get_session.return_value = mock_session
+        mock_session.get_credentials.return_value = None
+
+        trigger = self._create_trigger()
+
+        with pytest.raises(RuntimeError, match="Unable to retrieve AWS credentials"):
+            async for _ in trigger.run():
+                pass

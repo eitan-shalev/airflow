@@ -25,19 +25,16 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from jinja2 import StrictUndefined
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.models import DAG, DagRun, TaskInstance
 from airflow.providers.amazon.aws.operators.emr import EmrAddStepsOperator
 from airflow.providers.amazon.aws.triggers.emr import EmrAddStepsTrigger
-
-try:
-    from airflow.sdk import timezone
-except ImportError:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunType
 
+from tests_common.test_utils.compat import timezone
 from tests_common.test_utils.dag import sync_dag_to_db
+from tests_common.test_utils.taskinstance import create_task_instance, render_template_fields
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
 
@@ -88,7 +85,7 @@ class TestEmrAddStepsOperator:
         assert op.aws_conn_id == "aws_default"
 
     @pytest.mark.parametrize(
-        "job_flow_id, job_flow_name",
+        ("job_flow_id", "job_flow_name"),
         [
             pytest.param("j-8989898989", "test_cluster", id="both-specified"),
             pytest.param(None, None, id="both-none"),
@@ -110,13 +107,18 @@ class TestEmrAddStepsOperator:
 
             sync_dag_to_db(self.operator.dag)
             dag_version = DagVersion.get_latest_version(self.operator.dag.dag_id)
-            ti = TaskInstance(task=self.operator, dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=self.operator.dag.dag_id,
                 logical_date=DEFAULT_DATE,
                 run_id="test",
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
+                run_after=timezone.utcnow(),
+            )
+            ti = create_task_instance(
+                task=self.operator,
+                run_id=dag_run.run_id,
+                dag_version_id=dag_version.id,
             )
         else:
             dag_run = DagRun(
@@ -128,9 +130,7 @@ class TestEmrAddStepsOperator:
             )
             ti = TaskInstance(task=self.operator)
         ti.dag_run = dag_run
-        session.add(ti)
-        session.commit()
-        ti.render_templates()
+        render_template_fields(ti, self.operator)
 
         expected_args = [
             {
@@ -184,14 +184,15 @@ class TestEmrAddStepsOperator:
 
             sync_dag_to_db(dag)
             dag_version = DagVersion.get_latest_version(dag.dag_id)
-            ti = TaskInstance(task=test_task, dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=dag.dag_id,
                 logical_date=timezone.utcnow(),
                 run_id="test",
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
+                run_after=timezone.utcnow(),
             )
+            ti = create_task_instance(task=test_task, run_id=dag_run.run_id, dag_version_id=dag_version.id)
         else:
             dag_run = DagRun(
                 dag_id=dag.dag_id,
@@ -202,9 +203,7 @@ class TestEmrAddStepsOperator:
             )
             ti = TaskInstance(task=test_task)
         ti.dag_run = dag_run
-        session.add(ti)
-        session.commit()
-        ti.render_templates()
+        render_template_fields(ti, test_task)
 
         assert json.loads(test_task.steps) == file_steps
 
@@ -324,3 +323,140 @@ class TestEmrAddStepsOperator:
             steps=self._config,
         )
         validate_template_fields(op)
+
+    @patch(
+        "airflow.providers.amazon.aws.operators.emr.inject_parent_job_information_into_spark_properties",
+        autospec=True,
+    )
+    def test_inject_openlineage_parent_job_information(self, mock_inject, mocked_hook_client):
+        mock_inject.return_value = {
+            "spark.openlineage.parentRunId": "parent-run-id",
+            "spark.openlineage.parentJobName": "test_dag_id.test_task",
+        }
+        mocked_hook_client.add_job_flow_steps.return_value = ADD_STEPS_SUCCESS_RETURN
+        steps = [
+            {
+                "Name": "spark-submit",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": ["spark-submit", "--deploy-mode", "cluster", "s3://bucket/job.py"],
+                },
+            },
+            {
+                "Name": "run-example",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": ["/usr/lib/spark/bin/run-example", "SparkPi", "10"],
+                },
+            },
+            {
+                "Name": "existing-parent-information",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": [
+                        "spark-submit",
+                        "--conf",
+                        "spark.openlineage.parentRunId=existing-run-id",
+                        "s3://bucket/job.py",
+                    ],
+                },
+            },
+            {
+                "Name": "non-spark",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": ["bash", "-c", "echo done"],
+                },
+            },
+            {
+                "Name": "custom-jar",
+                "HadoopJarStep": {
+                    "Jar": "s3://bucket/job.jar",
+                    "Args": ["spark-submit", "application-argument"],
+                },
+            },
+            {
+                "Name": "no-arguments",
+                "HadoopJarStep": {"Jar": "command-runner.jar"},
+            },
+        ]
+        context = MagicMock(spec=dict)
+        operator = EmrAddStepsOperator(
+            task_id="test_task",
+            job_flow_id="j-8989898989",
+            aws_conn_id="aws_default",
+            steps=steps,
+            openlineage_inject_parent_job_info=True,
+            dag=DAG("test_dag_id", schedule=None, default_args=self.args),
+        )
+
+        operator.execute(context)
+
+        submitted_steps = mocked_hook_client.add_job_flow_steps.call_args.kwargs["Steps"]
+        assert submitted_steps[0]["HadoopJarStep"]["Args"] == [
+            "spark-submit",
+            "--conf",
+            "spark.openlineage.parentRunId=parent-run-id",
+            "--conf",
+            "spark.openlineage.parentJobName=test_dag_id.test_task",
+            "--deploy-mode",
+            "cluster",
+            "s3://bucket/job.py",
+        ]
+        assert submitted_steps[1]["HadoopJarStep"]["Args"] == [
+            "/usr/lib/spark/bin/run-example",
+            "--conf",
+            "spark.openlineage.parentRunId=parent-run-id",
+            "--conf",
+            "spark.openlineage.parentJobName=test_dag_id.test_task",
+            "SparkPi",
+            "10",
+        ]
+        assert submitted_steps[2:] == steps[2:]
+        assert operator.steps == steps
+        mock_inject.assert_called_once_with({}, context)
+
+    @pytest.mark.parametrize(
+        ("enabled", "parent_job_information", "expected_call_count"),
+        [
+            pytest.param(False, {"spark.openlineage.parentRunId": "parent-run-id"}, 0, id="disabled"),
+            pytest.param(True, {}, 1, id="no-parent-information"),
+        ],
+    )
+    @patch(
+        "airflow.providers.amazon.aws.operators.emr.inject_parent_job_information_into_spark_properties",
+        autospec=True,
+    )
+    def test_does_not_inject_openlineage_parent_job_information(
+        self,
+        mock_inject,
+        enabled,
+        parent_job_information,
+        expected_call_count,
+        mocked_hook_client,
+    ):
+        mock_inject.return_value = parent_job_information
+        mocked_hook_client.add_job_flow_steps.return_value = ADD_STEPS_SUCCESS_RETURN
+        steps = [
+            {
+                "Name": "spark-submit",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": ["spark-submit", "s3://bucket/job.py"],
+                },
+            }
+        ]
+        operator = EmrAddStepsOperator(
+            task_id="test_task",
+            job_flow_id="j-8989898989",
+            aws_conn_id="aws_default",
+            steps=steps,
+            openlineage_inject_parent_job_info=enabled,
+            dag=DAG("test_dag_id", schedule=None, default_args=self.args),
+        )
+
+        operator.execute(MagicMock(spec=dict))
+
+        submitted_steps = mocked_hook_client.add_job_flow_steps.call_args.kwargs["Steps"]
+        assert submitted_steps == steps
+        assert mock_inject.call_count == expected_call_count

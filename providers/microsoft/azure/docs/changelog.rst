@@ -27,6 +27,465 @@
 Changelog
 ---------
 
+15.0.0
+......
+
+.. warning::
+  The ``AzureBatchHook`` and ``AzureBatchOperator`` have been migrated to the ``azure-batch`` 15.x
+  SDK (track 2). This is a breaking change and requires ``azure-batch>=15.0.0``.
+
+  The following changes were introduced:
+
+  * Hooks
+
+    * ``AzureBatchHook.get_conn`` and ``AzureBatchHook.connection`` now return an ``azure.batch.BatchClient``
+      instead of an ``azure.batch.BatchServiceClient``.
+    * Shared key authentication now uses ``azure.core.credentials.AzureNamedKeyCredential`` instead of
+      ``azure.batch.batch_auth.SharedKeyCredentials``.
+    * Managed identity / workload identity authentication now uses
+      ``azure.identity.DefaultAzureCredential`` (via ``get_sync_default_azure_credential``) instead of
+      ``AzureIdentityCredentialAdapter``, since the track 2 client requires a credential implementing
+      ``get_token()``.
+    * ``AzureBatchHook.configure_pool`` no longer accepts the ``os_family`` and ``os_version`` parameters.
+      Cloud service configuration is not supported by the track 2 SDK; use a virtual machine configuration
+      (``vm_publisher``, ``vm_offer``, ``vm_sku``, ``vm_version`` or ``use_latest_image_and_sku``) instead.
+    * The Batch model classes were renamed by the SDK: ``PoolAddParameter`` is now ``BatchPoolCreateOptions``,
+      ``JobAddParameter`` is now ``BatchJobCreateOptions``, ``TaskAddParameter`` is now ``BatchTaskCreateOptions``,
+      and ``CloudTask`` is now ``BatchTask``.
+
+  * Operators
+
+    * ``AzureBatchOperator`` no longer accepts the ``os_family`` parameter. A ``vm_publisher`` must now be
+      provided to configure the pool's virtual machine image.
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Migrate 'AzureBatchHook' and 'AzureBatchOperator' to the azure-batch 15.x SDK (#71071)``
+
+Features
+~~~~~~~~
+
+* ``Support certificate auth for Microsoft Graph filesystem (#71362)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Keep MSGraph request configuration across paginated pages (#71649)``
+* ``Fix Microsoft Graph filesystem auth by defaulting OAuth2 scope (#70879)``
+* ``Check GCSToAzureBlobStorageOperator match_glob support after template… (#70574)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+   * ``Update changelog with better wording (#71161)``
+
+
+14.1.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add certificate-based authentication support to Microsoft Graph filesystem (#69335)``
+* ``Add WasbRemoteLogIO.from_config and register wasb remote logging scheme (#70301)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Apply the ambiguous-id refusal to get_config in the Key Vault backend (#70899)``
+* ``Refuse the team agnostic fall-through for a team scoped Key Vault secret name (#70876)``
+* ``Fix duplicated task logs in the WASB log handler (#70860)``
+* ``Validate AzureVirtualMachineStateSensor target_state after rendering, outside poke() (#70329, #70372)``
+* ``Only refuse team scoped like secret ids when multi_team is on (#71078)``
+
+Misc
+~~~~
+
+* ``Use ValueError for unsupported recursive glob in ADLS upload (#70540)``
+* ``Use common.compat.sdk for timezone imports in providers (#70492)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix some docs and test gaps following up multi team secret refusal (#71106)``
+
+14.0.0
+......
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Fix Azure Data Factory hook broken with azure-mgmt-datafactory 10 (#69800)``
+
+  The minimum ``azure-mgmt-datafactory`` requirement moves from ``2.0.0`` to ``10.0.0``. SDK 10 replaced the ``if_match``/``if_none_match`` arguments with an ``etag`` + ``match_condition`` pair (see the `azure-mgmt-datafactory changelog <https://github.com/Azure/azure-sdk-for-python/blob/main/sdk/datafactory/azure-mgmt-datafactory/CHANGELOG.md#breaking-changes>`__), and ``AzureDataFactoryHook`` now calls the new form unconditionally, so it no longer works against older SDKs. To migrate, upgrade ``azure-mgmt-datafactory`` to 10.0.0 or newer in your Airflow environment. Your Dag code does not need to change: the hook keeps its ``if_match``/``if_none_match`` parameters and translates them internally. If you cannot upgrade the SDK yet, stay on the 13.x line of this provider.
+
+Features
+~~~~~~~~
+
+* ``Add Azure AI Foundry Agents operators (Create, Update, Delete, Run) (#68799)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Replace vars(response) with attribute access in Azure Data Factory and Synapse operators for SDK v10 compatibility (#69689)``
+* ``Fix WASB log source URLs to use storage account endpoint (#68510)``
+* ``Construct default token_endpoint for msgraph filesystem (#69463) (#69522)``
+* ``Restrict MSGraph pagination nextLink to the configured host (#69742)``
+* ``Introduced CachedAsyncTokenCredential which keeps the session open during lifecycle of cached RequestAdapter (#69365)``
+
+Misc
+~~~~
+
+* ``Flag conn-fields in hook but absent from provider.yaml in static checks (#69655)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix Azure Data Factory async test on azure-mgmt-datafactory 10 (#69798)``
+   * ``Fix Azure Data Factory test broken by azure-mgmt-datafactory update (#69785)``
+
+
+13.5.1
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``refactor: Fix _is_http_client_closed returning True for a transport that was never opened (#69329)``
+* ``Invalidate cached RequestAdapter of KiotaRequestAdapterHook if session of AuthenticationProvider is closed (#69128)``
+* ``Fix msgraph/Power BI auth failure from empty allowed_hosts list (#69014)``
+* ``MSgraph: fix UnicodeDecodeError in DefaultResponseHandler when response content is binary (#68495)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Document each provider's optional extras in its docs index (#69478)``
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+13.5.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add GCSToAzureBlobStorageOperator for GCS to Azure Blob transfer (#64966)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Use async versions of CertificateCredential and ClientSecretCredential in KiotaRequestAdapterHook (#68375)``
+* ``Fix SAS token authentication in the WASB hook for azure-storage-blob 12.30.0 compatibility (#68490)``
+* ``Fix remote-log providers not satisfying RemoteLogIO upload contract (#68300)``
+* ``Fix coroutine serialization error in PowerBIDatasetRefreshOperator (#63829)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+13.4.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add deferrable mode support to AzureBatchOperator (#66815)``
+
+Misc
+~~~~
+
+* ``Remove exclusion of yanked version dependencies from providers (#66857)``
+
+Doc-only
+~~~~~~~~
+
+* ``Auto-sync provider README.rst Requirements with pyproject.toml (#67669)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix flaky AzureDataFactory operator test by mocking time (#67427)``
+
+
+13.3.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add deferrable mode to AzureContainerInstancesOperator (#62772)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix Azure Batch provider import error by capping azure-batch<15 (#66452)``
+* ``Fix error messages in 'PythonVirtualenvOperator' when Azure Key Vault secret backend is configured (#67157)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adjust log message header for expandable sources (#66570)``
+
+13.2.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add deferrable mode support to AzureSynapseRunPipelineOperator (#63614)``
+* ``Add multi-team lookup to Azure Key Vault backend (#65692)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Add test coverage for AzureBatchHook.wait_for_all_node_state (#63765)``
+   * ``Providers wave 2026-04-21 (#65614)``
+   * ``Providers wave 2026-04-21``
+
+13.1.2
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix Azure provider hooks ignoring cloud_environment connection extra (#65320)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix stale system test documentation links (#65071)``
+
+13.1.1
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Return empty list when AzureContainerInstanceHook.get_logs receives Logs(content=None) instead of returning [None]. (#63394)``
+* ``Ensure presence of conn.login in microsoft azure hook before usage (#64241)``
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+* ``Compat sdk conf follow-up for multiple providers (#64161)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+13.1.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add async hook for Azure Synapse pipelines (#62966)``
+* ``Add Azure Virtual Machines operators, sensor, and trigger (#62391)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Replace the scan of container groups in a resource group with a direct in AzureContainerInstanceHook (#63567)``
+* ``Fix MSGraphSensor does not respect timeout parameter in defer mode (#62241)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fix typos and spelling (#64139)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Standardize connection docs labels across providers (#63455)``
+
+13.0.1
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix PowerBIDatasetRefreshOperator to properly respect wait_for_completion flag (#62842)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+13.0.0
+......
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Migrate ADLSListOperator from ADLS Gen1 to Gen2 (#61188)``
+
+  .. note::
+     The ``ADLSListOperator`` now uses the ADLS Gen2 API. This change makes the ``file_system_name`` parameter mandatory.
+
+Features
+~~~~~~~~
+
+* ``Add wait_for_termination parameter and fix double-deferral in PowerBIDatasetRefreshOperator (#60369)``
+* ``Azure Message Bus - CommonMessageQueue Interface (#52712) (#61924)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Always apply proxy configuration with MSAL for KiotaRequestAdapterHook in msgraph module (#61199)``
+* ``Add protocol validation to KiotaRequestAdapterHook (#61103)``
+* ``Add missing conn-fields for providers migrated to yaml (#62116)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``Migrate connection UI metadata to YAML for some providers (#62011)``
+   * ``Providers wave 2026-02-10 (#61746)``
+
+12.10.3
+.......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix BaseAzureServiceBusTrigger importing AIRFLOW_V_3_0_PLUS from wrong module (#60644)``
+* ``Fix unclosed aiohttp ClientSession in AzureDataFactoryAsyncHook (#60650)``
+
+Misc
+~~~~
+
+* ``Define 'TaskInstanceKey' in task-sdk to support client server separation (#60776)``
+* ``Use common compat get_async_connection in KiotaRequestAdapter (#60871)``
+* ``Use common provider's get_async_connection in other providers (#56791)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+12.10.2
+.......
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Check team boundaries in connections (#59476)``
+* ``Updated conf import for std,es,os,ms providers (#60030)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+12.10.1
+.......
+
+Misc
+~~~~
+
+* ``Remove top-level SDK reference in Core (#59817)``
+* ``Prevent client secrets and proxy credentials from being logged in Microsoft Graph hook logs (#59688)``
+* ``Check team boundaries in variables (#58905)``
+* ``Extract shared "module_loading" distribution (#59139)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``TaskInstance unused method cleanup (#59835)``
+
+12.10.0
+.......
+
+Features
+~~~~~~~~
+
+* ``Added paginated_run method to KiotaRequestAdapterHook in MSGraph (#57536)``
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update logging documentation for Azure Blob Storage (#59016)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+12.9.0
+......
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Features
+~~~~~~~~
+
+* ``Add Azure Service Bus Queue and Subscription triggers for async message processing (#53356)``
+* ``Add managed identity assignment support (#58364)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix Microsoft azure provider filesystem metadata (#58568)``
+* ``Add _ensure_identity, modifies files, and tests (#58563)``
+
+Misc
+~~~~
+
+* ``Move out some exceptions to TaskSDK (#54505)``
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+* ``Fix lower bound dependency to common-compat provider (#58833)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+   * ``Prepare release for 2025-11-27 wave of providers (#58697)``
+
+12.8.1
+......
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+* ``Remove adal dependency (#57798)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to microsoft Provider test(azure,mssql,psrp) (#57936)``
+   * ``Enable PT006 rule to microsoft Provider test(operators) (#57928)``
+   * ``Enable PT006 rule to microsoft Provider test(transfers) (#57925)``
+   * ``Enable PT006 rule to microsoft Provider test(log,sensors) (#57927)``
+   * ``Enable PT006 rule to microsoft Provider test(hooks) (#57932)``
+   * ``Fix mypy static errors in main (#57755)``
+   * ``Attempt to resolve pip "ResolutionTooDeep" on cffi conflict (#57697)``
+   * ``Enable ruff PLW1508 rule (#57653)``
+   * ``Fix documentation/provider.yaml consistencies (#57283)``
+
+12.8.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add Microsoft Graph filesystem integration (#55454)``
+* ``update AzureBaseHook to return credentials that supports get_token method" (#56228)``
+
+Misc
+~~~~
+
+* ``Migrate microsoft providers to ''common.compat'' (#56995)``
+* ``improve exception handling in AzureDataFactoryTrigger (#56350)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix Databricks provider import error without fab provider (#56702)``
+   * ``Remove 'pytest.importorskip("flask_appbuilder")' from tests (#56679)``
+   * ``Revert "update AzureBaseHook to return credentials that supports get_token me…" (#56223)``
+   * ``update AzureBaseHook to return credentials that supports get_token method (#52182)``
+   * ``Enable PT011 rule to prvoider tests (#56021)``
+
 12.7.1
 ......
 
@@ -73,8 +532,6 @@ Doc-only
    * ``Fix short names in test_adls (#54907)``
    * ``Move trigger_rule utils from 'airflow/utils'  to 'airflow.task'and integrate with Execution API spec (#53389)``
    * ``Switch pre-commit to prek (#54258)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Fix Airflow 2 reference in README/index of providers (#55240)``
 
 12.6.1
@@ -288,7 +745,7 @@ Misc
 ......
 
 .. note::
-  This version has no code changes. It's released due to yank of previous version due to packaging issues.
+  This version contains no code changes. It was released to replace a previous version that was yanked due to a packaging issue.
 
 12.1.0
 ......
@@ -534,8 +991,9 @@ Misc
 
 * ``implement per-provider tests with lowest-direct dependency resolution (#39946)``
 
-.. Review and move the new changes to one of the sections above:
-   * ``Revert "refactor: Make sure xcoms work correctly in multi-threaded environmen…" (#40300)``
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "refactor: Make sure xcoms work correctly in multi-threaded environment…" (#40300)``
    * ``refactor: Make sure xcoms work correctly in multi-threaded environment by taking the map_index into account (#40297)``
 
 10.1.1
@@ -577,7 +1035,8 @@ Misc
 * ``Faster 'airflow_version' imports (#39552)``
 * ``Simplify 'airflow_version' imports (#39497)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Prepare docs 1st wave May 2024 (#39328)``
 
 10.0.0
@@ -613,7 +1072,8 @@ Misc
 * ``update to latest service bus (#38384)``
 * ``Limit azure-cosmos (#38175)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``fix: try002 for provider microsoft azure (#38805)``
    * ``Bump ruff to 0.3.3 (#38240)``
 
@@ -654,7 +1114,8 @@ Misc
 
 * ``feat: Switch all class, functions, methods deprecations to decorators (#36876)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Revert "Provide the logger_name param in providers hooks in order to override the logger name (#36675)" (#37015)``
    * ``Fix stacklevel in warnings.warn into the providers (#36831)``
    * ``Standardize airflow build process and switch to Hatchling build backend (#36537)``
@@ -845,7 +1306,8 @@ Misc
 * ``Consolidate hook management in AzureBatchOperator (#34437)``
 * ``Consolidate hook management in AzureDataExplorerQueryOperator (#34436)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Refactor: consolidate import time in providers (#34402)``
    * ``Refactor usage of str() in providers (#34320)``
    * ``Refactor: reduce some conditions in providers (#34440)``
@@ -993,7 +1455,8 @@ Misc
 
 * ``Moves 'AzureBlobStorageToGCSOperator' from Azure to Google provider (#32306)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``D205 Support - Providers: Stragglers and new additions (#32447)``
 
 6.2.0

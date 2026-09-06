@@ -38,9 +38,9 @@ There are three different places where callbacks can be defined.
 .. warning::
 
     Callback functions are executed after tasks are completed.
-    Errors in callback functions will show up in scheduler logs rather than task logs.
-    By default, scheduler logs do not show up in the UI and instead can be found in
-    ``$AIRFLOW_HOME/logs/scheduler/latest/DAG_FILE.py.log``
+    Errors in callback functions will show up in dag processor logs rather than task logs.
+    By default, dag processor logs do not show up in the UI and instead can be found in
+    ``$AIRFLOW_HOME/logs/dag_processor/latest/dags-folder/<the_path_for_your_dag>/DAG_FILE.py.log``
 
 .. note::
     As of Airflow 2.6.0, callbacks now supports a list of callback functions, allowing users to specify multiple functions
@@ -51,25 +51,49 @@ There are three different places where callbacks can be defined.
 Callback Types
 --------------
 
-There are six types of events that can trigger a callback:
+There are five types of callbacks triggered on specific events:
 
-=========================================== ================================================================
-Name                                        Description
-=========================================== ================================================================
-``on_success_callback``                     Invoked when the :ref:`Dag succeeds <dag-run:dag-run-status>` or :ref:`task succeeds <concepts:task-instances>`.
-                                            Available at the Dag or task level.
-``on_failure_callback``                     Invoked when the task :ref:`fails <concepts:task-instances>`.
-                                            Available at the Dag or task level.
-``on_retry_callback``                       Invoked when the task is :ref:`up for retry <concepts:task-instances>`.
-                                            Available only at the task level.
-``on_execute_callback``                     Invoked right before the task begins executing.
-                                            Available only at the task level.
-``on_skipped_callback``                     Invoked when the task is :ref:`running <concepts:task-instances>` and  AirflowSkipException raised.
-                                            Explicitly it is NOT called if a task is not started to be executed because of a preceding branching
-                                            decision in the Dag or a trigger rule which causes execution to skip so that the task execution
-                                            is never scheduled.
-                                            Available only at the task level.
-=========================================== ================================================================
+=========================================== ======================================================================= =================
+Name                                        Description                                                             Availability
+=========================================== ======================================================================= =================
+``on_success_callback``                     Invoked when the :ref:`Dag succeeds <dag-run:dag-run-status>`           Dag or Task
+                                            or :ref:`task succeeds <concepts:task-instances>`.
+``on_failure_callback``                     Invoked when the :ref:`Dag fails <dag-run:dag-run-status>`              Dag or Task
+                                            or task :ref:`fails <concepts:task-instances>`.
+``on_retry_callback``                       Invoked when the task is :ref:`up for retry <concepts:task-instances>`. Task
+``on_execute_callback``                     Invoked right before the task begins executing.                         Task
+``on_skipped_callback``                     Invoked when the task is :ref:`running <concepts:task-instances>`       Task
+                                            and AirflowSkipException raised. Explicitly it is NOT called if a task
+                                            is not started to be executed because of a preceding branching
+                                            decision in the Dag or a trigger rule which causes execution
+                                            to skip so that the task execution is never scheduled.
+=========================================== ======================================================================= =================
+
+
+Context Mapping
+---------------
+
+A context mapping that contains runtime information about a task instance is passed to every callback.
+Full list of variables available in ``context`` are in :doc:`docs <../../templates-ref>` and `code <https://github.com/apache/airflow/blob/main/task-sdk/src/airflow/sdk/definitions/context.py>`_.
+
+
+Dag Callbacks
+^^^^^^^^^^^^^
+
+As the context mapping describes execution of a task instance, contexts passed to Dag callbacks will also contain task instance variables,
+and the task selected depends on the state of a Dag:
+
+#. On regular failure, the latest failed task is selected.
+#. On Dag run timeout, the latest started but not finished task is passed.
+#. If tasks are deadlocked, a task that should have run next but couldn't is passed.
+#. On success, the latest succeeded task is passed.
+
+It's not recommended to rely on task instance variables in Dag callbacks except for human analysis, as they reflect only partial information about the Dag's state.
+For example, a timeout may be caused by a number of stalling tasks, but only one will eventually be selected for context.
+
+.. note::
+    Before Airflow 3.2.0, the rules above did not apply and the task instance passed to Dag callback was not related to Dag state, rather being selected as the latest task in the Dag
+    lexicographically.
 
 
 Examples
@@ -109,8 +133,6 @@ Before each task begins to execute, the ``task_execute_callback`` function will 
         task3 = EmptyOperator(task_id="task3")
         task1 >> task2 >> task3
 
-Full list of variables available in ``context`` in :doc:`docs <../../templates-ref>` and `code <https://github.com/apache/airflow/blob/main/task-sdk/src/airflow/sdk/definitions/context.py>`_.
-
 
 Using Notifiers
 ^^^^^^^^^^^^^^^
@@ -141,3 +163,13 @@ Here's an example of using a custom notifier:
 
 For a list of community-managed Notifiers, see :doc:`apache-airflow-providers:core-extensions/notifications`.
 For more information on writing a custom Notifier, see the :doc:`Notifiers <../../howto/notifications>` how-to page.
+
+Deadline Alert Callbacks
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+In addition to the Dag/task lifecycle callbacks above, Airflow supports **Deadline Alert** callbacks which
+trigger when a Dag run exceeds a configured time threshold. Deadline Alert callbacks use
+:class:`~airflow.sdk.AsyncCallback` (runs in the Triggerer) or :class:`~airflow.sdk.SyncCallback`
+(runs in the executor) and are configured on the Dag via the ``deadline`` parameter.
+
+For full details, see :doc:`/howto/deadline-alerts`.

@@ -99,7 +99,6 @@ with DAG(
     start_date=datetime(2023, 1, 1),
     schedule="@once",
     catchup=False,
-    tags=["example"],
 ) as dag:
     test_context = sys_test_context_task()
     env_id = test_context[ENV_ID_KEY]
@@ -116,6 +115,7 @@ with DAG(
         cluster_identifier=redshift_cluster_identifier,
         vpc_security_group_ids=[security_group_id],
         cluster_subnet_group_name=cluster_subnet_group_name,
+        publicly_accessible=False,
         cluster_type="single-node",
         node_type="ra3.large",
         master_username=DB_LOGIN,
@@ -126,7 +126,7 @@ with DAG(
         task_id="wait_cluster_available",
         cluster_identifier=redshift_cluster_identifier,
         target_status="available",
-        poke_interval=5,
+        poke_interval=100,
         timeout=60 * 30,
     )
 
@@ -170,6 +170,14 @@ with DAG(
 
         with open(filepath, newline="") as file:
             return list(csv.reader(file))
+
+    wait_cluster_available_before_transfer = RedshiftClusterSensor(
+        task_id="wait_cluster_available_before_transfer",
+        cluster_identifier=redshift_cluster_identifier,
+        target_status="available",
+        poke_interval=100,
+        timeout=60 * 30,
+    )
 
     transfer_s3_to_sql = S3ToSqlOperator(
         task_id="transfer_s3_to_sql",
@@ -242,6 +250,7 @@ with DAG(
         task_id="delete_cluster",
         cluster_identifier=redshift_cluster_identifier,
         trigger_rule=TriggerRule.ALL_DONE,
+        max_attempts=50,
     )
 
     chain(
@@ -254,6 +263,7 @@ with DAG(
         create_object,
         create_table,
         # TEST BODY
+        wait_cluster_available_before_transfer,
         transfer_s3_to_sql,
         transfer_s3_to_sql_generator,
         check_table,
@@ -268,5 +278,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

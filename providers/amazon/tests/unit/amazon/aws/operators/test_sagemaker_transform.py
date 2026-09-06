@@ -23,13 +23,13 @@ from unittest import mock
 import pytest
 from botocore.exceptions import ClientError
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.providers.amazon.aws.hooks.sagemaker import SageMakerHook
 from airflow.providers.amazon.aws.links.sagemaker import SageMakerTransformJobLink
 from airflow.providers.amazon.aws.operators import sagemaker
 from airflow.providers.amazon.aws.operators.sagemaker import SageMakerTransformOperator
 from airflow.providers.amazon.aws.triggers.sagemaker import SageMakerTrigger
 from airflow.providers.common.compat.openlineage.facet import Dataset
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 from airflow.providers.openlineage.extractors import OperatorLineage
 
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
@@ -72,6 +72,11 @@ CONFIG: dict = {"Model": CREATE_MODEL_PARAMS, "Transform": CREATE_TRANSFORM_PARA
 MOCK_UNIX_TIME: int = 1234567890123456789  # reproducible time for testing time.time_ns()
 
 
+REGION_NAME = "eu-west-2"
+VERIFY = False
+BOTOCORE_CONFIG = {"read_timeout": 42}
+
+
 class TestSageMakerTransformOperator:
     def setup_method(self):
         self.sagemaker = SageMakerTransformOperator(
@@ -98,12 +103,12 @@ class TestSageMakerTransformOperator:
         }
         self.sagemaker.execute(None)
         assert self.sagemaker.integer_fields == EXPECTED_INTEGER_FIELDS
-        for key1, key2, *key3 in EXPECTED_INTEGER_FIELDS:
-            if key3:
-                (key3,) = key3
+        for key1, key2, *key3_org in EXPECTED_INTEGER_FIELDS:
+            if key3_org:
+                (key3,) = key3_org
                 assert self.sagemaker.config[key1][key2][key3] == int(self.sagemaker.config[key1][key2][key3])
             else:
-                self.sagemaker.config[key1][key2] == int(self.sagemaker.config[key1][key2])
+                assert self.sagemaker.config[key1][key2] == int(self.sagemaker.config[key1][key2])
 
     @mock.patch.object(SageMakerHook, "describe_transform_job")
     @mock.patch.object(SageMakerHook, "create_model")
@@ -341,6 +346,33 @@ class TestSageMakerTransformOperator:
             self.sagemaker.execute(context=None)
         assert not mock_defer.called
 
+    @mock.patch.object(sagemaker, "serialize", return_value="")
+    @mock.patch.object(SageMakerHook, "describe_model", return_value={"ModelName": "model_name"})
+    @mock.patch.object(
+        SageMakerHook,
+        "describe_transform_job",
+        return_value={
+            "ModelName": "model_name",
+            "TransformJobStatus": "Failed",
+            "FailureReason": "it failed",
+        },
+    )
+    def test_execute_complete_raises_when_job_failed_during_deferred_wait(
+        self, mock_describe_transform_job, mock_describe_model, mock_serialize
+    ):
+        # When the transform job fails during the deferred wait, the trigger (an
+        # AwsBaseWaiterTrigger) yields {"status": "error", ...} instead of raising, so
+        # execute_complete must reject a non-success status rather than report the task as
+        # successful — matching every other SageMaker operator's execute_complete.
+        event = {
+            "status": "error",
+            "message": "Error while waiting for transform job: terminal failure",
+            "job_name": "job_name",
+        }
+
+        with pytest.raises(RuntimeError, match="Error while running transform job"):
+            self.sagemaker.execute_complete(context=None, event=event)
+
     @mock.patch("airflow.providers.amazon.aws.operators.sagemaker.SageMakerTransformOperator.defer")
     @mock.patch.object(SageMakerHook, "describe_model")
     @mock.patch.object(
@@ -381,6 +413,32 @@ class TestSageMakerTransformOperator:
             self.sagemaker.execute(context=None)
 
         assert isinstance(exc.value.trigger, SageMakerTrigger), "Trigger is not a SagemakerTrigger"
+
+    @mock.patch.object(
+        SageMakerHook, "describe_transform_job", return_value={"TransformJobStatus": "InProgress"}
+    )
+    @mock.patch.object(SageMakerHook, "create_transform_job")
+    @mock.patch.object(SageMakerHook, "create_model")
+    def test_deferred_trigger_receives_hook_configuration(
+        self, _, mock_transform, mock_describe_transform_job
+    ):
+        mock_transform.return_value = {
+            "TransformJobArn": "test_arn",
+            "ResponseMetadata": {"HTTPStatusCode": 200},
+        }
+        self.sagemaker.deferrable = True
+        self.sagemaker.wait_for_completion = True
+        self.sagemaker.check_if_job_exists = False
+        self.sagemaker.region_name = REGION_NAME
+        self.sagemaker.verify = VERIFY
+        self.sagemaker.botocore_config = BOTOCORE_CONFIG
+
+        with pytest.raises(TaskDeferred) as exc:
+            self.sagemaker.execute(context=None)
+
+        assert exc.value.trigger.region_name == REGION_NAME
+        assert exc.value.trigger.verify == VERIFY
+        assert exc.value.trigger.botocore_config == BOTOCORE_CONFIG
 
     @mock.patch.object(SageMakerHook, "describe_transform_job")
     @mock.patch.object(SageMakerHook, "create_model")

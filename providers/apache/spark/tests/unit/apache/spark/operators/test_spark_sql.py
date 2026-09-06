@@ -21,7 +21,7 @@ import pytest
 
 from airflow.models.dag import DAG
 from airflow.providers.apache.spark.operators.spark_sql import SparkSqlOperator
-from airflow.utils import timezone
+from airflow.providers.common.compat.sdk import timezone
 
 DEFAULT_DATE = timezone.datetime(2024, 2, 1, tzinfo=timezone.utc)
 
@@ -78,6 +78,5 @@ class TestSparkSqlOperator:
         )
         session.add(ti)
         session.commit()
-        ti.render_templates()
-        task: SparkSqlOperator = ti.task
+        task = ti.render_templates()
         assert task.sql == "sql"

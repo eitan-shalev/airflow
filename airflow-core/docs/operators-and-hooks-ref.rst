@@ -19,7 +19,9 @@
 Operators and Hooks Reference
 =============================
 
-Here's the list of the operators and hooks which are available in this release in the ``apache-airflow`` package.
+Here's the list of the operators and hooks which are available in this release.
+
+Note that commonly used operators and sensors (such as ``BashOperator``, ``PythonOperator``, ``ExternalTaskSensor``, etc.) are provided by the ``apache-airflow-providers-standard`` package.
 
 Airflow has many more integrations available for separate installation as
 :doc:`apache-airflow-providers:index`.
@@ -63,7 +65,7 @@ For details see: :doc:`apache-airflow-providers:operators-and-hooks-ref/index`.
    * - :mod:`airflow.providers.standard.operators.empty`
      -
 
-   * - :mod:`airflow.providers.common.sql.operators.generic_transfer.GenericTransfer`
+   * - :class:`airflow.providers.common.sql.operators.generic_transfer.GenericTransfer`
      - :doc:`How to use <apache-airflow-providers-common-sql:operators>`
 
    * - :mod:`airflow.providers.standard.operators.latest_only`

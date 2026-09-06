@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.10,<3.11"
 # dependencies = [
 #   "requests>=2.31.0",
 #   "rich>=13.6.0",
@@ -28,9 +28,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))
 from common_prek_utils import AIRFLOW_ROOT_PATH, console, initialize_breeze_prek
 
 initialize_breeze_prek(__name__, __file__)

@@ -21,7 +21,6 @@ import re
 import sys
 from itertools import chain
 from pathlib import Path
-from subprocess import DEVNULL
 
 from airflow_breeze.global_constants import (
     ALL_TEST_SUITES,
@@ -31,7 +30,8 @@ from airflow_breeze.global_constants import (
     SelectiveCoreTestType,
     all_helm_test_packages,
 )
-from airflow_breeze.utils.console import Output, get_console
+from airflow_breeze.utils.confirm import Answer, confirm_action
+from airflow_breeze.utils.console import Output, console_print, get_console
 from airflow_breeze.utils.packages import get_excluded_provider_folders, get_suspended_provider_folders
 from airflow_breeze.utils.path_utils import (
     AIRFLOW_PROVIDERS_ROOT_PATH,
@@ -43,11 +43,13 @@ DOCKER_TESTS_ROOT_PATH = AIRFLOW_ROOT_PATH / "docker-tests"
 DOCKER_TESTS_TESTS_MODULE_PATH = DOCKER_TESTS_ROOT_PATH / "tests" / "docker_tests"
 DOCKER_TESTS_REQUIREMENTS = DOCKER_TESTS_ROOT_PATH / "requirements.txt"
 
-TASK_SDK_TESTS_ROOT_PATH = AIRFLOW_ROOT_PATH / "task-sdk-tests"
-TASK_SDK_TESTS_TESTS_MODULE_PATH = TASK_SDK_TESTS_ROOT_PATH / "tests" / "task_sdk_tests"
-TASK_SDK_TESTS_REQUIREMENTS = TASK_SDK_TESTS_ROOT_PATH / "requirements.txt"
+TASK_SDK_INTEGRATION_TESTS_ROOT_PATH = AIRFLOW_ROOT_PATH / "task-sdk-integration-tests"
+TASK_SDK_TESTS_TESTS_MODULE_PATH = TASK_SDK_INTEGRATION_TESTS_ROOT_PATH / "tests" / "task_sdk_tests"
+TASK_SDK_TESTS_REQUIREMENTS = TASK_SDK_INTEGRATION_TESTS_ROOT_PATH / "requirements.txt"
 
 AIRFLOW_E2E_TESTS_ROOT_PATH = AIRFLOW_ROOT_PATH / "airflow-e2e-tests"
+
+AIRFLOW_CTL_TESTS_ROOT_PATH = AIRFLOW_ROOT_PATH / "airflow-ctl-tests"
 
 IGNORE_DB_INIT_FOR_TEST_GROUPS = [
     GroupOfTests.HELM,
@@ -59,6 +61,11 @@ IGNORE_WARNING_OUTPUT_FOR_TEST_GROUPS = [
     GroupOfTests.HELM,
     GroupOfTests.PYTHON_API_CLIENT,
 ]
+
+# Floor for pytest setup/teardown timeouts. Container-backed fixtures (testcontainers) pull an image
+# and boot a container during setup; on slower runners this can exceed the regular per-test timeout.
+# Execution-timeout is kept at the per-test value so hung tests are still caught quickly.
+MIN_SETUP_TEARDOWN_TIMEOUT = 180
 
 
 def verify_an_image(
@@ -88,7 +95,16 @@ def verify_an_image(
     if slim_image:
         env["TEST_SLIM_IMAGE"] = "true"
     command_result = run_command(
-        ["uv", "run", "--isolated", "pytest", test_path.as_posix(), *pytest_args, *extra_pytest_args],
+        [
+            "uv",
+            "run",
+            "--frozen",
+            "--isolated",
+            "pytest",
+            test_path.as_posix(),
+            *pytest_args,
+            *extra_pytest_args,
+        ],
         env=env,
         output=output,
         check=False,
@@ -99,38 +115,83 @@ def verify_an_image(
 
 def run_docker_compose_tests(
     image_name: str,
+    python_version: str,
     extra_pytest_args: tuple,
     skip_docker_compose_deletion: bool,
+    skip_mounting_local_volumes: bool,
     include_success_outputs: bool,
     test_type: str = "docker-compose",
     skip_image_check: bool = False,
+    test_mode: str = "basic",
 ) -> tuple[int, str]:
     if not skip_image_check:
-        command_result = run_command(["docker", "inspect", image_name], check=False, stdout=DEVNULL)
+        command_result = run_command(
+            ["docker", "inspect", image_name], check=False, capture_output=True, text=True
+        )
         if command_result.returncode != 0:
-            get_console().print(f"[error]Error when inspecting PROD image: {command_result.returncode}[/]")
-            return command_result.returncode, f"Testing {test_type} python with {image_name}"
-    pytest_args = ("--color=yes",)
+            console_print(f"[error]Error when inspecting PROD image: {command_result.returncode}[/]")
+            console_print(command_result.stderr or "", highlight=False)
+            if "no such object" in command_result.stderr:
+                console_print(
+                    f"The image {image_name} does not exist locally. "
+                    f"It should be build before running docker-compose tests."
+                )
+                answer = confirm_action(
+                    "Should we build it now? No will",
+                    default_answer=Answer.YES,
+                    quit_allowed=False,
+                    timeout=20,
+                )
+                if answer:
+                    console_print(f"[info]Building image {image_name}[/]")
+                    run_command(["breeze", "prod-image", "build", "--python", python_version], check=True)
 
+                else:
+                    console_print(
+                        f"[error]Cannot run docker-compose tests without the image {image_name} present locally.[/]"
+                    )
+                    console_print(
+                        f"\nPlease build the image, using\n\n"
+                        f"[special]breeze prod-image build --python {python_version}[/]\n\n"
+                        f"and try again.\n"
+                    )
+                    sys.exit(1)
+
+    # Always with color
+    pytest_args = ["--color=yes"]
     if test_type == "task-sdk-integration":
-        test_path = Path("tests") / "task_sdk_tests" / "test_task_sdk_health.py"
-        cwd = TASK_SDK_TESTS_ROOT_PATH.as_posix()
+        test_path = Path("tests") / "task_sdk_tests"
+        cwd = TASK_SDK_INTEGRATION_TESTS_ROOT_PATH.as_posix()
     elif test_type == "airflow-e2e-tests":
-        test_path = Path("tests") / "airflow_e2e_tests"
+        test_path = Path("tests") / "airflow_e2e_tests" / f"{test_mode}_tests"
         cwd = AIRFLOW_E2E_TESTS_ROOT_PATH.as_posix()
+    elif test_type == "airflow-ctl-integration":
+        test_path = Path("tests") / "airflowctl_tests"
+        cwd = AIRFLOW_CTL_TESTS_ROOT_PATH.as_posix()
     else:
         test_path = Path("tests") / "docker_tests" / "test_docker_compose_quick_start.py"
         cwd = DOCKER_TESTS_ROOT_PATH.as_posix()
+        pytest_args.append("-s")  # -s to see print outputs as they come
+
+    all_tests = [test_path.as_posix()]
+    if not any(pytest_arg.startswith("tests/") for pytest_arg in extra_pytest_args):
+        # Only add all tests when no tests were specified on the command line
+        pytest_args.extend(all_tests)
+    else:
+        pytest_args.extend(extra_pytest_args)
 
     env = os.environ.copy()
     env["DOCKER_IMAGE"] = image_name
+    env["E2E_TEST_MODE"] = test_mode
     if skip_docker_compose_deletion:
         env["SKIP_DOCKER_COMPOSE_DELETION"] = "true"
+    if skip_mounting_local_volumes:
+        env["SKIP_MOUNTING_LOCAL_VOLUMES"] = "true"
     if include_success_outputs:
         env["INCLUDE_SUCCESS_OUTPUTS"] = "true"
-    # since we are only running one test, we can print output directly with pytest -s
+    env["AIRFLOW_UID"] = str(os.getuid())
     command_result = run_command(
-        ["uv", "run", "pytest", str(test_path), "-s", *pytest_args, *extra_pytest_args],
+        ["uv", "run", "--frozen", "pytest", *pytest_args],
         env=env,
         check=False,
         cwd=cwd,
@@ -180,6 +241,44 @@ def get_excluded_test_provider_folders(python_version: str) -> list[str]:
     return get_test_folders(excluded_folders)
 
 
+def are_all_test_paths_excluded(
+    *,
+    test_group: GroupOfTests,
+    test_type: str,
+    python_version: str,
+    skip_db_tests: bool = False,
+    parallel_test_types_list: list[str] | None = None,
+    integration: tuple | None = None,
+) -> bool:
+    """Check if all test paths for the given test type are excluded or suspended.
+
+    Uses the same provider.yaml exclusion data as generate_args_for_pytest to determine
+    whether every test directory that would be generated for this test type is in the
+    excluded or suspended provider set.
+
+    Returns False when test_type is "None" (user provides explicit paths via extra_pytest_args)
+    or when any test path remains after exclusions.
+    """
+    if skip_db_tests and parallel_test_types_list:
+        initial_paths = convert_parallel_types_to_folders(
+            test_group=test_group,
+            parallel_test_types_list=parallel_test_types_list,
+        )
+    else:
+        initial_paths = convert_test_type_to_pytest_args(
+            test_group=test_group,
+            test_type=test_type,
+            integration=integration,
+        )
+    # Filter to only actual test directory paths (not pytest flags like -m, --include-quarantined)
+    test_dir_paths = [p for p in initial_paths if not p.startswith("-")]
+    if not test_dir_paths:
+        return False
+    excluded = set(get_excluded_test_provider_folders(python_version))
+    suspended = set(get_suspended_test_provider_folders())
+    return all(p in excluded | suspended for p in test_dir_paths)
+
+
 TEST_TYPE_CORE_MAP_TO_PYTEST_ARGS: dict[str, list[str]] = {
     "Always": ["airflow-core/tests/unit/always"],
     "API": ["airflow-core/tests/unit/api", "airflow-core/tests/unit/api_fastapi"],
@@ -225,7 +324,7 @@ TEST_GROUP_TO_TEST_FOLDERS: dict[GroupOfTests, list[str]] = {
     GroupOfTests.PROVIDERS: ALL_PROVIDER_TEST_FOLDERS,
     GroupOfTests.TASK_SDK: ["task-sdk/tests"],
     GroupOfTests.CTL: ["airflow-ctl/tests"],
-    GroupOfTests.HELM: ["helm-tests"],
+    GroupOfTests.HELM: ["chart/tests"],
     GroupOfTests.INTEGRATION_CORE: ["airflow-core/tests/integration"],
     GroupOfTests.INTEGRATION_PROVIDERS: ALL_PROVIDER_INTEGRATION_TEST_FOLDERS,
     GroupOfTests.PYTHON_API_CLIENT: ["clients/python"],
@@ -271,6 +370,27 @@ PROVIDERS_LIST_PREFIX = "Providers["
 PROVIDERS_LIST_EXCLUDE_PREFIX = "Providers[-"
 
 
+def is_provider_selected_in_test_types(provider_id: str, test_types: list[str]) -> bool:
+    """Whether a provider's tests are included by any of the given pytest test-type selectors.
+
+    A bare selector such as ``Providers`` (no bracket) runs every provider; ``Providers[a,b]`` runs
+    only the listed ones; ``Providers[-a,b]`` runs all except the listed ones.
+    """
+    for test_type in test_types:
+        if test_type.startswith(PROVIDERS_LIST_EXCLUDE_PREFIX):
+            excluded = test_type[len(PROVIDERS_LIST_EXCLUDE_PREFIX) : -1].split(",")
+            if provider_id not in excluded:
+                return True
+        elif test_type.startswith(PROVIDERS_LIST_PREFIX):
+            included = test_type[len(PROVIDERS_LIST_PREFIX) : -1].split(",")
+            if provider_id in included:
+                return True
+        else:
+            # A non-bracketed selector (e.g. "Providers", "All") runs every provider.
+            return True
+    return False
+
+
 def convert_test_type_to_pytest_args(
     *,
     test_group: GroupOfTests,
@@ -296,15 +416,15 @@ def convert_test_type_to_pytest_args(
         return all_paths
 
     if test_group == GroupOfTests.SYSTEM and test_type != NONE_TEST_TYPE:
-        get_console().print(f"[error]Only {NONE_TEST_TYPE} should be allowed as test type[/]")
+        console_print(f"[error]Only {NONE_TEST_TYPE} should be allowed as test type[/]")
         sys.exit(1)
     if test_group == GroupOfTests.HELM:
         if test_type not in all_helm_test_packages():
-            get_console().print(f"[error]Unknown helm test type: {test_type}[/]")
+            console_print(f"[error]Unknown helm test type: {test_type}[/]")
             sys.exit(1)
         helm_folder = TEST_GROUP_TO_TEST_FOLDERS[test_group][0]
         if test_type and test_type != ALL_TEST_TYPE:
-            return [f"{helm_folder}/tests/helm_tests/{test_type}"]
+            return [f"{helm_folder}/helm_tests/{test_type}"]
         return [helm_folder]
     if test_type == SelectiveCoreTestType.OTHER.value and test_group == GroupOfTests.CORE:
         return find_all_other_tests()
@@ -313,7 +433,7 @@ def convert_test_type_to_pytest_args(
         GroupOfTests.INTEGRATION_PROVIDERS,
     ]:
         if test_type != ALL_TEST_TYPE:
-            get_console().print(f"[error]Unknown test type for {test_group}: {test_type}[/]")
+            console_print(f"[error]Unknown test type for {test_group}: {test_type}[/]")
             sys.exit(1)
     if test_group == GroupOfTests.PROVIDERS:
         if test_type.startswith(PROVIDERS_LIST_EXCLUDE_PREFIX):
@@ -322,7 +442,7 @@ def convert_test_type_to_pytest_args(
             for excluded_provider in excluded_provider_list:
                 provider_test_to_exclude = f"providers/{excluded_provider.replace('.', '/')}/tests"
                 if provider_test_to_exclude in providers_with_exclusions:
-                    get_console().print(
+                    console_print(
                         f"[info]Removing {provider_test_to_exclude} from {providers_with_exclusions}[/]"
                     )
                     providers_with_exclusions.remove(provider_test_to_exclude)
@@ -340,7 +460,7 @@ def convert_test_type_to_pytest_args(
                 if provider_path.is_dir():
                     providers_to_test.append(provider_path.as_posix())
                 else:
-                    get_console().print(
+                    console_print(
                         f"[error] {provider_path} does not exist for {provider} "
                         "- which means that this provider has no tests. This is bad idea. "
                         "Please add it (all providers should have at least a package in tests)."
@@ -348,17 +468,17 @@ def convert_test_type_to_pytest_args(
                     sys.exit(1)
             return providers_to_test
         if not test_type.startswith(PROVIDERS_PREFIX):
-            get_console().print(f"[error]Unknown test type for {GroupOfTests.PROVIDERS}: {test_type}[/]")
+            console_print(f"[error]Unknown test type for {GroupOfTests.PROVIDERS}: {test_type}[/]")
             sys.exit(1)
         return TEST_GROUP_TO_TEST_FOLDERS[test_group]
     if test_group == GroupOfTests.PYTHON_API_CLIENT:
         return TEST_GROUP_TO_TEST_FOLDERS[test_group]
     if test_group != GroupOfTests.CORE:
-        get_console().print(f"[error]Only {GroupOfTests.CORE} should be allowed here[/]")
+        console_print(f"[error]Only {GroupOfTests.CORE} should be allowed here[/]")
     test_dirs = TEST_TYPE_CORE_MAP_TO_PYTEST_ARGS.get(test_type)
     if test_dirs:
         return test_dirs.copy()
-    get_console().print(f"[error]Unknown test type: {test_type}[/]")
+    console_print(f"[error]Unknown test type: {test_type}[/]")
     sys.exit(1)
 
 
@@ -381,6 +501,12 @@ def generate_args_for_pytest(
     integration: tuple | None = None,
 ):
     result_log_file, warnings_file, coverage_file = test_paths(test_type, backend)
+    # Container-backed fixtures (e.g. the testcontainers MongoDB used by provider tests) pull their
+    # image and boot the container in the *setup* phase of the first test that uses them. On slower
+    # runners -- notably the GitHub-hosted ARM canary, where the image cache is cold -- that can exceed
+    # the regular per-test timeout. Give setup/teardown a higher floor so the bring-up fits, while
+    # keeping execution-timeout tight so a genuinely hung test is still caught quickly.
+    setup_teardown_timeout = max(test_timeout, MIN_SETUP_TEARDOWN_TIMEOUT)
     if skip_db_tests and parallel_test_types_list:
         args = convert_parallel_types_to_folders(
             test_group=test_group,
@@ -402,9 +528,9 @@ def generate_args_for_pytest(
             f"--junitxml={result_log_file}",
             # timeouts in seconds for individual tests
             "--timeouts-order=moi",
-            f"--setup-timeout={test_timeout}",
+            f"--setup-timeout={setup_teardown_timeout}",
             f"--execution-timeout={test_timeout}",
-            f"--teardown-timeout={test_timeout}",
+            f"--teardown-timeout={setup_teardown_timeout}",
             "--disable-warnings",
             # Only display summary for non-expected cases
             #
@@ -447,17 +573,17 @@ def generate_args_for_pytest(
     args.extend(get_excluded_provider_ignore_args(python_version))
     suspended_test_folders = get_suspended_test_provider_folders()
     if suspended_test_folders:
-        get_console().print(f"[info]Suspended test folders to remove: {suspended_test_folders}[/]")
+        console_print(f"[info]Suspended test folders to remove: {suspended_test_folders}[/]")
         for suspended_test_folder in suspended_test_folders:
             if suspended_test_folder in args:
-                get_console().print(f"[warning]Removing {suspended_test_folder}[/]")
+                console_print(f"[warning]Removing {suspended_test_folder}[/]")
                 args.remove(suspended_test_folder)
     excluded_test_folders = get_excluded_test_provider_folders(python_version)
     if excluded_test_folders:
-        get_console().print(f"[info]Excluded test folders to remove: {excluded_test_folders}[/]")
+        console_print(f"[info]Excluded test folders to remove: {excluded_test_folders}[/]")
         for excluded_test_folder in excluded_test_folders:
             if excluded_test_folder in args:
-                get_console().print(f"[warning]Removing {excluded_test_folder}[/]")
+                console_print(f"[warning]Removing {excluded_test_folder}[/]")
                 args.remove(excluded_test_folder)
     if use_xdist:
         args.extend(["-n", str(parallelism) if parallelism else "auto"])

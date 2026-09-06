@@ -26,6 +26,163 @@
 Changelog
 ---------
 
+3.12.1
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Reject mixed-separator path traversal in imap attachment names (#70665)``
+* ``Check imap attachment symlink on the resolved destination path (#69194)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.12.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add overwrite parameter to IMAP hook to prevent silent file overwrites (#68838)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+3.11.3
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Neutralize path separator in IMAP (#66951)``
+* ``Handle mixed plaintext and RFC 2047 encoded attachment filenames in ImapHook. Add unit test covering mixed plaintext and encoded filename decoding. (#66672)``
+* ``Fix RFC 2047 filename decoding (#65875)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+
+3.11.2
+......
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.11.1
+......
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Prepare providers release 2026-03-09 (#63198)``
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+
+3.11.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add max_mails parameter to attachment methods in IMAP hook (#60963)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.10.3
+......
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Migrate imap provider to use airflow.sdk.configuration.conf (#59994)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.10.2
+......
+
+Misc
+~~~~
+
+* ``Remove top-level SDK reference in Core (#59817)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.10.1
+......
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.10.0
+......
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.9.4
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+* ``Migrate 'imap' provider to 'common.compat' (#57091)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+
+3.9.3
+.....
+
+Misc
+~~~~
+
+* ``fix mypy type errors in imap provider for sqlalchemy 2 upgrade (#56810)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare release for Sep 2025 2nd wave of providers (#55688)``
+   * ``Prepare release for Sep 2025 1st wave of providers (#55203)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+   * ``Switch pre-commit to prek (#54258)``
+
 3.9.2
 .....
 
@@ -102,7 +259,7 @@ Misc
 .....
 
 .. note::
-  This version has no code changes. It's released due to yank of previous version due to packaging issues.
+  This version contains no code changes. It was released to replace a previous version that was yanked due to a packaging issue.
 
 3.8.1
 .....

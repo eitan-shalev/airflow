@@ -16,18 +16,14 @@
 # under the License.
 
 # Main Justfile for Airflow Go SDK
-set shell := ["bash", "-uc", "-O", "globstar"]
+set shell := ["bash", "-uc"]
 
 # Default recipe to show help
 default:
   @just --list
 
-# Build all components
-build: build-celery build-examples
-
-# Build the worker binary
-build-celery:
-  go build -o bin/airflow-go-celery ./celery/cmd
+# Build all deployable example bundles
+build: build-examples
 
 # Build all example bundles
 build-examples:
@@ -38,6 +34,11 @@ test:
   @echo "Running unit tests..."
   go run gotest.tools/gotestsum@v1.13.0 -f dots-v2 ./...
 
-# Generate protocol buffers
-protoc:
-  @prek run -a protoc
+# Build and serve Go package documentation locally
+docs port="6060":
+  @echo "Serving Go docs at http://localhost:{{port}}/github.com/apache/airflow/go-sdk"
+  go run golang.org/x/pkgsite/cmd/pkgsite@v0.1.0 -http=localhost:{{port}} .
+
+# Regenerate the coordinator-protocol data models from the task-sdk supervisor schema
+generate-models:
+  go generate ./pkg/execution/genmodels/...

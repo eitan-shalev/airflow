@@ -25,16 +25,21 @@ import click
 
 from airflow_breeze.commands.common_options import argument_doc_packages
 from airflow_breeze.utils.click_utils import BreezeGroup
-from airflow_breeze.utils.console import get_console
+from airflow_breeze.utils.console import console_print
 from airflow_breeze.utils.custom_param_types import BetterChoice
 from airflow_breeze.utils.gh_workflow_utils import trigger_workflow_and_monitor
-from airflow_breeze.utils.run_utils import run_command
+from airflow_breeze.utils.github import run_gh_command
 
 WORKFLOW_NAME_MAPS = {
     "publish-docs": "publish-docs-to-s3.yml",
     "airflow-refresh-site": "build.yml",
     "sync-s3-to-github": "s3-to-github.yml",
+    "release-constraints": "release-constraints.yml",
 }
+
+# X.Y.Z or X.Y.ZrcN - the workflow derives the release stage from which of the two it is given,
+# so there is no separate switch that could disagree with the version.
+RELEASE_VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+(rc\d+)?$")
 
 APACHE_AIRFLOW_REPO = "apache/airflow"
 APACHE_AIRFLOW_SITE_REPO = "apache/airflow-site"
@@ -42,11 +47,11 @@ APACHE_AIRFLOW_SITE_ARCHIVE_REPO = "apache/airflow-site-archive"
 
 
 @click.group(cls=BreezeGroup, name="workflow-run", help="Tools to manage Airflow repository workflows ")
-def workflow_run():
+def workflow_run_group():
     pass
 
 
-@workflow_run.command(name="publish-docs", help="Trigger publish docs to S3 workflow")
+@workflow_run_group.command(name="publish-docs", help="Trigger publish docs to S3 workflow")
 @click.option(
     "--ref",
     help="Git reference tag to checkout to build documentation.",
@@ -98,9 +103,17 @@ def workflow_run():
 )
 @click.option(
     "--workflow-branch",
-    help="Branch to run the workflow on. Defaults to 'main'.",
-    default="main",
+    help="Git ref the workflow DEFINITION runs from. Defaults to the value of --ref, so the "
+    "workflow version matches the content being built (running main's workflow against an "
+    "older tag breaks when inputs/jobs have since changed). Pass an explicit ref to override "
+    "(e.g. 'main').",
+    default=None,
     type=str,
+)
+@click.option(
+    "--ignore-missing-inventories",
+    help="Do not fail the build on missing third-party inventories.",
+    is_flag=True,
 )
 @argument_doc_packages
 def workflow_run_publish(
@@ -113,44 +126,63 @@ def workflow_run_publish(
     airflow_version: str | None = None,
     airflow_base_version: str | None = None,
     apply_commits: str | None = None,
-    workflow_branch: str = "main",
+    workflow_branch: str | None = None,
+    ignore_missing_inventories: bool = False,
 ):
+    # Default the workflow-definition ref to the ref being built, so the workflow version
+    # matches the content. Running main's workflow against an older tag breaks when the
+    # workflow's inputs/jobs have changed since that tag (e.g. a newly required input).
+    if workflow_branch is None:
+        workflow_branch = ref
     if len(doc_packages) == 0:
-        get_console().print(
+        console_print(
             "[red]Error: No doc packages provided. Please provide at least one doc package.[/red]",
         )
         sys.exit(1)
     if os.environ.get("GITHUB_TOKEN", ""):
-        get_console().print("\n[warning]Your authentication will use GITHUB_TOKEN environment variable.")
-        get_console().print(
-            "\nThis might not be what you want unless your token has "
-            "sufficient permissions to trigger workflows."
+        console_print(
+            "\n[warning]GITHUB_TOKEN is set; Breeze will try your `gh auth login` first and only "
+            "use this token as a fallback. The fallback token must have workflow-trigger scope."
         )
-        get_console().print(
-            "If you remove GITHUB_TOKEN, workflow_run will use the authentication you already "
-            "set-up with `gh auth login`.\n"
-        )
-    get_console().print(
+    console_print(
         f"[blue]Validating ref: {ref}[/blue]",
     )
 
     if not skip_tag_validation:
-        tag_result = run_command(
+        tag_result = run_gh_command(
             ["gh", "api", f"repos/apache/airflow/git/refs/tags/{ref}"],
             capture_output=True,
-            check=False,
         )
 
         stdout = tag_result.stdout.decode("utf-8")
         tag_respo = json.loads(stdout)
 
         if not tag_respo.get("ref"):
-            get_console().print(
-                f"[red]Error: Ref {ref} does not exists in repo apache/airflow .[/red]",
+            # Check whether the ref exists as a branch (common case for -docs branches)
+            branch_result = run_gh_command(
+                ["gh", "api", f"repos/apache/airflow/git/refs/heads/{ref}"],
+                capture_output=True,
+                check=False,
             )
+            branch_stdout = branch_result.stdout.decode("utf-8")
+            branch_respo = json.loads(branch_stdout)
+
+            if branch_respo.get("ref"):
+                console_print(
+                    f"[red]Error: Ref {ref} exists as a branch but not as a tag.[/red]",
+                )
+                console_print(
+                    "\nTo publish docs from a branch (e.g. a `providers/YYYY-MM-DD-docs` "
+                    "post-release fix branch), add [bold]--skip-tag-validation[/bold] to your command."
+                )
+            else:
+                console_print(
+                    f"[red]Error: Ref {ref} does not exist as a tag or branch in repo apache/airflow.[/red]",
+                )
+                console_print("\nYou can add --skip-tag-validation to skip this validation.")
             sys.exit(1)
 
-    get_console().print(
+    console_print(
         f"[blue]Triggering workflow {WORKFLOW_NAME_MAPS['publish-docs']}: at {APACHE_AIRFLOW_REPO}[/blue]",
     )
     from packaging.version import InvalidVersion, Version
@@ -161,7 +193,7 @@ def workflow_run_publish(
         except InvalidVersion as e:
             f"[red]Invalid version passed as --airflow-version:  {airflow_version}[/red]: {e}"
             sys.exit(1)
-        get_console().print(
+        console_print(
             f"[blue]Using provided Airflow version: {airflow_version}[/blue]",
         )
     if airflow_base_version:
@@ -170,7 +202,7 @@ def workflow_run_publish(
         except InvalidVersion as e:
             f"[red]Invalid base version passed as --airflow-base-version:  {airflow_version}[/red]: {e}"
             sys.exit(1)
-        get_console().print(
+        console_print(
             f"[blue]Using provided Airflow base version: {airflow_base_version}[/blue]",
         )
     if not airflow_version and airflow_base_version:
@@ -178,14 +210,19 @@ def workflow_run_publish(
     if airflow_version and not airflow_base_version:
         airflow_base_version = Version(airflow_version).base_version
 
+    joined_packages = " ".join(doc_packages)
+    if "providers" in joined_packages and "apache-airflow-providers" not in joined_packages:
+        joined_packages = joined_packages + " apache-airflow-providers"
+
     workflow_fields = {
         "ref": ref,
         "destination": site_env,
-        "include-docs": " ".join(doc_packages),
+        "include-docs": joined_packages,
         "exclude-docs": exclude_docs,
         "skip-write-to-stable-folder": skip_write_to_stable_folder,
         "build-sboms": "true" if "apache-airflow" in doc_packages else "false",
         "apply-commits": apply_commits if apply_commits else "",
+        "ignore-missing-inventories": str(ignore_missing_inventories).lower(),
     }
 
     if airflow_version:
@@ -209,12 +246,12 @@ def workflow_run_publish(
 
     branch = "main" if site_env == "live" else "staging"
 
-    get_console().print(
+    console_print(
         f"[blue]Refreshing site at {APACHE_AIRFLOW_SITE_REPO}[/blue]",
     )
     wf_name = WORKFLOW_NAME_MAPS["airflow-refresh-site"]
 
-    get_console().print(
+    console_print(
         f"[blue]Triggering workflow {wf_name}: at {APACHE_AIRFLOW_SITE_REPO}[/blue]",
     )
 
@@ -224,13 +261,13 @@ def workflow_run_publish(
         branch=branch,
     )
 
-    get_console().print(
+    console_print(
         f"[blue]Refreshing completed workflow {wf_name}: at {APACHE_AIRFLOW_SITE_REPO}[/blue]",
     )
 
     workflow_fields = {"source": site_env}
 
-    get_console().print(
+    console_print(
         f"[blue]Syncing S3 docs to GitHub repository at {APACHE_AIRFLOW_SITE_ARCHIVE_REPO}[/blue]",
     )
     trigger_workflow_and_monitor(
@@ -239,4 +276,43 @@ def workflow_run_publish(
         branch=branch,
         **workflow_fields,
         monitor=False,
+    )
+
+
+@workflow_run_group.command(
+    name="release-constraints",
+    help="Trigger the workflow that resolves, publishes and tags the constraints for a release.",
+)
+@click.option(
+    "--version",
+    help="Version the constraints belong to. A candidate (3.1.3rc1) resolves with pre-releases "
+    "allowed and lands on a branch of its own; a final (3.1.3) resolves without them and commits "
+    "onto constraints-X-Y. The stage is derived from this, so it cannot be set inconsistently.",
+    required=True,
+)
+@click.option(
+    "--ref",
+    help="Git ref the constraints are resolved from, e.g. 'v3-1-stable' or the release tag.",
+    required=True,
+)
+@click.option(
+    "--workflow-branch",
+    help="Git ref the workflow DEFINITION runs from. Defaults to 'main', which is normally what "
+    "you want: unlike the docs build, the constraints do not have to be produced by the workflow "
+    "as it stood at the ref being released.",
+    default="main",
+    show_default=True,
+)
+def workflow_run_release_constraints(version: str, ref: str, workflow_branch: str):
+    if not RELEASE_VERSION_PATTERN.match(version):
+        console_print(f"[red]Error: '{version}' is not a release version - expected X.Y.Z or X.Y.ZrcN.[/red]")
+        sys.exit(1)
+    stage = "candidate" if "rc" in version else "final"
+    console_print(f"[blue]Triggering constraints generation for the {stage} {version} from {ref}[/blue]")
+    trigger_workflow_and_monitor(
+        workflow_name=WORKFLOW_NAME_MAPS["release-constraints"],
+        repo=APACHE_AIRFLOW_REPO,
+        branch=workflow_branch,
+        version=version,
+        ref=ref,
     )

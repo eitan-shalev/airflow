@@ -21,11 +21,11 @@ from unittest import mock
 
 import pytest
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.providers.amazon.aws.operators.step_function import (
     StepFunctionGetExecutionOutputOperator,
     StepFunctionStartExecutionOperator,
 )
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
 
@@ -80,7 +80,7 @@ class TestStepFunctionGetExecutionOutputOperator:
 
     @mock.patch.object(StepFunctionGetExecutionOutputOperator, "hook")
     @pytest.mark.parametrize(
-        "response, expected_output",
+        ("response", "expected_output"),
         [
             pytest.param({"output": '{"foo": "bar"}'}, {"foo": "bar"}, id="output"),
             pytest.param({"error": '{"spam": "egg"}'}, {"spam": "egg"}, id="error"),
@@ -144,7 +144,7 @@ class TestStepFunctionStartExecutionOperator:
         assert op.state_machine_arn == STATE_MACHINE_ARN
         assert op.state_machine_arn == STATE_MACHINE_ARN
         assert op.name == NAME
-        assert op.input == INPUT
+        assert op.state_machine_input == INPUT
         assert op.hook.aws_conn_id == AWS_CONN_ID
         assert op.hook._region_name == REGION_NAME
         assert op.hook._verify is False

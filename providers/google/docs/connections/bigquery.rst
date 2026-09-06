@@ -31,14 +31,16 @@ Extra parameters that are specific to BigQuery will be covered in this document.
 Configuring the Connection
 --------------------------
 .. note::
-  Please refer to :ref:`Google Cloud Connection docs<howto/connection:gcp:configuring_the_connection>`
+  Please refer to :ref:`Google Cloud Connection docs<howto/connection:google_cloud_platform:configuring_the_connection>`
   for information regarding the basic authentication parameters.
 
 Impersonation Scopes
 
 
 Use Legacy SQL
-  Whether or not the connection should utilize legacy SQL.
+  Whether or not the connection should utilize legacy SQL. GoogleSQL is the recommended dialect for
+  BigQuery. BigQuery legacy SQL availability is restricted after June 1, 2026, based on legacy SQL
+  usage during Google's evaluation period.
 
 Location
     One of `BigQuery locations <https://cloud.google.com/bigquery/docs/locations>`_ where the dataset resides.

@@ -57,13 +57,13 @@ CI_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             "name": "Advanced build options (for power users)",
             "options": [
                 "--additional-pip-install-flags",
+                "--cache-from-image",
                 "--commit-sha",
                 "--debian-version",
                 "--disable-airflow-repo-cache",
                 "--install-mysql-client-type",
                 "--python-image",
                 "--use-uv",
-                "--uv-http-timeout",
             ],
         },
         {
@@ -184,6 +184,7 @@ CI_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--from-pr",
                 "--from-run",
                 "--skip-image-file-deletion",
+                "--tag-as",
             ],
         },
     ],

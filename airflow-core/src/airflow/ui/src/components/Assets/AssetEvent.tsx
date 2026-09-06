@@ -36,6 +36,7 @@ export const AssetEvent = ({
   readonly event: AssetEventResponse;
 }) => {
   const { t: translate } = useTranslation("dashboard");
+  const { t: rootTranslate } = useTranslation();
   let source = "";
 
   const { from_rest_api: fromRestAPI, from_trigger: fromTrigger, ...extra } = event.extra ?? {};
@@ -70,20 +71,20 @@ export const AssetEvent = ({
             showArrow
           >
             <Link to={`/assets/${event.asset_id}`}>
-              <Box color="fg.info" overflowWrap="anywhere" padding={0} wordWrap="break-word">
+              <Box color="fg.info" overflowWrap="anywhere" padding={0}>
                 {event.name ?? ""}
               </Box>
             </Link>
           </Tooltip>
         </HStack>
       )}
-      <HStack>
+      <HStack flexWrap="wrap">
         <Box>{translate("source")}: </Box>
         {source === "" ? (
           <Link
             to={`/dags/${event.source_dag_id}/runs/${event.source_run_id}/tasks/${event.source_task_id}${event.source_map_index > -1 ? `/mapped/${event.source_map_index}` : ""}`}
           >
-            <Box color="fg.info" overflowWrap="anywhere" padding={0} wordWrap="break-word">
+            <Box color="fg.info" overflowWrap="anywhere" padding={0}>
               {event.source_dag_id}
             </Box>
           </Link>
@@ -94,9 +95,17 @@ export const AssetEvent = ({
       <HStack>
         <TriggeredRuns dagRuns={event.created_dagruns} />
       </HStack>
-      {Object.keys(extra).length >= 1 ? (
-        <RenderedJsonField content={extra} jsonProps={{ collapsed: true }} />
-      ) : undefined}
+      {
+        // eslint-disable-next-line no-eq-null, eqeqeq
+        event.partition_key == null ? undefined : (
+          <HStack>
+            <Text>
+              {rootTranslate("dagRun.partitionKey")}: {event.partition_key}
+            </Text>
+          </HStack>
+        )
+      }
+      {Object.keys(extra).length >= 1 ? <RenderedJsonField collapsed content={extra} /> : undefined}
     </Box>
   );
 };

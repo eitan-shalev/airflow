@@ -143,6 +143,34 @@ export const $AssetCollectionResponse = {
     description: 'Asset collection response.'
 } as const;
 
+export const $AssetEventAccessControl = {
+    properties: {
+        consumer_teams: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Consumer Teams'
+        },
+        allow_global: {
+            type: 'boolean',
+            title: 'Allow Global',
+            default: true
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    title: 'AssetEventAccessControl',
+    description: 'Access control settings for asset event consumer team filtering.'
+} as const;
+
 export const $AssetEventCollectionResponse = {
     properties: {
         asset_events: {
@@ -209,7 +237,9 @@ export const $AssetEventResponse = {
         extra: {
             anyOf: [
                 {
-                    additionalProperties: true,
+                    additionalProperties: {
+                        '$ref': '#/components/schemas/JsonValue'
+                    },
                     type: 'object'
                 },
                 {
@@ -266,12 +296,181 @@ export const $AssetEventResponse = {
             type: 'string',
             format: 'date-time',
             title: 'Timestamp'
+        },
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key'
         }
     },
     type: 'object',
     required: ['id', 'asset_id', 'source_map_index', 'created_dagruns', 'timestamp'],
     title: 'AssetEventResponse',
     description: 'Asset event serializer for responses.'
+} as const;
+
+export const $AssetExpressionAlias = {
+    properties: {
+        alias: {
+            '$ref': '#/components/schemas/AssetExpressionAliasInfo'
+        }
+    },
+    type: 'object',
+    required: ['alias'],
+    title: 'AssetExpressionAlias',
+    description: 'An asset alias leaf: ``{"alias": {"name": ..., "group": ...}}``.'
+} as const;
+
+export const $AssetExpressionAliasInfo = {
+    properties: {
+        name: {
+            type: 'string',
+            title: 'Name'
+        },
+        group: {
+            type: 'string',
+            title: 'Group'
+        }
+    },
+    type: 'object',
+    required: ['name', 'group'],
+    title: 'AssetExpressionAliasInfo',
+    description: 'Body of an ``alias`` leaf node.'
+} as const;
+
+export const $AssetExpressionAll = {
+    properties: {
+        all: {
+            items: {
+                oneOf: [
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionAsset'
+                    },
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionAlias'
+                    },
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionRef'
+                    },
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionAny'
+                    },
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionAll'
+                    }
+                ]
+            },
+            type: 'array',
+            title: 'All'
+        }
+    },
+    type: 'object',
+    required: ['all'],
+    title: 'AssetExpressionAll',
+    description: 'An "and" node: ``{"all": [...]}`` -- satisfied when all children are satisfied.'
+} as const;
+
+export const $AssetExpressionAny = {
+    properties: {
+        any: {
+            items: {
+                oneOf: [
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionAsset'
+                    },
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionAlias'
+                    },
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionRef'
+                    },
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionAny'
+                    },
+                    {
+                        '$ref': '#/components/schemas/AssetExpressionAll'
+                    }
+                ]
+            },
+            type: 'array',
+            title: 'Any'
+        }
+    },
+    type: 'object',
+    required: ['any'],
+    title: 'AssetExpressionAny',
+    description: 'An "or" node: ``{"any": [...]}`` -- satisfied when any child is satisfied.'
+} as const;
+
+export const $AssetExpressionAsset = {
+    properties: {
+        asset: {
+            '$ref': '#/components/schemas/AssetExpressionAssetInfo'
+        }
+    },
+    type: 'object',
+    required: ['asset'],
+    title: 'AssetExpressionAsset',
+    description: 'An asset leaf: ``{"asset": {"uri": ..., "name": ..., "group": ...}}``.'
+} as const;
+
+export const $AssetExpressionAssetInfo = {
+    properties: {
+        uri: {
+            type: 'string',
+            title: 'Uri'
+        },
+        name: {
+            type: 'string',
+            title: 'Name'
+        },
+        group: {
+            type: 'string',
+            title: 'Group'
+        },
+        id: {
+            anyOf: [
+                {
+                    type: 'integer'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Id'
+        }
+    },
+    type: 'object',
+    required: ['uri', 'name', 'group'],
+    title: 'AssetExpressionAssetInfo',
+    description: `Body of an \`\`asset\`\` leaf node.
+
+\`\`id\`\` is injected by \`\`DagModelOperation.update_dag_asset_expression\`\` when the expression is
+persisted; \`\`BaseAsset.as_expression()\`\` itself only emits \`\`uri\`\`/\`\`name\`\`/\`\`group\`\`. It is left
+optional so a row persisted before id-enrichment (or migrated from the pre-3.0 dataset format)
+degrades gracefully instead of failing response validation.`
+} as const;
+
+export const $AssetExpressionRef = {
+    properties: {
+        asset_ref: {
+            additionalProperties: {
+                type: 'string'
+            },
+            type: 'object',
+            title: 'Asset Ref'
+        }
+    },
+    type: 'object',
+    required: ['asset_ref'],
+    title: 'AssetExpressionRef',
+    description: 'An unresolved asset reference leaf: ``{"asset_ref": {"name": ...}}`` or ``{"asset_ref": {"uri": ...}}``.'
 } as const;
 
 export const $AssetResponse = {
@@ -295,7 +494,9 @@ export const $AssetResponse = {
         extra: {
             anyOf: [
                 {
-                    additionalProperties: true,
+                    additionalProperties: {
+                        '$ref': '#/components/schemas/JsonValue'
+                    },
                     type: 'object'
                 },
                 {
@@ -366,6 +567,137 @@ export const $AssetResponse = {
     description: 'Asset serializer for responses.'
 } as const;
 
+export const $AssetStateStoreBody = {
+    properties: {
+        value: {
+            '$ref': '#/components/schemas/JsonValue'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    required: ['value'],
+    title: 'AssetStateStoreBody',
+    description: 'Request body for setting an asset state store value.'
+} as const;
+
+export const $AssetStateStoreCollectionResponse = {
+    properties: {
+        asset_state_store: {
+            items: {
+                '$ref': '#/components/schemas/AssetStateStoreResponse'
+            },
+            type: 'array',
+            title: 'Asset State Store'
+        },
+        total_entries: {
+            type: 'integer',
+            title: 'Total Entries'
+        }
+    },
+    type: 'object',
+    required: ['asset_state_store', 'total_entries'],
+    title: 'AssetStateStoreCollectionResponse',
+    description: 'All asset state store entries for an asset.'
+} as const;
+
+export const $AssetStateStoreLastUpdatedBy = {
+    properties: {
+        kind: {
+            '$ref': '#/components/schemas/AssetStateStoreWriterKind'
+        },
+        dag_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Id'
+        },
+        run_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Run Id'
+        },
+        task_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Task Id'
+        },
+        map_index: {
+            anyOf: [
+                {
+                    type: 'integer'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Map Index'
+        }
+    },
+    type: 'object',
+    required: ['kind'],
+    title: 'AssetStateStoreLastUpdatedBy',
+    description: 'Writer info for the last write to an asset state store entry.'
+} as const;
+
+export const $AssetStateStoreResponse = {
+    properties: {
+        key: {
+            type: 'string',
+            title: 'Key'
+        },
+        value: {
+            '$ref': '#/components/schemas/JsonValue'
+        },
+        updated_at: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Updated At'
+        },
+        last_updated_by: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/AssetStateStoreLastUpdatedBy'
+                },
+                {
+                    type: 'null'
+                }
+            ]
+        }
+    },
+    type: 'object',
+    required: ['key', 'value', 'updated_at'],
+    title: 'AssetStateStoreResponse',
+    description: 'A single asset state store key/value pair with metadata.'
+} as const;
+
+export const $AssetStateStoreWriterKind = {
+    type: 'string',
+    enum: ['task', 'watcher', 'api'],
+    title: 'AssetStateStoreWriterKind',
+    description: `Identifies what kind of writer last updated an asset state store entry.
+
+\`\`TASK\`\` — written by a task via the execution API.
+\`\`WATCHER\`\` — written by a \`\`BaseEventTrigger\`\` (no task instance).
+\`\`API\`\` — written directly through the Core API (e.g. manual admin write).`
+} as const;
+
 export const $AssetWatcherResponse = {
     properties: {
         name: {
@@ -388,6 +720,43 @@ export const $AssetWatcherResponse = {
     description: 'Asset watcher serializer for responses.'
 } as const;
 
+export const $AsyncConnectionTestResponse = {
+    properties: {
+        token: {
+            type: 'string',
+            title: 'Token'
+        },
+        connection_id: {
+            type: 'string',
+            title: 'Connection Id'
+        },
+        state: {
+            type: 'string',
+            title: 'State'
+        },
+        result_message: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Result Message'
+        },
+        created_at: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Created At'
+        }
+    },
+    type: 'object',
+    required: ['token', 'connection_id', 'state', 'created_at'],
+    title: 'AsyncConnectionTestResponse',
+    description: 'Response returned when polling for the status of an enqueued connection test.'
+} as const;
+
 export const $BackfillCollectionResponse = {
     properties: {
         backfills: {
@@ -406,6 +775,108 @@ export const $BackfillCollectionResponse = {
     required: ['backfills', 'total_entries'],
     title: 'BackfillCollectionResponse',
     description: 'Backfill Collection serializer for responses.'
+} as const;
+
+export const $BackfillDagRunCollectionResponse = {
+    properties: {
+        backfill_dag_runs: {
+            items: {
+                '$ref': '#/components/schemas/BackfillDagRunResponse'
+            },
+            type: 'array',
+            title: 'Backfill Dag Runs'
+        },
+        total_entries: {
+            type: 'integer',
+            title: 'Total Entries'
+        }
+    },
+    type: 'object',
+    required: ['backfill_dag_runs', 'total_entries'],
+    title: 'BackfillDagRunCollectionResponse',
+    description: 'BackfillDagRun Collection serializer for responses.'
+} as const;
+
+export const $BackfillDagRunResponse = {
+    properties: {
+        id: {
+            type: 'integer',
+            minimum: 0,
+            title: 'Id'
+        },
+        backfill_id: {
+            type: 'integer',
+            minimum: 0,
+            title: 'Backfill Id'
+        },
+        dag_id: {
+            type: 'string',
+            title: 'Dag Id'
+        },
+        dag_run_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Run Id'
+        },
+        logical_date: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Logical Date'
+        },
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key'
+        },
+        sort_ordinal: {
+            type: 'integer',
+            title: 'Sort Ordinal'
+        },
+        exception_reason: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Exception Reason'
+        },
+        dag_run_state: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/DagRunState'
+                },
+                {
+                    type: 'null'
+                }
+            ]
+        }
+    },
+    type: 'object',
+    required: ['id', 'backfill_id', 'dag_id', 'logical_date', 'partition_key', 'sort_ordinal', 'exception_reason'],
+    title: 'BackfillDagRunResponse',
+    description: 'Serializer for a single BackfillDagRun entry with joined DagRun state.'
 } as const;
 
 export const $BackfillPostBody = {
@@ -430,10 +901,16 @@ export const $BackfillPostBody = {
             default: false
         },
         dag_run_conf: {
-            additionalProperties: true,
-            type: 'object',
-            title: 'Dag Run Conf',
-            default: {}
+            anyOf: [
+                {
+                    additionalProperties: true,
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Run Conf'
         },
         reprocess_behavior: {
             '$ref': '#/components/schemas/ReprocessBehavior',
@@ -443,6 +920,18 @@ export const $BackfillPostBody = {
             type: 'integer',
             title: 'Max Active Runs',
             default: 10
+        },
+        run_on_latest_version: {
+            anyOf: [
+                {
+                    type: 'boolean'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Run On Latest Version',
+            description: 'Run on the latest bundle version of the Dag for each backfilled run. If not specified, falls back to the DAG-level ``rerun_with_latest_version`` parameter, then the ``[core] rerun_with_latest_version`` config option, and finally ``True`` (the historical default for backfills).'
         }
     },
     additionalProperties: false,
@@ -474,8 +963,15 @@ export const $BackfillResponse = {
             title: 'To Date'
         },
         dag_run_conf: {
-            additionalProperties: true,
-            type: 'object',
+            anyOf: [
+                {
+                    additionalProperties: true,
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
             title: 'Dag Run Conf'
         },
         is_paused: {
@@ -587,6 +1083,32 @@ The response includes a list of successful keys and any errors encountered durin
 This structure helps users understand which key actions succeeded and which failed.`
 } as const;
 
+export const $BulkBody_BulkDAGRunBody_ = {
+    properties: {
+        actions: {
+            items: {
+                oneOf: [
+                    {
+                        '$ref': '#/components/schemas/BulkCreateAction_BulkDAGRunBody_'
+                    },
+                    {
+                        '$ref': '#/components/schemas/BulkUpdateAction_BulkDAGRunBody_'
+                    },
+                    {
+                        '$ref': '#/components/schemas/BulkDeleteAction_BulkDAGRunBody_'
+                    }
+                ]
+            },
+            type: 'array',
+            title: 'Actions'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    required: ['actions'],
+    title: 'BulkBody[BulkDAGRunBody]'
+} as const;
+
 export const $BulkBody_BulkTaskInstanceBody_ = {
     properties: {
         actions: {
@@ -689,6 +1211,33 @@ export const $BulkBody_VariableBody_ = {
     type: 'object',
     required: ['actions'],
     title: 'BulkBody[VariableBody]'
+} as const;
+
+export const $BulkCreateAction_BulkDAGRunBody_ = {
+    properties: {
+        action: {
+            type: 'string',
+            const: 'create',
+            title: 'Action',
+            description: 'The action to be performed on the entities.'
+        },
+        entities: {
+            items: {
+                '$ref': '#/components/schemas/BulkDAGRunBody'
+            },
+            type: 'array',
+            title: 'Entities',
+            description: 'A list of entities to be created.'
+        },
+        action_on_existence: {
+            '$ref': '#/components/schemas/BulkActionOnExistence',
+            default: 'fail'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    required: ['action', 'entities'],
+    title: 'BulkCreateAction[BulkDAGRunBody]'
 } as const;
 
 export const $BulkCreateAction_BulkTaskInstanceBody_ = {
@@ -799,6 +1348,181 @@ export const $BulkCreateAction_VariableBody_ = {
     title: 'BulkCreateAction[VariableBody]'
 } as const;
 
+export const $BulkDAGRunBody = {
+    properties: {
+        dag_run_id: {
+            type: 'string',
+            title: 'Dag Run Id'
+        },
+        dag_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Id'
+        },
+        state: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/DagRunMutableStates'
+                },
+                {
+                    type: 'null'
+                }
+            ]
+        },
+        note: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 1000
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Note'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    required: ['dag_run_id'],
+    title: 'BulkDAGRunBody',
+    description: 'Request body for bulk operations on Dag Runs.'
+} as const;
+
+export const $BulkDAGRunClearBody = {
+    properties: {
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key',
+            description: 'Select runs by exact partition key match. Mutually exclusive with the other partition selectors.'
+        },
+        partition_date_start: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Date Start',
+            description: "Inclusive start of the partition date window. The value is interpreted in the Dag's timetable timezone. Mutually exclusive with the other partition selectors."
+        },
+        partition_date_end: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Date End',
+            description: "Inclusive end of the partition date window. The value is interpreted in the Dag's timetable timezone. Mutually exclusive with the other partition selectors."
+        },
+        dry_run: {
+            type: 'boolean',
+            title: 'Dry Run',
+            default: true
+        },
+        only_failed: {
+            type: 'boolean',
+            title: 'Only Failed',
+            default: false
+        },
+        only_new: {
+            type: 'boolean',
+            title: 'Only New',
+            description: 'Only queue newly added tasks in the latest Dag version without clearing existing tasks.',
+            default: false
+        },
+        run_on_latest_version: {
+            anyOf: [
+                {
+                    type: 'boolean'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Run On Latest Version',
+            description: '(Experimental) Run on the latest bundle version of the Dag after clearing. If not specified, falls back to the DAG-level ``rerun_with_latest_version`` parameter, then the ``[core] rerun_with_latest_version`` config option, and finally ``False``.'
+        },
+        note: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 1000
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Note'
+        },
+        dag_runs: {
+            items: {
+                '$ref': '#/components/schemas/BulkDAGRunBody'
+            },
+            type: 'array',
+            title: 'Dag Runs'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    title: 'BulkDAGRunClearBody',
+    description: 'Request body for the bulk clear Dag Runs endpoint.'
+} as const;
+
+export const $BulkDeleteAction_BulkDAGRunBody_ = {
+    properties: {
+        action: {
+            type: 'string',
+            const: 'delete',
+            title: 'Action',
+            description: 'The action to be performed on the entities.'
+        },
+        entities: {
+            items: {
+                anyOf: [
+                    {
+                        type: 'string'
+                    },
+                    {
+                        '$ref': '#/components/schemas/BulkDAGRunBody'
+                    }
+                ]
+            },
+            type: 'array',
+            title: 'Entities',
+            description: 'A list of entity id/key or entity objects to be deleted.'
+        },
+        action_on_non_existence: {
+            '$ref': '#/components/schemas/BulkActionNotOnExistence',
+            default: 'fail'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    required: ['action', 'entities'],
+    title: 'BulkDeleteAction[BulkDAGRunBody]'
+} as const;
+
 export const $BulkDeleteAction_BulkTaskInstanceBody_ = {
     properties: {
         action: {
@@ -848,7 +1572,7 @@ export const $BulkDeleteAction_ConnectionBody_ = {
                         type: 'string'
                     },
                     {
-                        '$ref': '#/components/schemas/BulkTaskInstanceBody'
+                        '$ref': '#/components/schemas/ConnectionBody'
                     }
                 ]
             },
@@ -882,7 +1606,7 @@ export const $BulkDeleteAction_PoolBody_ = {
                         type: 'string'
                     },
                     {
-                        '$ref': '#/components/schemas/BulkTaskInstanceBody'
+                        '$ref': '#/components/schemas/PoolBody'
                     }
                 ]
             },
@@ -916,7 +1640,7 @@ export const $BulkDeleteAction_VariableBody_ = {
                         type: 'string'
                     },
                     {
-                        '$ref': '#/components/schemas/BulkTaskInstanceBody'
+                        '$ref': '#/components/schemas/VariableBody'
                     }
                 ]
             },
@@ -1038,6 +1762,28 @@ export const $BulkTaskInstanceBody = {
                 }
             ],
             title: 'Map Index'
+        },
+        dag_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Id'
+        },
+        dag_run_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Run Id'
         }
     },
     additionalProperties: false,
@@ -1045,6 +1791,48 @@ export const $BulkTaskInstanceBody = {
     required: ['task_id'],
     title: 'BulkTaskInstanceBody',
     description: 'Request body for bulk update, and delete task instances.'
+} as const;
+
+export const $BulkUpdateAction_BulkDAGRunBody_ = {
+    properties: {
+        action: {
+            type: 'string',
+            const: 'update',
+            title: 'Action',
+            description: 'The action to be performed on the entities.'
+        },
+        entities: {
+            items: {
+                '$ref': '#/components/schemas/BulkDAGRunBody'
+            },
+            type: 'array',
+            title: 'Entities',
+            description: 'A list of entities to be updated.'
+        },
+        update_mask: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Update Mask',
+            description: 'A list of field names to update for each entity.Only these fields will be applied from the request body to the database model.Any extra fields provided will be ignored.'
+        },
+        action_on_non_existence: {
+            '$ref': '#/components/schemas/BulkActionNotOnExistence',
+            default: 'fail'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    required: ['action', 'entities'],
+    title: 'BulkUpdateAction[BulkDAGRunBody]'
 } as const;
 
 export const $BulkUpdateAction_BulkTaskInstanceBody_ = {
@@ -1062,6 +1850,21 @@ export const $BulkUpdateAction_BulkTaskInstanceBody_ = {
             type: 'array',
             title: 'Entities',
             description: 'A list of entities to be updated.'
+        },
+        update_mask: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Update Mask',
+            description: 'A list of field names to update for each entity.Only these fields will be applied from the request body to the database model.Any extra fields provided will be ignored.'
         },
         action_on_non_existence: {
             '$ref': '#/components/schemas/BulkActionNotOnExistence',
@@ -1090,6 +1893,21 @@ export const $BulkUpdateAction_ConnectionBody_ = {
             title: 'Entities',
             description: 'A list of entities to be updated.'
         },
+        update_mask: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Update Mask',
+            description: 'A list of field names to update for each entity.Only these fields will be applied from the request body to the database model.Any extra fields provided will be ignored.'
+        },
         action_on_non_existence: {
             '$ref': '#/components/schemas/BulkActionNotOnExistence',
             default: 'fail'
@@ -1116,6 +1934,21 @@ export const $BulkUpdateAction_PoolBody_ = {
             type: 'array',
             title: 'Entities',
             description: 'A list of entities to be updated.'
+        },
+        update_mask: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Update Mask',
+            description: 'A list of field names to update for each entity.Only these fields will be applied from the request body to the database model.Any extra fields provided will be ignored.'
         },
         action_on_non_existence: {
             '$ref': '#/components/schemas/BulkActionNotOnExistence',
@@ -1144,6 +1977,21 @@ export const $BulkUpdateAction_VariableBody_ = {
             title: 'Entities',
             description: 'A list of entities to be updated.'
         },
+        update_mask: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Update Mask',
+            description: 'A list of field names to update for each entity.Only these fields will be applied from the request body to the database model.Any extra fields provided will be ignored.'
+        },
         action_on_non_existence: {
             '$ref': '#/components/schemas/BulkActionNotOnExistence',
             default: 'fail'
@@ -1153,6 +2001,125 @@ export const $BulkUpdateAction_VariableBody_ = {
     type: 'object',
     required: ['action', 'entities'],
     title: 'BulkUpdateAction[VariableBody]'
+} as const;
+
+export const $ClearPartitionsBody = {
+    properties: {
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key',
+            description: 'Select runs by exact partition key match. Mutually exclusive with the other partition selectors.'
+        },
+        partition_date_start: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Date Start',
+            description: "Inclusive start of the partition date window. The value is interpreted in the Dag's timetable timezone. Mutually exclusive with the other partition selectors."
+        },
+        partition_date_end: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Date End',
+            description: "Inclusive end of the partition date window. The value is interpreted in the Dag's timetable timezone. Mutually exclusive with the other partition selectors."
+        },
+        run_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Run Id',
+            description: 'Select runs by exact run_id. Mutually exclusive with ``partition_key`` and partition date window.'
+        },
+        clear_task_instances: {
+            type: 'boolean',
+            title: 'Clear Task Instances',
+            description: 'Also clear task instances on the matched runs.',
+            default: false
+        },
+        dry_run: {
+            type: 'boolean',
+            title: 'Dry Run',
+            description: 'If True, compute counts without writing any changes.',
+            default: true
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    title: 'ClearPartitionsBody',
+    description: 'Request body for the clearPartitions endpoint (column-reset: set partition fields to None).'
+} as const;
+
+export const $ClearPartitionsResponse = {
+    properties: {
+        dag_runs_cleared: {
+            type: 'integer',
+            title: 'Dag Runs Cleared'
+        },
+        task_instances_cleared: {
+            type: 'integer',
+            title: 'Task Instances Cleared'
+        },
+        dry_run: {
+            type: 'boolean',
+            title: 'Dry Run'
+        }
+    },
+    type: 'object',
+    required: ['dag_runs_cleared', 'task_instances_cleared', 'dry_run'],
+    title: 'ClearPartitionsResponse',
+    description: 'Response for the clearPartitions endpoint.'
+} as const;
+
+export const $ClearTaskInstanceCollectionResponse = {
+    properties: {
+        task_instances: {
+            items: {
+                oneOf: [
+                    {
+                        '$ref': '#/components/schemas/TaskInstanceResponse'
+                    },
+                    {
+                        '$ref': '#/components/schemas/NewTaskResponse'
+                    }
+                ]
+            },
+            type: 'array',
+            title: 'Task Instances'
+        },
+        total_entries: {
+            type: 'integer',
+            title: 'Total Entries'
+        }
+    },
+    type: 'object',
+    required: ['task_instances', 'total_entries'],
+    title: 'ClearTaskInstanceCollectionResponse',
+    description: 'Response for clear dag run dry run, which may contain new tasks without full TaskInstance data.'
 } as const;
 
 export const $ClearTaskInstancesBody = {
@@ -1230,7 +2197,8 @@ export const $ClearTaskInstancesBody = {
                     type: 'null'
                 }
             ],
-            title: 'Task Ids'
+            title: 'Task Ids',
+            description: 'A list of `task_id` or [`task_id`, `map_index`]. If only the `task_id` is provided for a mapped task, all of its map indices will be targeted.'
         },
         dag_run_id: {
             anyOf: [
@@ -1264,10 +2232,33 @@ export const $ClearTaskInstancesBody = {
             default: false
         },
         run_on_latest_version: {
-            type: 'boolean',
+            anyOf: [
+                {
+                    type: 'boolean'
+                },
+                {
+                    type: 'null'
+                }
+            ],
             title: 'Run On Latest Version',
-            description: '(Experimental) Run on the latest bundle version of the dag after clearing the task instances.',
+            description: '(Experimental) Run on the latest bundle version of the dag after clearing the task instances. If not specified, falls back to the DAG-level ``rerun_with_latest_version`` parameter, then the ``[core] rerun_with_latest_version`` config option, and finally ``False`` (the historical default for clear/rerun).'
+        },
+        prevent_running_task: {
+            type: 'boolean',
+            title: 'Prevent Running Task',
             default: false
+        },
+        note: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 1000
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Note'
         }
     },
     additionalProperties: false,
@@ -1437,6 +2428,18 @@ export const $ConnectionBody = {
                 }
             ],
             title: 'Extra'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 50
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     additionalProperties: false,
@@ -1552,12 +2555,187 @@ export const $ConnectionResponse = {
                 }
             ],
             title: 'Extra'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     type: 'object',
-    required: ['connection_id', 'conn_type', 'description', 'host', 'login', 'schema', 'port', 'password', 'extra'],
+    required: ['connection_id', 'conn_type', 'description', 'host', 'login', 'schema', 'port', 'password', 'extra', 'team_name'],
     title: 'ConnectionResponse',
     description: 'Connection serializer for responses.'
+} as const;
+
+export const $ConnectionTestQueuedResponse = {
+    properties: {
+        token: {
+            type: 'string',
+            title: 'Token'
+        },
+        connection_id: {
+            type: 'string',
+            title: 'Connection Id'
+        },
+        state: {
+            type: 'string',
+            title: 'State'
+        }
+    },
+    type: 'object',
+    required: ['token', 'connection_id', 'state'],
+    title: 'ConnectionTestQueuedResponse',
+    description: 'Response returned when a connection test has been enqueued for worker execution.'
+} as const;
+
+export const $ConnectionTestRequestBody = {
+    properties: {
+        connection_id: {
+            type: 'string',
+            maxLength: 200,
+            pattern: '^[\\w.-]+$',
+            title: 'Connection Id'
+        },
+        conn_type: {
+            type: 'string',
+            title: 'Conn Type'
+        },
+        description: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Description'
+        },
+        host: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Host'
+        },
+        login: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Login'
+        },
+        schema: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Schema'
+        },
+        port: {
+            anyOf: [
+                {
+                    type: 'integer'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Port'
+        },
+        password: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Password'
+        },
+        extra: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Extra'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 50
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
+        },
+        commit_on_success: {
+            type: 'boolean',
+            title: 'Commit On Success',
+            description: 'If True, save or update the connection in the connection table when the test succeeds.',
+            default: false
+        },
+        executor: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Executor',
+            description: 'Executor name to dispatch the connection test to.'
+        },
+        queue: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Queue',
+            description: 'Worker queue to route the connection test to (executor-dependent).'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    required: ['connection_id', 'conn_type'],
+    title: 'ConnectionTestRequestBody',
+    description: `Request body for enqueueing a connection test on a worker.
+
+Inherits \`\`connection_id\`\` pattern, \`\`extra\`\` JSON validation, and
+\`\`team_name\`\` handling from \`\`ConnectionBody\`\` so tested connections share
+the same input contract as persisted ones.`
 } as const;
 
 export const $ConnectionTestResponse = {
@@ -1574,7 +2752,7 @@ export const $ConnectionTestResponse = {
     type: 'object',
     required: ['status', 'message'],
     title: 'ConnectionTestResponse',
-    description: 'Connection Test serializer for responses.'
+    description: 'Connection Test serializer for synchronous test responses.'
 } as const;
 
 export const $CreateAssetEventsBody = {
@@ -1583,10 +2761,33 @@ export const $CreateAssetEventsBody = {
             type: 'integer',
             title: 'Asset Id'
         },
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 250,
+                    pattern: '\\S'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key'
+        },
         extra: {
             additionalProperties: true,
             type: 'object',
             title: 'Extra'
+        },
+        access_control: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/AssetEventAccessControl'
+                },
+                {
+                    type: 'null'
+                }
+            ]
         }
     },
     additionalProperties: false,
@@ -1613,7 +2814,7 @@ export const $DAGCollectionResponse = {
     type: 'object',
     required: ['dags', 'total_entries'],
     title: 'DAGCollectionResponse',
-    description: 'DAG Collection serializer for responses.'
+    description: 'Dag Collection serializer for responses.'
 } as const;
 
 export const $DAGDetailsResponse = {
@@ -1703,7 +2904,14 @@ export const $DAGDetailsResponse = {
             title: 'Relative Fileloc'
         },
         fileloc: {
-            type: 'string',
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
             title: 'Fileloc'
         },
         description: {
@@ -1738,6 +2946,14 @@ export const $DAGDetailsResponse = {
                 }
             ],
             title: 'Timetable Description'
+        },
+        timetable_partitioned: {
+            type: 'boolean',
+            title: 'Timetable Partitioned'
+        },
+        timetable_periodic: {
+            type: 'boolean',
+            title: 'Timetable Periodic'
         },
         tags: {
             items: {
@@ -1821,6 +3037,20 @@ export const $DAGDetailsResponse = {
             ],
             title: 'Next Dagrun Run After'
         },
+        allowed_run_types: {
+            anyOf: [
+                {
+                    items: {
+                        '$ref': '#/components/schemas/DagRunType'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Allowed Run Types'
+        },
         owners: {
             items: {
                 type: 'string'
@@ -1847,8 +3077,23 @@ export const $DAGDetailsResponse = {
         asset_expression: {
             anyOf: [
                 {
-                    additionalProperties: true,
-                    type: 'object'
+                    oneOf: [
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAsset'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAlias'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionRef'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAny'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAll'
+                        }
+                    ]
                 },
                 {
                     type: 'null'
@@ -1967,6 +3212,17 @@ export const $DAGDetailsResponse = {
             ],
             title: 'Default Args'
         },
+        rerun_with_latest_version: {
+            anyOf: [
+                {
+                    type: 'boolean'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Rerun With Latest Version'
+        },
         owner_links: {
             anyOf: [
                 {
@@ -1980,6 +3236,33 @@ export const $DAGDetailsResponse = {
                 }
             ],
             title: 'Owner Links'
+        },
+        is_favorite: {
+            type: 'boolean',
+            title: 'Is Favorite',
+            default: false
+        },
+        active_runs_count: {
+            type: 'integer',
+            title: 'Active Runs Count',
+            default: 0
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
+        },
+        is_backfillable: {
+            type: 'boolean',
+            title: 'Is Backfillable',
+            description: "Whether this Dag's schedule supports backfilling.",
+            readOnly: true
         },
         file_token: {
             type: 'string',
@@ -2010,9 +3293,9 @@ Deprecated: Use max_active_tasks instead.`,
         }
     },
     type: 'object',
-    required: ['dag_id', 'dag_display_name', 'is_paused', 'is_stale', 'last_parsed_time', 'last_parse_duration', 'last_expired', 'bundle_name', 'bundle_version', 'relative_fileloc', 'fileloc', 'description', 'timetable_summary', 'timetable_description', 'tags', 'max_active_tasks', 'max_active_runs', 'max_consecutive_failed_dag_runs', 'has_task_concurrency_limits', 'has_import_errors', 'next_dagrun_logical_date', 'next_dagrun_data_interval_start', 'next_dagrun_data_interval_end', 'next_dagrun_run_after', 'owners', 'catchup', 'dag_run_timeout', 'asset_expression', 'doc_md', 'start_date', 'end_date', 'is_paused_upon_creation', 'params', 'render_template_as_native_obj', 'template_search_path', 'timezone', 'last_parsed', 'default_args', 'file_token', 'concurrency', 'latest_dag_version'],
+    required: ['dag_id', 'dag_display_name', 'is_paused', 'is_stale', 'last_parsed_time', 'last_parse_duration', 'last_expired', 'bundle_name', 'bundle_version', 'relative_fileloc', 'fileloc', 'description', 'timetable_summary', 'timetable_description', 'timetable_partitioned', 'timetable_periodic', 'tags', 'max_active_tasks', 'max_active_runs', 'max_consecutive_failed_dag_runs', 'has_task_concurrency_limits', 'has_import_errors', 'next_dagrun_logical_date', 'next_dagrun_data_interval_start', 'next_dagrun_data_interval_end', 'next_dagrun_run_after', 'allowed_run_types', 'owners', 'catchup', 'dag_run_timeout', 'asset_expression', 'doc_md', 'start_date', 'end_date', 'is_paused_upon_creation', 'params', 'render_template_as_native_obj', 'template_search_path', 'timezone', 'last_parsed', 'default_args', 'is_backfillable', 'file_token', 'concurrency', 'latest_dag_version'],
     title: 'DAGDetailsResponse',
-    description: 'Specific serializer for DAG Details responses.'
+    description: 'Specific serializer for Dag Details responses.'
 } as const;
 
 export const $DAGPatchBody = {
@@ -2116,7 +3399,14 @@ export const $DAGResponse = {
             title: 'Relative Fileloc'
         },
         fileloc: {
-            type: 'string',
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
             title: 'Fileloc'
         },
         description: {
@@ -2151,6 +3441,14 @@ export const $DAGResponse = {
                 }
             ],
             title: 'Timetable Description'
+        },
+        timetable_partitioned: {
+            type: 'boolean',
+            title: 'Timetable Partitioned'
+        },
+        timetable_periodic: {
+            type: 'boolean',
+            title: 'Timetable Periodic'
         },
         tags: {
             items: {
@@ -2234,12 +3532,32 @@ export const $DAGResponse = {
             ],
             title: 'Next Dagrun Run After'
         },
+        allowed_run_types: {
+            anyOf: [
+                {
+                    items: {
+                        '$ref': '#/components/schemas/DagRunType'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Allowed Run Types'
+        },
         owners: {
             items: {
                 type: 'string'
             },
             type: 'array',
             title: 'Owners'
+        },
+        is_backfillable: {
+            type: 'boolean',
+            title: 'Is Backfillable',
+            description: "Whether this Dag's schedule supports backfilling.",
+            readOnly: true
         },
         file_token: {
             type: 'string',
@@ -2249,9 +3567,9 @@ export const $DAGResponse = {
         }
     },
     type: 'object',
-    required: ['dag_id', 'dag_display_name', 'is_paused', 'is_stale', 'last_parsed_time', 'last_parse_duration', 'last_expired', 'bundle_name', 'bundle_version', 'relative_fileloc', 'fileloc', 'description', 'timetable_summary', 'timetable_description', 'tags', 'max_active_tasks', 'max_active_runs', 'max_consecutive_failed_dag_runs', 'has_task_concurrency_limits', 'has_import_errors', 'next_dagrun_logical_date', 'next_dagrun_data_interval_start', 'next_dagrun_data_interval_end', 'next_dagrun_run_after', 'owners', 'file_token'],
+    required: ['dag_id', 'dag_display_name', 'is_paused', 'is_stale', 'last_parsed_time', 'last_parse_duration', 'last_expired', 'bundle_name', 'bundle_version', 'relative_fileloc', 'fileloc', 'description', 'timetable_summary', 'timetable_description', 'timetable_partitioned', 'timetable_periodic', 'tags', 'max_active_tasks', 'max_active_runs', 'max_consecutive_failed_dag_runs', 'has_task_concurrency_limits', 'has_import_errors', 'next_dagrun_logical_date', 'next_dagrun_data_interval_start', 'next_dagrun_data_interval_end', 'next_dagrun_run_after', 'allowed_run_types', 'owners', 'is_backfillable', 'file_token'],
     title: 'DAGResponse',
-    description: 'DAG serializer for responses.'
+    description: 'Dag serializer for responses.'
 } as const;
 
 export const $DAGRunClearBody = {
@@ -2266,17 +3584,41 @@ export const $DAGRunClearBody = {
             title: 'Only Failed',
             default: false
         },
-        run_on_latest_version: {
+        only_new: {
             type: 'boolean',
-            title: 'Run On Latest Version',
-            description: '(Experimental) Run on the latest bundle version of the Dag after clearing the Dag Run.',
+            title: 'Only New',
+            description: 'Only queue newly added tasks in the latest Dag version without clearing existing tasks.',
             default: false
+        },
+        run_on_latest_version: {
+            anyOf: [
+                {
+                    type: 'boolean'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Run On Latest Version',
+            description: '(Experimental) Run on the latest bundle version of the Dag after clearing. If not specified, falls back to the DAG-level ``rerun_with_latest_version`` parameter, then the ``[core] rerun_with_latest_version`` config option, and finally ``False``.'
+        },
+        note: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 1000
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Note'
         }
     },
     additionalProperties: false,
     type: 'object',
     title: 'DAGRunClearBody',
-    description: 'DAG Run serializer for clear endpoint body.'
+    description: 'Dag Run serializer for clear endpoint body.'
 } as const;
 
 export const $DAGRunCollectionResponse = {
@@ -2289,14 +3631,65 @@ export const $DAGRunCollectionResponse = {
             title: 'Dag Runs'
         },
         total_entries: {
-            type: 'integer',
-            title: 'Total Entries'
+            anyOf: [
+                {
+                    type: 'integer'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Total Entries',
+            description: 'Number of matching items. For offset pagination this is the exact total. For cursor pagination it is capped at ``total_entries_limit``; a value equal to that limit means at least that many items match.'
+        },
+        total_entries_limit: {
+            anyOf: [
+                {
+                    type: 'integer'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Total Entries Limit',
+            description: 'Cap applied to ``total_entries`` under cursor pagination. ``null`` for offset pagination, where ``total_entries`` is exact.'
+        },
+        next_cursor: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Next Cursor',
+            description: 'Token pointing to the next page. Populated for cursor pagination, ``null`` when using offset pagination or when there is no next page.'
+        },
+        previous_cursor: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Previous Cursor',
+            description: 'Token pointing to the previous page. Populated for cursor pagination, ``null`` when using offset pagination or when on the first page.'
         }
     },
     type: 'object',
-    required: ['dag_runs', 'total_entries'],
+    required: ['dag_runs'],
     title: 'DAGRunCollectionResponse',
-    description: 'DAG Run Collection serializer for responses.'
+    description: `Dag Run collection response supporting both offset and cursor pagination.
+
+A single flat model is used instead of a discriminated union
+(\`\`Annotated[Offset | Cursor, Field(discriminator=...)]\`\`) because
+the OpenAPI \`\`oneOf\`\` + \`\`discriminator\`\` construct is not handled
+correctly by \`\`@hey-api/openapi-ts\`\` / \`\`@7nohe/openapi-react-query-codegen\`\`:
+return types degrade to \`\`unknown\`\` in JSDoc and can produce
+incorrect TypeScript types (see hey-api/openapi-ts#1613, #3270).`
 } as const;
 
 export const $DAGRunPatchBody = {
@@ -2304,7 +3697,7 @@ export const $DAGRunPatchBody = {
         state: {
             anyOf: [
                 {
-                    '$ref': '#/components/schemas/DAGRunPatchStates'
+                    '$ref': '#/components/schemas/DagRunMutableStates'
                 },
                 {
                     type: 'null'
@@ -2327,14 +3720,7 @@ export const $DAGRunPatchBody = {
     additionalProperties: false,
     type: 'object',
     title: 'DAGRunPatchBody',
-    description: 'DAG Run Serializer for PATCH requests.'
-} as const;
-
-export const $DAGRunPatchStates = {
-    type: 'string',
-    enum: ['queued', 'success', 'failed'],
-    title: 'DAGRunPatchStates',
-    description: 'Enum for DAG Run states when updating a DAG Run.'
+    description: 'Dag Run Serializer for PATCH requests.'
 } as const;
 
 export const $DAGRunResponse = {
@@ -2518,12 +3904,46 @@ export const $DAGRunResponse = {
         dag_display_name: {
             type: 'string',
             title: 'Dag Display Name'
+        },
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key'
+        },
+        partition_date: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Date'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     type: 'object',
-    required: ['dag_run_id', 'dag_id', 'logical_date', 'queued_at', 'start_date', 'end_date', 'duration', 'data_interval_start', 'data_interval_end', 'run_after', 'last_scheduling_decision', 'run_type', 'state', 'triggered_by', 'triggering_user_name', 'conf', 'note', 'dag_versions', 'bundle_version', 'dag_display_name'],
+    required: ['dag_run_id', 'dag_id', 'logical_date', 'queued_at', 'start_date', 'end_date', 'duration', 'data_interval_start', 'data_interval_end', 'run_after', 'last_scheduling_decision', 'run_type', 'state', 'triggered_by', 'triggering_user_name', 'conf', 'note', 'dag_versions', 'bundle_version', 'dag_display_name', 'partition_key', 'partition_date'],
     title: 'DAGRunResponse',
-    description: 'DAG Run serializer for responses.'
+    description: 'Dag Run serializer for responses.'
 } as const;
 
 export const $DAGRunsBatchBody = {
@@ -2777,12 +4197,67 @@ export const $DAGRunsBatchBody = {
                 }
             ],
             title: 'End Date Lt'
+        },
+        duration_gte: {
+            anyOf: [
+                {
+                    type: 'number'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Duration Gte'
+        },
+        duration_gt: {
+            anyOf: [
+                {
+                    type: 'number'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Duration Gt'
+        },
+        duration_lte: {
+            anyOf: [
+                {
+                    type: 'number'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Duration Lte'
+        },
+        duration_lt: {
+            anyOf: [
+                {
+                    type: 'number'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Duration Lt'
+        },
+        conf_contains: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Conf Contains'
         }
     },
     additionalProperties: false,
     type: 'object',
     title: 'DAGRunsBatchBody',
-    description: 'List DAG Runs body for batch endpoint.'
+    description: 'List Dag Runs body for batch endpoint.'
 } as const;
 
 export const $DAGSourceResponse = {
@@ -2821,7 +4296,7 @@ export const $DAGSourceResponse = {
     type: 'object',
     required: ['content', 'dag_id', 'version_number', 'dag_display_name'],
     title: 'DAGSourceResponse',
-    description: 'DAG Source serializer for responses.'
+    description: 'Dag Source serializer for responses.'
 } as const;
 
 export const $DAGTagCollectionResponse = {
@@ -2841,7 +4316,7 @@ export const $DAGTagCollectionResponse = {
     type: 'object',
     required: ['tags', 'total_entries'],
     title: 'DAGTagCollectionResponse',
-    description: 'DAG Tags Collection serializer for responses.'
+    description: 'Dag Tags Collection serializer for responses.'
 } as const;
 
 export const $DAGVersionCollectionResponse = {
@@ -2861,7 +4336,7 @@ export const $DAGVersionCollectionResponse = {
     type: 'object',
     required: ['dag_versions', 'total_entries'],
     title: 'DAGVersionCollectionResponse',
-    description: 'DAG Version Collection serializer for responses.'
+    description: 'Dag Version Collection serializer for responses.'
 } as const;
 
 export const $DAGWarningCollectionResponse = {
@@ -2881,7 +4356,7 @@ export const $DAGWarningCollectionResponse = {
     type: 'object',
     required: ['dag_warnings', 'total_entries'],
     title: 'DAGWarningCollectionResponse',
-    description: 'DAG warning collection serializer for responses.'
+    description: 'Dag warning collection serializer for responses.'
 } as const;
 
 export const $DAGWarningResponse = {
@@ -2910,7 +4385,7 @@ export const $DAGWarningResponse = {
     type: 'object',
     required: ['dag_id', 'warning_type', 'message', 'timestamp', 'dag_display_name'],
     title: 'DAGWarningResponse',
-    description: 'DAG Warning serializer for responses.'
+    description: 'Dag Warning serializer for responses.'
 } as const;
 
 export const $DagProcessorInfoResponse = {
@@ -2967,8 +4442,15 @@ export const $DagRunAssetReference = {
             title: 'Logical Date'
         },
         start_date: {
-            type: 'string',
-            format: 'date-time',
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
             title: 'Start Date'
         },
         end_date: {
@@ -3010,13 +4492,36 @@ export const $DagRunAssetReference = {
                 }
             ],
             title: 'Data Interval End'
+        },
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key'
+        },
+        triggering: {
+            type: 'boolean',
+            title: 'Triggering',
+            description: "Whether this asset event triggered the referenced dag run. Only a run's most recent consumed asset event triggers it; earlier consumed events are included in the run but did not trigger it."
         }
     },
     additionalProperties: false,
     type: 'object',
-    required: ['run_id', 'dag_id', 'logical_date', 'start_date', 'end_date', 'state', 'data_interval_start', 'data_interval_end'],
+    required: ['run_id', 'dag_id', 'logical_date', 'start_date', 'end_date', 'state', 'data_interval_start', 'data_interval_end', 'partition_key', 'triggering'],
     title: 'DagRunAssetReference',
-    description: 'DAGRun serializer for asset responses.'
+    description: 'DagRun serializer for asset responses.'
+} as const;
+
+export const $DagRunMutableStates = {
+    type: 'string',
+    enum: ['queued', 'success', 'failed'],
+    title: 'DagRunMutableStates',
+    description: 'Dag Run states from which the run may be mutated (patched, deleted).'
 } as const;
 
 export const $DagRunState = {
@@ -3039,7 +4544,7 @@ export const $DagRunTriggeredByType = {
 
 export const $DagRunType = {
     type: 'string',
-    enum: ['backfill', 'scheduled', 'manual', 'asset_triggered'],
+    enum: ['backfill', 'scheduled', 'manual', 'operator_triggered', 'asset_triggered', 'asset_materialization'],
     title: 'DagRunType',
     description: 'Class with DagRun types.'
 } as const;
@@ -3059,13 +4564,24 @@ export const $DagScheduleAssetReference = {
             type: 'string',
             format: 'date-time',
             title: 'Updated At'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     additionalProperties: false,
     type: 'object',
     required: ['dag_id', 'created_at', 'updated_at'],
     title: 'DagScheduleAssetReference',
-    description: 'DAG schedule reference serializer for assets.'
+    description: 'Dag schedule reference serializer for assets.'
 } as const;
 
 export const $DagStatsCollectionResponse = {
@@ -3085,7 +4601,7 @@ export const $DagStatsCollectionResponse = {
     type: 'object',
     required: ['dags', 'total_entries'],
     title: 'DagStatsCollectionResponse',
-    description: 'DAG Stats Collection serializer for responses.'
+    description: 'Dag Stats Collection serializer for responses.'
 } as const;
 
 export const $DagStatsResponse = {
@@ -3109,7 +4625,7 @@ export const $DagStatsResponse = {
     type: 'object',
     required: ['dag_id', 'dag_display_name', 'stats'],
     title: 'DagStatsResponse',
-    description: 'DAG Stats serializer for responses.'
+    description: 'Dag Stats serializer for responses.'
 } as const;
 
 export const $DagStatsStateResponse = {
@@ -3146,7 +4662,7 @@ export const $DagTagResponse = {
     type: 'object',
     required: ['name', 'dag_id', 'dag_display_name'],
     title: 'DagTagResponse',
-    description: 'DAG Tag serializer for responses.'
+    description: 'Dag Tag serializer for responses.'
 } as const;
 
 export const $DagVersionResponse = {
@@ -3204,8 +4720,7 @@ export const $DagVersionResponse = {
                     type: 'null'
                 }
             ],
-            title: 'Bundle Url',
-            readOnly: true
+            title: 'Bundle Url'
         }
     },
     type: 'object',
@@ -3216,7 +4731,7 @@ export const $DagVersionResponse = {
 
 export const $DagWarningType = {
     type: 'string',
-    enum: ['asset conflict', 'non-existent pool'],
+    enum: ['asset conflict', 'duplicate dag id', 'non-existent pool', 'runtime varying value'],
     title: 'DagWarningType',
     description: `Enum for DAG warning types.
 
@@ -3247,13 +4762,43 @@ export const $DryRunBackfillCollectionResponse = {
 export const $DryRunBackfillResponse = {
     properties: {
         logical_date: {
-            type: 'string',
-            format: 'date-time',
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
             title: 'Logical Date'
+        },
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key'
+        },
+        partition_date: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Date'
         }
     },
     type: 'object',
-    required: ['logical_date'],
+    required: ['logical_date', 'partition_key', 'partition_date'],
     title: 'DryRunBackfillResponse',
     description: 'Backfill serializer for responses in dry-run mode.'
 } as const;
@@ -3371,6 +4916,17 @@ export const $EventLogResponse = {
             ],
             title: 'Owner'
         },
+        owner_display_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Owner Display Name'
+        },
         extra: {
             anyOf: [
                 {
@@ -3406,7 +4962,7 @@ export const $EventLogResponse = {
         }
     },
     type: 'object',
-    required: ['event_log_id', 'when', 'dag_id', 'task_id', 'run_id', 'map_index', 'try_number', 'event', 'logical_date', 'owner', 'extra'],
+    required: ['event_log_id', 'when', 'dag_id', 'task_id', 'run_id', 'map_index', 'try_number', 'event', 'logical_date', 'owner', 'owner_display_name', 'extra'],
     title: 'EventLogResponse',
     description: 'Event Log Response.'
 } as const;
@@ -3474,13 +5030,35 @@ export const $ExternalViewResponse = {
             ],
             title: 'Category'
         },
+        nav_top_level: {
+            anyOf: [
+                {
+                    type: 'boolean'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Nav Top Level',
+            default: false
+        },
+        applies_to: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/PluginAppliesToResponse'
+                },
+                {
+                    type: 'null'
+                }
+            ]
+        },
         href: {
             type: 'string',
             title: 'Href'
         },
         destination: {
             type: 'string',
-            enum: ['nav', 'dag', 'dag_run', 'task', 'task_instance'],
+            enum: ['nav', 'dag', 'dag_run', 'task', 'task_instance', 'asset', 'base'],
             title: 'Destination',
             default: 'nav'
         }
@@ -3561,9 +5139,6 @@ export const $FastAPIRootMiddlewareResponse = {
 
 export const $HITLDetail = {
     properties: {
-        task_instance: {
-            '$ref': '#/components/schemas/TaskInstanceResponse'
-        },
         options: {
             items: {
                 type: 'string'
@@ -3668,10 +5243,13 @@ export const $HITLDetail = {
             type: 'boolean',
             title: 'Response Received',
             default: false
+        },
+        task_instance: {
+            '$ref': '#/components/schemas/TaskInstanceResponse'
         }
     },
     type: 'object',
-    required: ['task_instance', 'options', 'subject', 'created_at'],
+    required: ['options', 'subject', 'created_at', 'task_instance'],
     title: 'HITLDetail',
     description: 'Schema for Human-in-the-loop detail.'
 } as const;
@@ -3694,6 +5272,123 @@ export const $HITLDetailCollection = {
     required: ['hitl_details', 'total_entries'],
     title: 'HITLDetailCollection',
     description: 'Schema for a collection of Human-in-the-loop details.'
+} as const;
+
+export const $HITLDetailHistory = {
+    properties: {
+        options: {
+            items: {
+                type: 'string'
+            },
+            type: 'array',
+            minItems: 1,
+            title: 'Options'
+        },
+        subject: {
+            type: 'string',
+            title: 'Subject'
+        },
+        body: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Body'
+        },
+        defaults: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Defaults'
+        },
+        multiple: {
+            type: 'boolean',
+            title: 'Multiple',
+            default: false
+        },
+        params: {
+            additionalProperties: true,
+            type: 'object',
+            title: 'Params'
+        },
+        assigned_users: {
+            items: {
+                '$ref': '#/components/schemas/HITLUser'
+            },
+            type: 'array',
+            title: 'Assigned Users'
+        },
+        created_at: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Created At'
+        },
+        responded_by_user: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/HITLUser'
+                },
+                {
+                    type: 'null'
+                }
+            ]
+        },
+        responded_at: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Responded At'
+        },
+        chosen_options: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Chosen Options'
+        },
+        params_input: {
+            additionalProperties: true,
+            type: 'object',
+            title: 'Params Input'
+        },
+        response_received: {
+            type: 'boolean',
+            title: 'Response Received',
+            default: false
+        },
+        task_instance: {
+            '$ref': '#/components/schemas/TaskInstanceHistoryResponse'
+        }
+    },
+    type: 'object',
+    required: ['options', 'subject', 'created_at', 'task_instance'],
+    title: 'HITLDetailHistory',
+    description: 'Schema for Human-in-the-loop detail history.'
 } as const;
 
 export const $HITLDetailResponse = {
@@ -4043,6 +5738,136 @@ export const $LastAssetEventResponse = {
     description: 'Last asset event response serializer.'
 } as const;
 
+export const $MaterializeAssetBody = {
+    properties: {
+        dag_run_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Run Id'
+        },
+        data_interval_start: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Data Interval Start'
+        },
+        data_interval_end: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Data Interval End'
+        },
+        logical_date: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Logical Date'
+        },
+        run_after: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Run After'
+        },
+        conf: {
+            anyOf: [
+                {
+                    additionalProperties: true,
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Conf'
+        },
+        note: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Note'
+        },
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key'
+        },
+        bundle_version: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Bundle Version'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    title: 'MaterializeAssetBody',
+    description: 'Materialize asset request.'
+} as const;
+
+export const $NewTaskResponse = {
+    properties: {
+        task_id: {
+            type: 'string',
+            title: 'Task Id'
+        },
+        task_display_name: {
+            type: 'string',
+            title: 'Task Display Name'
+        }
+    },
+    type: 'object',
+    required: ['task_id', 'task_display_name'],
+    title: 'NewTaskResponse',
+    description: "Lightweight response for new tasks that don't have TaskInstances yet."
+} as const;
+
 export const $PatchTaskInstanceBody = {
     properties: {
         new_state: {
@@ -4091,7 +5916,86 @@ export const $PatchTaskInstanceBody = {
     additionalProperties: false,
     type: 'object',
     title: 'PatchTaskInstanceBody',
-    description: 'Request body for Clear Task Instances endpoint.'
+    description: 'Request body for patching task instance state.'
+} as const;
+
+export const $PluginAppliesToResponse = {
+    properties: {
+        dag_tags: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Tags'
+        },
+        dag_ids: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Ids'
+        },
+        task_ids: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Task Ids'
+        },
+        operators: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Operators'
+        },
+        operator_names: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Operator Names'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    title: 'PluginAppliesToResponse',
+    description: 'Serializer for the optional Dag/task scoping criteria of a UI plugin.'
 } as const;
 
 export const $PluginCollectionResponse = {
@@ -4156,6 +6060,17 @@ export const $PluginResponse = {
         name: {
             type: 'string',
             title: 'Name'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         },
         macros: {
             items: {
@@ -4263,7 +6178,9 @@ export const $PoolBody = {
         },
         slots: {
             type: 'integer',
-            title: 'Slots'
+            minimum: -1,
+            title: 'Slots',
+            description: 'Number of slots. Use -1 for unlimited.'
         },
         description: {
             anyOf: [
@@ -4280,6 +6197,18 @@ export const $PoolBody = {
             type: 'boolean',
             title: 'Include Deferred',
             default: false
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 50
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     additionalProperties: false,
@@ -4325,7 +6254,9 @@ export const $PoolPatchBody = {
         slots: {
             anyOf: [
                 {
-                    type: 'integer'
+                    type: 'integer',
+                    minimum: -1,
+                    description: 'Number of slots. Use -1 for unlimited.'
                 },
                 {
                     type: 'null'
@@ -4354,6 +6285,18 @@ export const $PoolPatchBody = {
                 }
             ],
             title: 'Include Deferred'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 50
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     additionalProperties: false,
@@ -4370,7 +6313,9 @@ export const $PoolResponse = {
         },
         slots: {
             type: 'integer',
-            title: 'Slots'
+            minimum: -1,
+            title: 'Slots',
+            description: 'Number of slots. Use -1 for unlimited.'
         },
         description: {
             anyOf: [
@@ -4410,10 +6355,21 @@ export const $PoolResponse = {
         deferred_slots: {
             type: 'integer',
             title: 'Deferred Slots'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     type: 'object',
-    required: ['name', 'slots', 'description', 'include_deferred', 'occupied_slots', 'running_slots', 'queued_slots', 'scheduled_slots', 'open_slots', 'deferred_slots'],
+    required: ['name', 'slots', 'include_deferred', 'occupied_slots', 'running_slots', 'queued_slots', 'scheduled_slots', 'open_slots', 'deferred_slots', 'team_name'],
     title: 'PoolResponse',
     description: 'Pool serializer for responses.'
 } as const;
@@ -4451,10 +6407,21 @@ export const $ProviderResponse = {
         version: {
             type: 'string',
             title: 'Version'
+        },
+        documentation_url: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Documentation Url'
         }
     },
     type: 'object',
-    required: ['package_name', 'description', 'version'],
+    required: ['package_name', 'description', 'version', 'documentation_url'],
     title: 'ProviderResponse',
     description: 'Provider serializer for responses.'
 } as const;
@@ -4555,13 +6522,35 @@ export const $ReactAppResponse = {
             ],
             title: 'Category'
         },
+        nav_top_level: {
+            anyOf: [
+                {
+                    type: 'boolean'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Nav Top Level',
+            default: false
+        },
+        applies_to: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/PluginAppliesToResponse'
+                },
+                {
+                    type: 'null'
+                }
+            ]
+        },
         bundle_url: {
             type: 'string',
             title: 'Bundle Url'
         },
         destination: {
             type: 'string',
-            enum: ['nav', 'dag', 'dag_run', 'task', 'task_instance', 'dashboard'],
+            enum: ['nav', 'dag', 'dag_run', 'task', 'task_instance', 'asset', 'base', 'dashboard', 'dag_overview', 'task_overview'],
             title: 'Destination',
             default: 'nav'
         }
@@ -4723,14 +6712,65 @@ export const $TaskInstanceCollectionResponse = {
             title: 'Task Instances'
         },
         total_entries: {
-            type: 'integer',
-            title: 'Total Entries'
+            anyOf: [
+                {
+                    type: 'integer'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Total Entries',
+            description: 'Number of matching items. For offset pagination this is the exact total. For cursor pagination it is capped at ``total_entries_limit``; a value equal to that limit means at least that many items match.'
+        },
+        total_entries_limit: {
+            anyOf: [
+                {
+                    type: 'integer'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Total Entries Limit',
+            description: 'Cap applied to ``total_entries`` under cursor pagination. ``null`` for offset pagination, where ``total_entries`` is exact.'
+        },
+        next_cursor: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Next Cursor',
+            description: 'Token pointing to the next page. Populated for cursor pagination, ``null`` when using offset pagination or when there is no next page.'
+        },
+        previous_cursor: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Previous Cursor',
+            description: 'Token pointing to the previous page. Populated for cursor pagination, ``null`` when using offset pagination or when on the first page.'
         }
     },
     type: 'object',
-    required: ['task_instances', 'total_entries'],
+    required: ['task_instances'],
     title: 'TaskInstanceCollectionResponse',
-    description: 'Task Instance Collection serializer for responses.'
+    description: `Task instance collection response supporting both offset and cursor pagination.
+
+A single flat model is used instead of a discriminated union
+(\`\`Annotated[Offset | Cursor, Field(discriminator=...)]\`\`) because
+the OpenAPI \`\`oneOf\`\` + \`\`discriminator\`\` construct is not handled
+correctly by \`\`@hey-api/openapi-ts\`\` / \`\`@7nohe/openapi-react-query-codegen\`\`:
+return types degrade to \`\`unknown\`\` in JSDoc and can produce
+incorrect TypeScript types (see hey-api/openapi-ts#1613, #3270).`
 } as const;
 
 export const $TaskInstanceHistoryCollectionResponse = {
@@ -4977,6 +7017,7 @@ export const $TaskInstanceResponse = {
     properties: {
         id: {
             type: 'string',
+            format: 'uuid',
             title: 'Id'
         },
         task_id: {
@@ -5253,6 +7294,17 @@ export const $TaskInstanceResponse = {
                     type: 'null'
                 }
             ]
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     type: 'object',
@@ -5263,7 +7315,7 @@ export const $TaskInstanceResponse = {
 
 export const $TaskInstanceState = {
     type: 'string',
-    enum: ['removed', 'scheduled', 'queued', 'running', 'success', 'restarting', 'failed', 'up_for_retry', 'up_for_reschedule', 'upstream_failed', 'skipped', 'deferred'],
+    enum: ['removed', 'scheduled', 'queued', 'running', 'success', 'restarting', 'failed', 'up_for_retry', 'up_for_reschedule', 'upstream_failed', 'skipped', 'deferred', 'awaiting_input'],
     title: 'TaskInstanceState',
     description: `All possible states that a Task Instance can be in.
 
@@ -5699,6 +7751,17 @@ export const $TaskOutletAssetReference = {
             type: 'string',
             format: 'date-time',
             title: 'Updated At'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     additionalProperties: false,
@@ -5851,7 +7914,7 @@ export const $TaskResponse = {
             ]
         },
         retry_exponential_backoff: {
-            type: 'boolean',
+            type: 'number',
             title: 'Retry Exponential Backoff'
         },
         priority_weight: {
@@ -5999,6 +8062,108 @@ export const $TaskResponse = {
     description: 'Task serializer for responses.'
 } as const;
 
+export const $TaskStateStoreBody = {
+    properties: {
+        value: {
+            '$ref': '#/components/schemas/JsonValue'
+        },
+        expires_at: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'string',
+                    const: 'default'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Expires At',
+            default: 'default'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    required: ['value'],
+    title: 'TaskStateStoreBody',
+    description: `Request body for setting a task state store value.
+
+\`\`expires_at\`\` controls expiry:
+
+- \`\`"default"\`\`: apply the configured \`\`[state_store] default_retention_days\`\`.
+- \`\`null\`\`: never expire.
+- aware datetime: expire at that time.`
+} as const;
+
+export const $TaskStateStoreCollectionResponse = {
+    properties: {
+        task_state_store: {
+            items: {
+                '$ref': '#/components/schemas/TaskStateStoreResponse'
+            },
+            type: 'array',
+            title: 'Task State Store'
+        },
+        total_entries: {
+            type: 'integer',
+            title: 'Total Entries'
+        }
+    },
+    type: 'object',
+    required: ['task_state_store', 'total_entries'],
+    title: 'TaskStateStoreCollectionResponse',
+    description: 'All task state store entries for a task instance.'
+} as const;
+
+export const $TaskStateStorePatchBody = {
+    properties: {
+        value: {
+            '$ref': '#/components/schemas/JsonValue'
+        }
+    },
+    additionalProperties: false,
+    type: 'object',
+    required: ['value'],
+    title: 'TaskStateStorePatchBody',
+    description: 'Request body for patching only the value of an existing task state store key.'
+} as const;
+
+export const $TaskStateStoreResponse = {
+    properties: {
+        key: {
+            type: 'string',
+            title: 'Key'
+        },
+        value: {
+            '$ref': '#/components/schemas/JsonValue'
+        },
+        updated_at: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Updated At'
+        },
+        expires_at: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Expires At'
+        }
+    },
+    type: 'object',
+    required: ['key', 'value', 'updated_at', 'expires_at'],
+    title: 'TaskStateStoreResponse',
+    description: 'A single task state store key/value pair with metadata.'
+} as const;
+
 export const $TimeDelta = {
     properties: {
         __type: {
@@ -6108,13 +8273,35 @@ export const $TriggerDAGRunPostBody = {
                 }
             ],
             title: 'Note'
+        },
+        partition_key: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Partition Key'
+        },
+        bundle_version: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Bundle Version'
         }
     },
     additionalProperties: false,
     type: 'object',
     required: ['logical_date'],
     title: 'TriggerDAGRunPostBody',
-    description: 'Trigger DAG Run Serializer for POST body.'
+    description: 'Trigger Dag Run Serializer for POST body.'
 } as const;
 
 export const $TriggerResponse = {
@@ -6129,12 +8316,24 @@ export const $TriggerResponse = {
         },
         kwargs: {
             type: 'string',
-            title: 'Kwargs'
+            title: 'Kwargs',
+            deprecated: true
         },
         created_date: {
             type: 'string',
             format: 'date-time',
             title: 'Created Date'
+        },
+        queue: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Queue'
         },
         triggerer_id: {
             anyOf: [
@@ -6149,7 +8348,7 @@ export const $TriggerResponse = {
         }
     },
     type: 'object',
-    required: ['id', 'classpath', 'kwargs', 'created_date', 'triggerer_id'],
+    required: ['id', 'classpath', 'kwargs', 'created_date', 'queue', 'triggerer_id'],
     title: 'TriggerResponse',
     description: 'Trigger serializer for responses.'
 } as const;
@@ -6230,6 +8429,13 @@ export const $ValidationError = {
         type: {
             type: 'string',
             title: 'Error Type'
+        },
+        input: {
+            title: 'Input'
+        },
+        ctx: {
+            type: 'object',
+            title: 'Context'
         }
     },
     type: 'object',
@@ -6257,6 +8463,18 @@ export const $VariableBody = {
                 }
             ],
             title: 'Description'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string',
+                    maxLength: 50
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     additionalProperties: false,
@@ -6293,7 +8511,14 @@ export const $VariableResponse = {
             title: 'Key'
         },
         value: {
-            type: 'string',
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
             title: 'Value'
         },
         description: {
@@ -6310,10 +8535,21 @@ export const $VariableResponse = {
         is_encrypted: {
             type: 'boolean',
             title: 'Is Encrypted'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
         }
     },
     type: 'object',
-    required: ['key', 'value', 'description', 'is_encrypted'],
+    required: ['key', 'description', 'is_encrypted', 'team_name'],
     title: 'VariableResponse',
     description: 'Variable serializer for responses.'
 } as const;
@@ -6430,10 +8666,15 @@ export const $XComResponse = {
         task_display_name: {
             type: 'string',
             title: 'Task Display Name'
+        },
+        run_after: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Run After'
         }
     },
     type: 'object',
-    required: ['key', 'timestamp', 'logical_date', 'map_index', 'task_id', 'dag_id', 'run_id', 'dag_display_name', 'task_display_name'],
+    required: ['key', 'timestamp', 'logical_date', 'map_index', 'task_id', 'dag_id', 'run_id', 'dag_display_name', 'task_display_name', 'run_after'],
     title: 'XComResponse',
     description: 'Serializer for a xcom item.'
 } as const;
@@ -6485,12 +8726,17 @@ export const $XComResponseNative = {
             type: 'string',
             title: 'Task Display Name'
         },
+        run_after: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Run After'
+        },
         value: {
             title: 'Value'
         }
     },
     type: 'object',
-    required: ['key', 'timestamp', 'logical_date', 'map_index', 'task_id', 'dag_id', 'run_id', 'dag_display_name', 'task_display_name', 'value'],
+    required: ['key', 'timestamp', 'logical_date', 'map_index', 'task_id', 'dag_id', 'run_id', 'dag_display_name', 'task_display_name', 'run_after', 'value'],
     title: 'XComResponseNative',
     description: 'XCom response serializer with native return type.'
 } as const;
@@ -6542,6 +8788,11 @@ export const $XComResponseString = {
             type: 'string',
             title: 'Task Display Name'
         },
+        run_after: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Run After'
+        },
         value: {
             anyOf: [
                 {
@@ -6555,7 +8806,7 @@ export const $XComResponseString = {
         }
     },
     type: 'object',
-    required: ['key', 'timestamp', 'logical_date', 'map_index', 'task_id', 'dag_id', 'run_id', 'dag_display_name', 'task_display_name', 'value'],
+    required: ['key', 'timestamp', 'logical_date', 'map_index', 'task_id', 'dag_id', 'run_id', 'dag_display_name', 'task_display_name', 'run_after', 'value'],
     title: 'XComResponseString',
     description: 'XCom response serializer with string return type.'
 } as const;
@@ -6576,6 +8827,38 @@ export const $XComUpdateBody = {
     required: ['value'],
     title: 'XComUpdateBody',
     description: 'Payload serializer for updating an XCom entry.'
+} as const;
+
+export const $AuthenticatedMeResponse = {
+    properties: {
+        id: {
+            type: 'string',
+            title: 'Id'
+        },
+        username: {
+            type: 'string',
+            title: 'Username'
+        },
+        teams: {
+            anyOf: [
+                {
+                    items: {
+                        type: 'string'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Teams',
+            description: 'Teams the user has access to. Null when the environment does not run in multi-team mode.'
+        }
+    },
+    type: 'object',
+    required: ['id', 'username'],
+    title: 'AuthenticatedMeResponse',
+    description: 'Authenticated user information serializer for responses.'
 } as const;
 
 export const $BaseEdgeResponse = {
@@ -6632,12 +8915,77 @@ export const $BaseNodeResponse = {
             type: 'string',
             enum: ['join', 'task', 'asset-condition', 'asset', 'asset-alias', 'asset-name-ref', 'asset-uri-ref', 'dag', 'sensor', 'trigger'],
             title: 'Type'
+        },
+        team: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team'
+        },
+        asset_condition_type: {
+            anyOf: [
+                {
+                    type: 'string',
+                    enum: ['or-gate', 'and-gate']
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Asset Condition Type'
         }
     },
     type: 'object',
     required: ['id', 'label', 'type'],
     title: 'BaseNodeResponse',
     description: 'Base Node serializer for responses.'
+} as const;
+
+export const $CalendarDeadlineCollectionResponse = {
+    properties: {
+        total_entries: {
+            type: 'integer',
+            title: 'Total Entries'
+        },
+        deadlines: {
+            items: {
+                '$ref': '#/components/schemas/CalendarDeadlineResponse'
+            },
+            type: 'array',
+            title: 'Deadlines'
+        }
+    },
+    type: 'object',
+    required: ['total_entries', 'deadlines'],
+    title: 'CalendarDeadlineCollectionResponse',
+    description: 'Response model for calendar deadline aggregation results.'
+} as const;
+
+export const $CalendarDeadlineResponse = {
+    properties: {
+        date: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Date'
+        },
+        missed: {
+            type: 'boolean',
+            title: 'Missed'
+        },
+        count: {
+            type: 'integer',
+            title: 'Count'
+        }
+    },
+    type: 'object',
+    required: ['date', 'missed', 'count'],
+    title: 'CalendarDeadlineResponse',
+    description: 'Represents aggregated deadline counts for a specific calendar time bucket.'
 } as const;
 
 export const $CalendarTimeRangeCollectionResponse = {
@@ -6685,9 +9033,9 @@ export const $CalendarTimeRangeResponse = {
 
 export const $ConfigResponse = {
     properties: {
-        page_size: {
+        fallback_page_limit: {
             type: 'integer',
-            title: 'Page Size'
+            title: 'Fallback Page Limit'
         },
         auto_refresh_interval: {
             type: 'integer',
@@ -6738,10 +9086,35 @@ export const $ConfigResponse = {
                 }
             ],
             title: 'External Log Name'
+        },
+        theme: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/Theme'
+                },
+                {
+                    type: 'null'
+                }
+            ]
+        },
+        multi_team: {
+            type: 'boolean',
+            title: 'Multi Team'
+        },
+        rerun_with_latest_version: {
+            anyOf: [
+                {
+                    type: 'boolean'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Rerun With Latest Version'
         }
     },
     type: 'object',
-    required: ['page_size', 'auto_refresh_interval', 'hide_paused_dags_by_default', 'instance_name', 'enable_swagger_ui', 'require_confirmation_dag_change', 'default_wrap', 'test_connection', 'dashboard_alert', 'show_external_log_redirect'],
+    required: ['fallback_page_limit', 'auto_refresh_interval', 'hide_paused_dags_by_default', 'instance_name', 'enable_swagger_ui', 'require_confirmation_dag_change', 'default_wrap', 'test_connection', 'dashboard_alert', 'show_external_log_redirect', 'theme', 'multi_team'],
     title: 'ConfigResponse',
     description: 'configuration serializer.'
 } as const;
@@ -6912,12 +9285,47 @@ export const $DAGRunLightResponse = {
         },
         state: {
             '$ref': '#/components/schemas/DagRunState'
+        },
+        duration: {
+            anyOf: [
+                {
+                    type: 'number'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Duration',
+            readOnly: true
         }
     },
     type: 'object',
-    required: ['id', 'dag_id', 'run_id', 'logical_date', 'run_after', 'start_date', 'end_date', 'state'],
+    required: ['id', 'dag_id', 'run_id', 'logical_date', 'run_after', 'start_date', 'end_date', 'state', 'duration'],
     title: 'DAGRunLightResponse',
     description: 'DAG Run serializer for responses.'
+} as const;
+
+export const $DAGRunStateCountsResponse = {
+    properties: {
+        dag_id: {
+            type: 'string',
+            title: 'Dag Id'
+        },
+        state_counts: {
+            additionalProperties: {
+                type: 'integer'
+            },
+            propertyNames: {
+                '$ref': '#/components/schemas/DagRunState'
+            },
+            type: 'object',
+            title: 'State Counts'
+        }
+    },
+    type: 'object',
+    required: ['dag_id', 'state_counts'],
+    title: 'DAGRunStateCountsResponse',
+    description: 'Per-Dag counts of DagRuns grouped by state.'
 } as const;
 
 export const $DAGRunStates = {
@@ -6943,31 +9351,6 @@ export const $DAGRunStates = {
     required: ['queued', 'running', 'success', 'failed'],
     title: 'DAGRunStates',
     description: 'DAG Run States for responses.'
-} as const;
-
-export const $DAGRunTypes = {
-    properties: {
-        backfill: {
-            type: 'integer',
-            title: 'Backfill'
-        },
-        scheduled: {
-            type: 'integer',
-            title: 'Scheduled'
-        },
-        manual: {
-            type: 'integer',
-            title: 'Manual'
-        },
-        asset_triggered: {
-            type: 'integer',
-            title: 'Asset Triggered'
-        }
-    },
-    type: 'object',
-    required: ['backfill', 'scheduled', 'manual', 'asset_triggered'],
-    title: 'DAGRunTypes',
-    description: 'DAG Run Types for responses.'
 } as const;
 
 export const $DAGWithLatestDagRunsCollectionResponse = {
@@ -7077,7 +9460,14 @@ export const $DAGWithLatestDagRunsResponse = {
             title: 'Relative Fileloc'
         },
         fileloc: {
-            type: 'string',
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
             title: 'Fileloc'
         },
         description: {
@@ -7112,6 +9502,14 @@ export const $DAGWithLatestDagRunsResponse = {
                 }
             ],
             title: 'Timetable Description'
+        },
+        timetable_partitioned: {
+            type: 'boolean',
+            title: 'Timetable Partitioned'
+        },
+        timetable_periodic: {
+            type: 'boolean',
+            title: 'Timetable Periodic'
         },
         tags: {
             items: {
@@ -7195,6 +9593,20 @@ export const $DAGWithLatestDagRunsResponse = {
             ],
             title: 'Next Dagrun Run After'
         },
+        allowed_run_types: {
+            anyOf: [
+                {
+                    items: {
+                        '$ref': '#/components/schemas/DagRunType'
+                    },
+                    type: 'array'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Allowed Run Types'
+        },
         owners: {
             items: {
                 type: 'string'
@@ -7205,8 +9617,23 @@ export const $DAGWithLatestDagRunsResponse = {
         asset_expression: {
             anyOf: [
                 {
-                    additionalProperties: true,
-                    type: 'object'
+                    oneOf: [
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAsset'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAlias'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionRef'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAny'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAll'
+                        }
+                    ]
                 },
                 {
                     type: 'null'
@@ -7216,7 +9643,7 @@ export const $DAGWithLatestDagRunsResponse = {
         },
         latest_dag_runs: {
             items: {
-                '$ref': '#/components/schemas/DAGRunResponse'
+                '$ref': '#/components/schemas/DAGRunLightResponse'
             },
             type: 'array',
             title: 'Latest Dag Runs'
@@ -7228,6 +9655,27 @@ export const $DAGWithLatestDagRunsResponse = {
             type: 'array',
             title: 'Pending Actions'
         },
+        is_favorite: {
+            type: 'boolean',
+            title: 'Is Favorite'
+        },
+        team_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team Name'
+        },
+        is_backfillable: {
+            type: 'boolean',
+            title: 'Is Backfillable',
+            description: "Whether this Dag's schedule supports backfilling.",
+            readOnly: true
+        },
         file_token: {
             type: 'string',
             title: 'File Token',
@@ -7236,9 +9684,68 @@ export const $DAGWithLatestDagRunsResponse = {
         }
     },
     type: 'object',
-    required: ['dag_id', 'dag_display_name', 'is_paused', 'is_stale', 'last_parsed_time', 'last_parse_duration', 'last_expired', 'bundle_name', 'bundle_version', 'relative_fileloc', 'fileloc', 'description', 'timetable_summary', 'timetable_description', 'tags', 'max_active_tasks', 'max_active_runs', 'max_consecutive_failed_dag_runs', 'has_task_concurrency_limits', 'has_import_errors', 'next_dagrun_logical_date', 'next_dagrun_data_interval_start', 'next_dagrun_data_interval_end', 'next_dagrun_run_after', 'owners', 'asset_expression', 'latest_dag_runs', 'pending_actions', 'file_token'],
+    required: ['dag_id', 'dag_display_name', 'is_paused', 'is_stale', 'last_parsed_time', 'last_parse_duration', 'last_expired', 'bundle_name', 'bundle_version', 'relative_fileloc', 'fileloc', 'description', 'timetable_summary', 'timetable_description', 'timetable_partitioned', 'timetable_periodic', 'tags', 'max_active_tasks', 'max_active_runs', 'max_consecutive_failed_dag_runs', 'has_task_concurrency_limits', 'has_import_errors', 'next_dagrun_logical_date', 'next_dagrun_data_interval_start', 'next_dagrun_data_interval_end', 'next_dagrun_run_after', 'allowed_run_types', 'owners', 'asset_expression', 'latest_dag_runs', 'pending_actions', 'is_favorite', 'is_backfillable', 'file_token'],
     title: 'DAGWithLatestDagRunsResponse',
     description: 'DAG with latest dag runs response serializer.'
+} as const;
+
+export const $DAGsRunStateCountsCollectionResponse = {
+    properties: {
+        dags: {
+            items: {
+                '$ref': '#/components/schemas/DAGRunStateCountsResponse'
+            },
+            type: 'array',
+            title: 'Dags'
+        },
+        state_count_limit: {
+            type: 'integer',
+            title: 'State Count Limit'
+        }
+    },
+    type: 'object',
+    required: ['dags', 'state_count_limit'],
+    title: 'DAGsRunStateCountsCollectionResponse',
+    description: 'Collection of per-Dag DagRun-state counts for the Dag list page.'
+} as const;
+
+export const $DagRunStatsResponse = {
+    properties: {
+        duration: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/DurationStats'
+                },
+                {
+                    type: 'null'
+                }
+            ]
+        }
+    },
+    type: 'object',
+    required: ['duration'],
+    title: 'DagRunStatsResponse',
+    description: 'DAG Run statistics serializer for responses.'
+} as const;
+
+export const $DagTimetableTypeCollectionResponse = {
+    properties: {
+        timetable_types: {
+            items: {
+                type: 'string'
+            },
+            type: 'array',
+            title: 'Timetable Types'
+        },
+        total_entries: {
+            type: 'integer',
+            title: 'Total Entries'
+        }
+    },
+    type: 'object',
+    required: ['timetable_types', 'total_entries'],
+    title: 'DagTimetableTypeCollectionResponse',
+    description: 'Timetable types used by Dags.'
 } as const;
 
 export const $DashboardDagStatsResponse = {
@@ -7264,6 +9771,191 @@ export const $DashboardDagStatsResponse = {
     required: ['active_dag_count', 'failed_dag_count', 'running_dag_count', 'queued_dag_count'],
     title: 'DashboardDagStatsResponse',
     description: 'Dashboard DAG Stats serializer for responses.'
+} as const;
+
+export const $DeadlineAlertCollectionResponse = {
+    properties: {
+        deadline_alerts: {
+            items: {
+                '$ref': '#/components/schemas/DeadlineAlertResponse'
+            },
+            type: 'array',
+            title: 'Deadline Alerts'
+        },
+        total_entries: {
+            type: 'integer',
+            title: 'Total Entries'
+        }
+    },
+    type: 'object',
+    required: ['deadline_alerts', 'total_entries'],
+    title: 'DeadlineAlertCollectionResponse',
+    description: 'DeadlineAlert Collection serializer for responses.'
+} as const;
+
+export const $DeadlineAlertResponse = {
+    properties: {
+        id: {
+            type: 'string',
+            format: 'uuid',
+            title: 'Id'
+        },
+        name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Name'
+        },
+        reference_type: {
+            type: 'string',
+            title: 'Reference Type'
+        },
+        interval: {
+            anyOf: [
+                {
+                    type: 'number'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Interval',
+            description: 'Interval in seconds between the reference time and the deadline. Null for a dynamic interval (e.g. a VariableInterval) whose value is only resolved at scheduler evaluation time.'
+        },
+        created_at: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Created At'
+        }
+    },
+    type: 'object',
+    required: ['id', 'reference_type', 'created_at'],
+    title: 'DeadlineAlertResponse',
+    description: 'DeadlineAlert serializer for responses.'
+} as const;
+
+export const $DeadlineCollectionResponse = {
+    properties: {
+        deadlines: {
+            items: {
+                '$ref': '#/components/schemas/DeadlineResponse'
+            },
+            type: 'array',
+            title: 'Deadlines'
+        },
+        total_entries: {
+            type: 'integer',
+            title: 'Total Entries'
+        }
+    },
+    type: 'object',
+    required: ['deadlines', 'total_entries'],
+    title: 'DeadlineCollectionResponse',
+    description: 'Deadline Collection serializer for responses.'
+} as const;
+
+export const $DeadlineResponse = {
+    properties: {
+        id: {
+            type: 'string',
+            format: 'uuid',
+            title: 'Id'
+        },
+        deadline_time: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Deadline Time'
+        },
+        missed: {
+            type: 'boolean',
+            title: 'Missed'
+        },
+        created_at: {
+            type: 'string',
+            format: 'date-time',
+            title: 'Created At'
+        },
+        dag_id: {
+            type: 'string',
+            title: 'Dag Id'
+        },
+        dag_run_id: {
+            type: 'string',
+            title: 'Dag Run Id'
+        },
+        alert_id: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'uuid'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Alert Id'
+        },
+        alert_name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Alert Name'
+        }
+    },
+    type: 'object',
+    required: ['id', 'deadline_time', 'missed', 'created_at', 'dag_id', 'dag_run_id'],
+    title: 'DeadlineResponse',
+    description: 'Deadline serializer for responses.'
+} as const;
+
+export const $DurationStats = {
+    properties: {
+        mean: {
+            type: 'number',
+            title: 'Mean'
+        },
+        mode: {
+            anyOf: [
+                {
+                    type: 'number'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Mode'
+        },
+        p50: {
+            type: 'number',
+            title: 'P50'
+        },
+        p90: {
+            type: 'number',
+            title: 'P90'
+        },
+        p95: {
+            type: 'number',
+            title: 'P95'
+        },
+        p99: {
+            type: 'number',
+            title: 'P99'
+        }
+    },
+    type: 'object',
+    required: ['mean', 'mode', 'p50', 'p90', 'p95', 'p99'],
+    title: 'DurationStats',
+    description: 'Duration statistics for a DAG across historical runs.'
 } as const;
 
 export const $EdgeResponse = {
@@ -7297,17 +9989,6 @@ export const $EdgeResponse = {
                 }
             ],
             title: 'Label'
-        },
-        is_source_asset: {
-            anyOf: [
-                {
-                    type: 'boolean'
-                },
-                {
-                    type: 'null'
-                }
-            ],
-            title: 'Is Source Asset'
         }
     },
     type: 'object',
@@ -7329,7 +10010,153 @@ export const $ExtraMenuItem = {
     },
     type: 'object',
     required: ['text', 'href'],
-    title: 'ExtraMenuItem'
+    title: 'ExtraMenuItem',
+    description: 'Define a menu item that can be added to the menu by auth managers or plugins.'
+} as const;
+
+export const $GanttResponse = {
+    properties: {
+        dag_id: {
+            type: 'string',
+            title: 'Dag Id'
+        },
+        run_id: {
+            type: 'string',
+            title: 'Run Id'
+        },
+        task_instances: {
+            items: {
+                '$ref': '#/components/schemas/GanttTaskInstance'
+            },
+            type: 'array',
+            title: 'Task Instances'
+        }
+    },
+    type: 'object',
+    required: ['dag_id', 'run_id', 'task_instances'],
+    title: 'GanttResponse',
+    description: 'Response for Gantt chart endpoint.'
+} as const;
+
+export const $GanttTaskInstance = {
+    properties: {
+        task_id: {
+            type: 'string',
+            title: 'Task Id'
+        },
+        task_display_name: {
+            type: 'string',
+            title: 'Task Display Name'
+        },
+        try_number: {
+            type: 'integer',
+            title: 'Try Number'
+        },
+        state: {
+            anyOf: [
+                {
+                    '$ref': '#/components/schemas/TaskInstanceState'
+                },
+                {
+                    type: 'null'
+                }
+            ]
+        },
+        scheduled_dttm: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Scheduled Dttm'
+        },
+        queued_dttm: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Queued Dttm'
+        },
+        start_date: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Start Date'
+        },
+        end_date: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'End Date'
+        },
+        is_group: {
+            type: 'boolean',
+            title: 'Is Group',
+            default: false
+        },
+        is_mapped: {
+            type: 'boolean',
+            title: 'Is Mapped',
+            default: false
+        }
+    },
+    type: 'object',
+    required: ['task_id', 'task_display_name', 'try_number', 'state', 'scheduled_dttm', 'queued_dttm', 'start_date', 'end_date'],
+    title: 'GanttTaskInstance',
+    description: 'Task instance data for Gantt chart.'
+} as const;
+
+export const $GenerateTokenBody = {
+    properties: {
+        token_type: {
+            '$ref': '#/components/schemas/TokenType',
+            default: 'api'
+        }
+    },
+    type: 'object',
+    title: 'GenerateTokenBody',
+    description: 'Request body for generating a token.'
+} as const;
+
+export const $GenerateTokenResponse = {
+    properties: {
+        access_token: {
+            type: 'string',
+            title: 'Access Token'
+        },
+        token_type: {
+            '$ref': '#/components/schemas/TokenType'
+        },
+        expires_in_seconds: {
+            type: 'integer',
+            title: 'Expires In Seconds'
+        }
+    },
+    type: 'object',
+    required: ['access_token', 'token_type', 'expires_in_seconds'],
+    title: 'GenerateTokenResponse',
+    description: 'Response for a generated token.'
 } as const;
 
 export const $GridNodeResponse = {
@@ -7378,6 +10205,17 @@ export const $GridNodeResponse = {
                 }
             ],
             title: 'Setup Teardown Type'
+        },
+        doc_md: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Doc Md'
         }
     },
     type: 'object',
@@ -7450,14 +10288,30 @@ export const $GridRunsResponse = {
         run_type: {
             '$ref': '#/components/schemas/DagRunType'
         },
+        dag_versions: {
+            items: {
+                '$ref': '#/components/schemas/DagVersionResponse'
+            },
+            type: 'array',
+            title: 'Dag Versions',
+            default: []
+        },
+        has_missed_deadline: {
+            type: 'boolean',
+            title: 'Has Missed Deadline'
+        },
+        has_note: {
+            type: 'boolean',
+            title: 'Has Note'
+        },
         duration: {
-            type: 'integer',
+            type: 'number',
             title: 'Duration',
             readOnly: true
         }
     },
     type: 'object',
-    required: ['dag_id', 'run_id', 'queued_at', 'start_date', 'end_date', 'run_after', 'state', 'run_type', 'duration'],
+    required: ['dag_id', 'run_id', 'queued_at', 'start_date', 'end_date', 'run_after', 'state', 'run_type', 'has_missed_deadline', 'has_note', 'duration'],
     title: 'GridRunsResponse',
     description: 'Base Node serializer for responses.'
 } as const;
@@ -7488,18 +10342,25 @@ export const $GridTISummaries = {
 
 export const $HistoricalMetricDataResponse = {
     properties: {
-        dag_run_types: {
-            '$ref': '#/components/schemas/DAGRunTypes'
-        },
         dag_run_states: {
             '$ref': '#/components/schemas/DAGRunStates'
         },
         task_instance_states: {
             '$ref': '#/components/schemas/TaskInstanceStateCount'
+        },
+        dag_run_counts_are_lower_bounds: {
+            type: 'boolean',
+            title: 'Dag Run Counts Are Lower Bounds',
+            default: false
+        },
+        task_instance_counts_are_lower_bounds: {
+            type: 'boolean',
+            title: 'Task Instance Counts Are Lower Bounds',
+            default: false
         }
     },
     type: 'object',
-    required: ['dag_run_types', 'dag_run_states', 'task_instance_states'],
+    required: ['dag_run_states', 'task_instance_states'],
     title: 'HistoricalMetricDataResponse',
     description: 'Historical Metric Data serializer for responses.'
 } as const;
@@ -7509,6 +10370,10 @@ export const $LightGridTaskInstanceSummary = {
         task_id: {
             type: 'string',
             title: 'Task Id'
+        },
+        task_display_name: {
+            type: 'string',
+            title: 'Task Display Name'
         },
         state: {
             anyOf: [
@@ -7557,17 +10422,33 @@ export const $LightGridTaskInstanceSummary = {
                 }
             ],
             title: 'Max End Date'
+        },
+        dag_version_number: {
+            anyOf: [
+                {
+                    type: 'integer'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Version Number'
+        },
+        has_note: {
+            type: 'boolean',
+            title: 'Has Note',
+            default: false
         }
     },
     type: 'object',
-    required: ['task_id', 'state', 'child_states', 'min_start_date', 'max_end_date'],
+    required: ['task_id', 'task_display_name', 'state', 'child_states', 'min_start_date', 'max_end_date'],
     title: 'LightGridTaskInstanceSummary',
     description: 'Task Instance Summary model for the Grid UI.'
 } as const;
 
 export const $MenuItem = {
     type: 'string',
-    enum: ['Required Actions', 'Assets', 'Audit Log', 'Config', 'Connections', 'Dags', 'Docs', 'Plugins', 'Pools', 'Providers', 'Variables', 'XComs'],
+    enum: ['Required Actions', 'Assets', 'Audit Log', 'Config', 'Connections', 'Dags', 'Deadlines', 'Docs', 'Jobs', 'Plugins', 'Pools', 'Providers', 'Variables', 'XComs'],
     title: 'MenuItem',
     description: 'Define all menu items defined in the menu.'
 } as const;
@@ -7595,6 +10476,139 @@ export const $MenuItemCollectionResponse = {
     description: 'Menu Item Collection serializer for responses.'
 } as const;
 
+export const $NextRunAssetEventResponse = {
+    properties: {
+        id: {
+            type: 'integer',
+            title: 'Id'
+        },
+        name: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Name'
+        },
+        uri: {
+            type: 'string',
+            title: 'Uri'
+        },
+        last_update: {
+            anyOf: [
+                {
+                    type: 'string',
+                    format: 'date-time'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Last Update'
+        },
+        received_count: {
+            type: 'integer',
+            title: 'Received Count',
+            default: 0
+        },
+        required_count: {
+            type: 'integer',
+            title: 'Required Count',
+            default: 1
+        },
+        received_keys: {
+            items: {
+                type: 'string'
+            },
+            type: 'array',
+            title: 'Received Keys'
+        },
+        required_keys: {
+            items: {
+                type: 'string'
+            },
+            type: 'array',
+            title: 'Required Keys'
+        },
+        is_rollup: {
+            type: 'boolean',
+            title: 'Is Rollup',
+            default: false
+        },
+        mapper_error: {
+            type: 'boolean',
+            title: 'Mapper Error',
+            default: false
+        },
+        asset_inactive: {
+            type: 'boolean',
+            title: 'Asset Inactive',
+            default: false
+        }
+    },
+    type: 'object',
+    required: ['id', 'name', 'uri'],
+    title: 'NextRunAssetEventResponse',
+    description: 'One asset event in the ``next_run_assets`` payload.'
+} as const;
+
+export const $NextRunAssetsResponse = {
+    properties: {
+        asset_expression: {
+            anyOf: [
+                {
+                    oneOf: [
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAsset'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAlias'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionRef'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAny'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAll'
+                        }
+                    ]
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Asset Expression'
+        },
+        events: {
+            items: {
+                '$ref': '#/components/schemas/NextRunAssetEventResponse'
+            },
+            type: 'array',
+            title: 'Events'
+        },
+        pending_partition_count: {
+            anyOf: [
+                {
+                    type: 'integer'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Pending Partition Count'
+        }
+    },
+    type: 'object',
+    required: ['events'],
+    title: 'NextRunAssetsResponse',
+    description: 'Response for the ``next_run_assets`` endpoint.'
+} as const;
+
 export const $NodeResponse = {
     properties: {
         id: {
@@ -7609,6 +10623,29 @@ export const $NodeResponse = {
             type: 'string',
             enum: ['join', 'task', 'asset-condition', 'asset', 'asset-alias', 'asset-name-ref', 'asset-uri-ref', 'dag', 'sensor', 'trigger'],
             title: 'Type'
+        },
+        team: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Team'
+        },
+        asset_condition_type: {
+            anyOf: [
+                {
+                    type: 'string',
+                    enum: ['or-gate', 'and-gate']
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Asset Condition Type'
         },
         children: {
             anyOf: [
@@ -7669,23 +10706,321 @@ export const $NodeResponse = {
             ],
             title: 'Operator'
         },
-        asset_condition_type: {
+        ui_color: {
             anyOf: [
                 {
-                    type: 'string',
-                    enum: ['or-gate', 'and-gate']
+                    type: 'string'
                 },
                 {
                     type: 'null'
                 }
             ],
-            title: 'Asset Condition Type'
+            title: 'Ui Color'
+        },
+        ui_fgcolor: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Ui Fgcolor'
         }
     },
     type: 'object',
     required: ['id', 'label', 'type'],
     title: 'NodeResponse',
     description: 'Node serializer for responses.'
+} as const;
+
+export const $OklchColor = {
+    type: 'string'
+} as const;
+
+export const $PartitionedDagRunAssetResponse = {
+    properties: {
+        asset_id: {
+            type: 'integer',
+            title: 'Asset Id'
+        },
+        asset_name: {
+            type: 'string',
+            title: 'Asset Name'
+        },
+        asset_uri: {
+            type: 'string',
+            title: 'Asset Uri'
+        },
+        received: {
+            type: 'boolean',
+            title: 'Received'
+        },
+        received_count: {
+            type: 'integer',
+            title: 'Received Count'
+        },
+        required_count: {
+            type: 'integer',
+            title: 'Required Count'
+        },
+        received_keys: {
+            items: {
+                type: 'string'
+            },
+            type: 'array',
+            title: 'Received Keys'
+        },
+        required_keys: {
+            items: {
+                type: 'string'
+            },
+            type: 'array',
+            title: 'Required Keys'
+        },
+        is_rollup: {
+            type: 'boolean',
+            title: 'Is Rollup',
+            default: false
+        },
+        mapper_error: {
+            type: 'boolean',
+            title: 'Mapper Error',
+            default: false
+        },
+        asset_inactive: {
+            type: 'boolean',
+            title: 'Asset Inactive',
+            default: false
+        }
+    },
+    type: 'object',
+    required: ['asset_id', 'asset_name', 'asset_uri', 'received', 'received_count', 'required_count', 'received_keys', 'required_keys'],
+    title: 'PartitionedDagRunAssetResponse',
+    description: 'Asset info within a partitioned Dag run detail.'
+} as const;
+
+export const $PartitionedDagRunCollectionResponse = {
+    properties: {
+        partitioned_dag_runs: {
+            items: {
+                '$ref': '#/components/schemas/PartitionedDagRunResponse'
+            },
+            type: 'array',
+            title: 'Partitioned Dag Runs'
+        },
+        total: {
+            type: 'integer',
+            title: 'Total'
+        },
+        asset_expressions: {
+            anyOf: [
+                {
+                    additionalProperties: {
+                        anyOf: [
+                            {
+                                oneOf: [
+                                    {
+                                        '$ref': '#/components/schemas/AssetExpressionAsset'
+                                    },
+                                    {
+                                        '$ref': '#/components/schemas/AssetExpressionAlias'
+                                    },
+                                    {
+                                        '$ref': '#/components/schemas/AssetExpressionRef'
+                                    },
+                                    {
+                                        '$ref': '#/components/schemas/AssetExpressionAny'
+                                    },
+                                    {
+                                        '$ref': '#/components/schemas/AssetExpressionAll'
+                                    }
+                                ]
+                            },
+                            {
+                                type: 'null'
+                            }
+                        ]
+                    },
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Asset Expressions'
+        }
+    },
+    type: 'object',
+    required: ['partitioned_dag_runs', 'total'],
+    title: 'PartitionedDagRunCollectionResponse',
+    description: 'Collection of partitioned Dag runs.'
+} as const;
+
+export const $PartitionedDagRunDetailResponse = {
+    properties: {
+        id: {
+            type: 'integer',
+            title: 'Id'
+        },
+        dag_id: {
+            type: 'string',
+            title: 'Dag Id'
+        },
+        partition_key: {
+            type: 'string',
+            title: 'Partition Key'
+        },
+        created_at: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Created At'
+        },
+        updated_at: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Updated At'
+        },
+        created_dag_run_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Created Dag Run Id'
+        },
+        assets: {
+            items: {
+                '$ref': '#/components/schemas/PartitionedDagRunAssetResponse'
+            },
+            type: 'array',
+            title: 'Assets'
+        },
+        total_required: {
+            type: 'integer',
+            title: 'Total Required'
+        },
+        total_received: {
+            type: 'integer',
+            title: 'Total Received'
+        },
+        asset_expression: {
+            anyOf: [
+                {
+                    oneOf: [
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAsset'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAlias'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionRef'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAny'
+                        },
+                        {
+                            '$ref': '#/components/schemas/AssetExpressionAll'
+                        }
+                    ]
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Asset Expression'
+        }
+    },
+    type: 'object',
+    required: ['id', 'dag_id', 'partition_key', 'assets', 'total_required', 'total_received'],
+    title: 'PartitionedDagRunDetailResponse',
+    description: 'Detail of a single partitioned Dag run.'
+} as const;
+
+export const $PartitionedDagRunResponse = {
+    properties: {
+        id: {
+            type: 'integer',
+            title: 'Id'
+        },
+        partition_key: {
+            type: 'string',
+            title: 'Partition Key'
+        },
+        created_at: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Created At'
+        },
+        total_received: {
+            type: 'integer',
+            title: 'Total Received'
+        },
+        total_required: {
+            type: 'integer',
+            title: 'Total Required'
+        },
+        dag_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Dag Id'
+        },
+        state: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'State'
+        },
+        created_dag_run_id: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Created Dag Run Id'
+        }
+    },
+    type: 'object',
+    required: ['id', 'partition_key', 'total_received', 'total_required'],
+    title: 'PartitionedDagRunResponse',
+    description: 'Single partitioned Dag run item.'
 } as const;
 
 export const $StandardHookFields = {
@@ -7833,12 +11168,206 @@ export const $TaskInstanceStateCount = {
         deferred: {
             type: 'integer',
             title: 'Deferred'
+        },
+        awaiting_input: {
+            type: 'integer',
+            title: 'Awaiting Input'
         }
     },
     type: 'object',
-    required: ['no_status', 'removed', 'scheduled', 'queued', 'running', 'success', 'restarting', 'failed', 'up_for_retry', 'up_for_reschedule', 'upstream_failed', 'skipped', 'deferred'],
+    required: ['no_status', 'removed', 'scheduled', 'queued', 'running', 'success', 'restarting', 'failed', 'up_for_retry', 'up_for_reschedule', 'upstream_failed', 'skipped', 'deferred', 'awaiting_input'],
     title: 'TaskInstanceStateCount',
     description: 'TaskInstance serializer for responses.'
+} as const;
+
+export const $TeamCollectionResponse = {
+    properties: {
+        teams: {
+            items: {
+                '$ref': '#/components/schemas/TeamResponse'
+            },
+            type: 'array',
+            title: 'Teams'
+        },
+        total_entries: {
+            type: 'integer',
+            title: 'Total Entries'
+        }
+    },
+    type: 'object',
+    required: ['teams', 'total_entries'],
+    title: 'TeamCollectionResponse',
+    description: 'Team collection serializer for responses.'
+} as const;
+
+export const $TeamResponse = {
+    properties: {
+        name: {
+            type: 'string',
+            title: 'Name'
+        }
+    },
+    type: 'object',
+    required: ['name'],
+    title: 'TeamResponse',
+    description: 'Base serializer for Team.'
+} as const;
+
+export const $Theme = {
+    properties: {
+        tokens: {
+            anyOf: [
+                {
+                    additionalProperties: {
+                        '$ref': '#/components/schemas/ThemeColors'
+                    },
+                    propertyNames: {
+                        const: 'colors'
+                    },
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Tokens'
+        },
+        globalCss: {
+            anyOf: [
+                {
+                    additionalProperties: {
+                        additionalProperties: true,
+                        type: 'object'
+                    },
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Globalcss'
+        },
+        icon: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Icon'
+        },
+        icon_dark_mode: {
+            anyOf: [
+                {
+                    type: 'string'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Icon Dark Mode'
+        }
+    },
+    type: 'object',
+    title: 'Theme',
+    description: "JSON to modify Chakra's theme."
+} as const;
+
+export const $ThemeColors = {
+    properties: {
+        brand: {
+            anyOf: [
+                {
+                    additionalProperties: {
+                        additionalProperties: {
+                            '$ref': '#/components/schemas/OklchColor'
+                        },
+                        propertyNames: {
+                            const: 'value'
+                        },
+                        type: 'object'
+                    },
+                    propertyNames: {
+                        enum: ['50', '100', '200', '300', '400', '500', '600', '700', '800', '900', '950']
+                    },
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Brand'
+        },
+        gray: {
+            anyOf: [
+                {
+                    additionalProperties: {
+                        additionalProperties: {
+                            '$ref': '#/components/schemas/OklchColor'
+                        },
+                        propertyNames: {
+                            const: 'value'
+                        },
+                        type: 'object'
+                    },
+                    propertyNames: {
+                        enum: ['50', '100', '200', '300', '400', '500', '600', '700', '800', '900', '950']
+                    },
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Gray'
+        },
+        black: {
+            anyOf: [
+                {
+                    additionalProperties: {
+                        '$ref': '#/components/schemas/OklchColor'
+                    },
+                    propertyNames: {
+                        const: 'value'
+                    },
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'Black'
+        },
+        white: {
+            anyOf: [
+                {
+                    additionalProperties: {
+                        '$ref': '#/components/schemas/OklchColor'
+                    },
+                    propertyNames: {
+                        const: 'value'
+                    },
+                    type: 'object'
+                },
+                {
+                    type: 'null'
+                }
+            ],
+            title: 'White'
+        }
+    },
+    type: 'object',
+    title: 'ThemeColors',
+    description: 'Color tokens for the UI theme. All fields are optional; at least one must be provided.'
+} as const;
+
+export const $TokenType = {
+    type: 'string',
+    enum: ['api', 'cli'],
+    title: 'TokenType',
+    description: 'Type of token to generate.'
 } as const;
 
 export const $UIAlert = {

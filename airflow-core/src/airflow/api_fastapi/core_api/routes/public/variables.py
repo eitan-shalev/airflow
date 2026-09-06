@@ -19,15 +19,14 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, status
-from fastapi.exceptions import RequestValidationError
-from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from airflow.api_fastapi.common.db.common import SessionDep, paginated_select
 from airflow.api_fastapi.common.parameters import (
     QueryLimit,
     QueryOffset,
     QueryVariableKeyPatternSearch,
+    QueryVariableKeyPrefixPatternSearch,
     SortParam,
 )
 from airflow.api_fastapi.common.router import AirflowRouter
@@ -43,7 +42,10 @@ from airflow.api_fastapi.core_api.security import (
     requires_access_variable,
     requires_access_variable_bulk,
 )
-from airflow.api_fastapi.core_api.services.public.variables import BulkVariableService
+from airflow.api_fastapi.core_api.services.public.variables import (
+    BulkVariableService,
+    update_orm_from_pydantic,
+)
 from airflow.api_fastapi.logging.decorators import action_logging
 from airflow.models.variable import Variable
 
@@ -61,7 +63,11 @@ def delete_variable(
     session: SessionDep,
 ):
     """Delete a variable entry."""
-    if Variable.delete(variable_key, session) == 0:
+    # Like the other endpoints (get, patch), we do not use Variable.delete/get/set here because these methods
+    # are intended to be used in task execution environment (execution API)
+    result = session.execute(delete(Variable).where(Variable.key == variable_key))
+    rows = getattr(result, "rowcount", 0) or 0
+    if rows == 0:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, f"The Variable with key: `{variable_key}` was not found"
         )
@@ -98,7 +104,7 @@ def get_variables(
         SortParam,
         Depends(
             SortParam(
-                ["key", "id", "_val", "description", "is_encrypted"],
+                ["key", "id", "_val", "description", "is_encrypted", "team_name"],
                 Variable,
             ).dynamic_depends()
         ),
@@ -106,11 +112,12 @@ def get_variables(
     readable_variables_filter: ReadableVariablesFilterDep,
     session: SessionDep,
     variable_key_pattern: QueryVariableKeyPatternSearch,
+    variable_key_prefix_pattern: QueryVariableKeyPrefixPatternSearch,
 ) -> VariableCollectionResponse:
     """Get all Variables entries."""
     variable_select, total_entries = paginated_select(
         statement=select(Variable),
-        filters=[variable_key_pattern, readable_variables_filter],
+        filters=[variable_key_pattern, variable_key_prefix_pattern, readable_variables_filter],
         order_by=order_by,
         offset=offset,
         limit=limit,
@@ -142,31 +149,7 @@ def patch_variable(
     update_mask: list[str] | None = Query(None),
 ) -> VariableResponse:
     """Update a variable by key."""
-    if patch_body.key != variable_key:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Invalid body, key from request body doesn't match uri parameter"
-        )
-    non_update_fields = {"key"}
-    variable = session.scalar(select(Variable).filter_by(key=variable_key).limit(1))
-    if not variable:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, f"The Variable with key: `{variable_key}` was not found"
-        )
-
-    fields_to_update = patch_body.model_fields_set
-    if update_mask:
-        fields_to_update = fields_to_update.intersection(update_mask)
-    else:
-        try:
-            VariableBody(**patch_body.model_dump())
-        except ValidationError as e:
-            raise RequestValidationError(errors=e.errors())
-
-    data = patch_body.model_dump(include=fields_to_update - non_update_fields, by_alias=True)
-
-    for key, val in data.items():
-        setattr(variable, key, val)
-
+    variable = update_orm_from_pydantic(variable_key, patch_body, update_mask, session)
     return variable
 
 
@@ -192,6 +175,11 @@ def post_variable(
     Variable.set(**post_body.model_dump(), session=session)
 
     variable = session.scalar(select(Variable).where(Variable.key == post_body.key).limit(1))
+    if variable is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Variable with key: `{post_body.key}` was not found",
+        )
 
     return variable
 

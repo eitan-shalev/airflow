@@ -17,7 +17,6 @@
 # under the License.
 from __future__ import annotations
 
-import contextlib
 import importlib
 import inspect
 import logging
@@ -27,9 +26,11 @@ from unittest import mock
 
 import pytest
 
+from airflow._shared.module_loading import qualname
+from airflow.configuration import conf
 from airflow.listeners.listener import get_listener_manager
+from airflow.partition_mappers.window import Window
 from airflow.plugins_manager import AirflowPlugin
-from airflow.utils.module_loading import qualname
 
 from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.markers import skip_if_force_lowest_dependencies_marker
@@ -55,73 +56,125 @@ def _clean_listeners():
     get_listener_manager().clear()
 
 
-@pytest.fixture
-def mock_metadata_distribution(mocker):
-    @contextlib.contextmanager
-    def wrapper(*args, **kwargs):
-        if sys.version_info < (3, 12):
-            patch_fq = "importlib_metadata.distributions"
-        else:
-            patch_fq = "importlib.metadata.distributions"
-
-        with mock.patch(patch_fq, *args, **kwargs) as m:
-            yield m
-
-    return wrapper
-
-
 class TestPluginsManager:
     @pytest.fixture(autouse=True)
     def clean_plugins(self):
         from airflow import plugins_manager
 
-        plugins_manager.loaded_plugins = set()
-        plugins_manager.plugins = []
+        plugins_manager._get_plugins.cache_clear()
 
     def test_no_log_when_no_plugins(self, caplog):
-        pytest.importorskip("flask_appbuilder")  # Remove after upgrading to FAB5
-
         with mock_plugin_manager(plugins=[]):
             from airflow import plugins_manager
 
             plugins_manager.ensure_plugins_loaded()
 
-        assert caplog.record_tuples == []
+        assert [r for r in caplog.record_tuples if not r[0].startswith("opentelemetry.")] == []
 
     def test_loads_filesystem_plugins(self, caplog):
         from airflow import plugins_manager
 
-        with mock.patch("airflow.plugins_manager.plugins", []):
-            plugins_manager.load_plugins_from_plugin_directory()
+        plugins, import_errors = plugins_manager._load_plugins_from_plugin_directory(
+            plugins_folder=conf.get("core", "plugins_folder"),
+            load_examples=conf.getboolean("core", "load_examples"),
+            example_plugins_module="airflow.example_dags.plugins",
+        )
 
-            assert len(plugins_manager.plugins) == 10
-            for plugin in plugins_manager.plugins:
-                if "AirflowTestOnLoadPlugin" in str(plugin):
-                    assert plugin.name == "postload"
-                    break
-            else:
-                pytest.fail("Wasn't able to find a registered `AirflowTestOnLoadPlugin`")
+        assert len(plugins) == 13
+        assert not import_errors
+        for plugin in plugins:
+            if "AirflowTestOnLoadPlugin" in str(plugin):
+                assert plugin.name == "preload"  # on_init() is not called here
+                break
+        else:
+            pytest.fail("Wasn't able to find a registered `AirflowTestOnLoadPlugin`")
 
-            assert caplog.record_tuples == []
+        assert [r for r in caplog.record_tuples if not r[0].startswith("opentelemetry.")] == []
 
     def test_loads_filesystem_plugins_exception(self, caplog, tmp_path):
         from airflow import plugins_manager
 
-        with mock.patch("airflow.plugins_manager.plugins", []):
-            (tmp_path / "testplugin.py").write_text(ON_LOAD_EXCEPTION_PLUGIN)
+        (tmp_path / "testplugin.py").write_text(ON_LOAD_EXCEPTION_PLUGIN)
 
-            with conf_vars({("core", "plugins_folder"): os.fspath(tmp_path)}):
-                plugins_manager.load_plugins_from_plugin_directory()
+        with (
+            conf_vars({("core", "plugins_folder"): os.fspath(tmp_path)}),
+            mock.patch("airflow.plugins_manager._load_entrypoint_plugins", return_value=([], [])),
+            mock.patch("airflow.plugins_manager._load_providers_plugins", return_value=([], [])),
+        ):
+            plugins, import_errors = plugins_manager._get_plugins()
 
-            assert len(plugins_manager.plugins) == 3  # three are loaded from examples
+        assert len(plugins) == 6  # four are loaded from examples
+        assert len(import_errors) == 1
 
-            received_logs = caplog.text
-            assert "Failed to import plugin" in received_logs
-            assert "testplugin.py" in received_logs
+        received_logs = caplog.text
+        assert "Failed to load plugin" in received_logs
+        assert "testplugin.py" in received_logs
+
+    def test_duplicate_plugin_name_does_not_prevent_loading_subsequent_plugins(self):
+        from airflow import plugins_manager
+
+        class PluginA(AirflowPlugin):
+            name = "plugin_a"
+
+        class PluginB(AirflowPlugin):
+            name = "plugin_b"
+
+        class PluginC(AirflowPlugin):
+            name = "plugin_c"
+
+        plugin_a = PluginA()
+        plugin_b = PluginB()
+        plugin_b_dup = PluginB()
+        plugin_c = PluginC()
+
+        with (
+            mock.patch(
+                "airflow.plugins_manager._load_plugins_from_plugin_directory",
+                return_value=([plugin_a, plugin_b], {}),
+            ),
+            mock.patch(
+                "airflow.plugins_manager._load_entrypoint_plugins",
+                return_value=([plugin_b_dup, plugin_c], {}),
+            ),
+            mock.patch("airflow.plugins_manager._load_providers_plugins", return_value=([], {})),
+        ):
+            plugins, import_errors = plugins_manager._get_plugins()
+
+        plugin_names = [p.name for p in plugins]
+        assert "plugin_a" in plugin_names
+        assert "plugin_b" in plugin_names
+        assert "plugin_c" in plugin_names
+        assert len(plugins) == 3
+
+    def test_duplicate_plugin_name_is_reported_as_import_error(self):
+        from airflow import plugins_manager
+
+        class PluginA(AirflowPlugin):
+            name = "plugin_a"
+
+        class PluginADuplicateName(AirflowPlugin):
+            name = "plugin_a"
+
+        plugin_a = PluginA()
+        plugin_a_dup = PluginADuplicateName()
+
+        with (
+            mock.patch(
+                "airflow.plugins_manager._load_plugins_from_plugin_directory",
+                return_value=([plugin_a], {}),
+            ),
+            mock.patch(
+                "airflow.plugins_manager._load_entrypoint_plugins",
+                return_value=([plugin_a_dup], {}),
+            ),
+            mock.patch("airflow.plugins_manager._load_providers_plugins", return_value=([], {})),
+        ):
+            plugins, import_errors = plugins_manager._get_plugins()
+
+        assert [p.name for p in plugins] == ["plugin_a"]
+        assert len(import_errors) == 1
 
     def test_should_warning_about_incompatible_plugins(self, caplog):
-        pytest.importorskip("flask_appbuilder")  # Remove after upgrading to FAB5
-
         class AirflowAdminViewsPlugin(AirflowPlugin):
             name = "test_admin_views_plugin"
 
@@ -138,7 +191,7 @@ class TestPluginsManager:
         ):
             from airflow import plugins_manager
 
-            plugins_manager.initialize_flask_plugins()
+            plugins_manager.get_flask_plugins()
 
         assert caplog.record_tuples == [
             (
@@ -156,8 +209,6 @@ class TestPluginsManager:
         ]
 
     def test_should_warning_about_conflicting_url_route(self, caplog):
-        pytest.importorskip("flask_appbuilder")  # Remove after upgrading to FAB5
-
         class TestPluginA(AirflowPlugin):
             name = "test_plugin_a"
 
@@ -175,18 +226,18 @@ class TestPluginsManager:
         ):
             from airflow import plugins_manager
 
-            plugins_manager.initialize_ui_plugins()
+            external_views, react_apps = plugins_manager._get_ui_plugins()
 
             # Verify that the conflicting external view and react app are not loaded
-            plugin_b = next(plugin for plugin in plugins_manager.plugins if plugin.name == "test_plugin_b")
+            plugin_b = next(
+                plugin for plugin in plugins_manager._get_plugins()[0] if plugin.name == "test_plugin_b"
+            )
             assert plugin_b.external_views == []
             assert plugin_b.react_apps == []
-            assert len(plugins_manager.external_views) == 1
-            assert len(plugins_manager.react_apps) == 0
+            assert len(external_views) == 1
+            assert len(react_apps) == 0
 
     def test_should_warning_about_external_views_or_react_app_wrong_object(self, caplog):
-        pytest.importorskip("flask_appbuilder")  # Remove after upgrading to FAB5
-
         class TestPluginA(AirflowPlugin):
             name = "test_plugin_a"
 
@@ -199,14 +250,16 @@ class TestPluginsManager:
         ):
             from airflow import plugins_manager
 
-            plugins_manager.initialize_ui_plugins()
+            external_views, react_apps = plugins_manager._get_ui_plugins()
 
             # Verify that the conflicting external view and react app are not loaded
-            plugin_a = next(plugin for plugin in plugins_manager.plugins if plugin.name == "test_plugin_a")
+            plugin_a = next(
+                plugin for plugin in plugins_manager._get_plugins()[0] if plugin.name == "test_plugin_a"
+            )
             assert plugin_a.external_views == [{"url_route": "/test_route"}]
             assert plugin_a.react_apps == [{"url_route": "/test_route_react_app"}]
-            assert len(plugins_manager.external_views) == 1
-            assert len(plugins_manager.react_apps) == 1
+            assert len(external_views) == 1
+            assert len(react_apps) == 1
 
         assert caplog.record_tuples == [
             (
@@ -223,9 +276,139 @@ class TestPluginsManager:
             ),
         ]
 
-    def test_should_not_warning_about_fab_plugins(self, caplog):
-        pytest.importorskip("flask_appbuilder")  # Remove after upgrading to FAB5
+    @pytest.mark.parametrize(
+        ("applies_to", "error"),
+        [
+            pytest.param(
+                ["ml"],
+                "expected a dictionary, got list",
+                id="not-a-dict",
+            ),
+            pytest.param(
+                {"dag_tag": ["ml"]},
+                "unknown criteria ['dag_tag'], expected any of "
+                "['dag_ids', 'dag_tags', 'operator_names', 'operators', 'task_ids']",
+                id="unknown-key",
+            ),
+            pytest.param(
+                {1: ["ml"], "dag_tag": ["ml"]},
+                "criterion names must be strings, got [1]",
+                id="non-string-and-unknown-keys",
+            ),
+            pytest.param(
+                {"dag_ids": "my_dag"},
+                "'dag_ids' must be a list of strings, got 'my_dag'",
+                id="scalar-instead-of-list",
+            ),
+            pytest.param(
+                {"dag_ids": ["my_dag", 3]},
+                "'dag_ids' must be a list of strings, got ['my_dag', 3]",
+                id="list-with-non-string",
+            ),
+        ],
+    )
+    def test_strips_and_warns_about_malformed_applies_to(self, applies_to, error, caplog):
+        class TestPlugin(AirflowPlugin):
+            name = "test_plugin"
 
+            external_views = [
+                {"name": "Scoped", "url_route": "/scoped", "destination": "dag", "applies_to": applies_to}
+            ]
+
+        with (
+            mock_plugin_manager(plugins=[TestPlugin()]),
+            caplog.at_level(logging.WARNING, logger="airflow.plugins_manager"),
+        ):
+            from airflow import plugins_manager
+
+            external_views, _ = plugins_manager._get_ui_plugins()
+
+            assert external_views == [{"name": "Scoped", "url_route": "/scoped", "destination": "dag"}]
+
+        assert caplog.record_tuples == [
+            (
+                "airflow.plugins_manager",
+                logging.WARNING,
+                f"Plugin 'test_plugin' has an external view 'Scoped' with an invalid 'applies_to': {error}. "
+                "The scoping will be ignored.",
+            ),
+        ]
+
+    def test_warns_about_criteria_a_destination_cannot_evaluate(self, caplog):
+        class TestPlugin(AirflowPlugin):
+            name = "test_plugin"
+
+            react_apps = [
+                {
+                    "name": "Scoped",
+                    "url_route": "/scoped",
+                    "destination": "dag_run",
+                    "applies_to": {"dag_tags": ["ml"], "task_ids": ["train"], "operators": ["Op"]},
+                }
+            ]
+
+        with (
+            mock_plugin_manager(plugins=[TestPlugin()]),
+            caplog.at_level(logging.WARNING, logger="airflow.plugins_manager"),
+        ):
+            from airflow import plugins_manager
+
+            _, react_apps = plugins_manager._get_ui_plugins()
+
+            # The block is only warned about, never stripped: task criteria are ignored on a
+            # Dag-level page by design so one block can be shared across destinations.
+            assert react_apps == [
+                {
+                    "name": "Scoped",
+                    "url_route": "/scoped",
+                    "destination": "dag_run",
+                    "applies_to": {"dag_tags": ["ml"], "task_ids": ["train"], "operators": ["Op"]},
+                }
+            ]
+
+        assert caplog.record_tuples == [
+            (
+                "airflow.plugins_manager",
+                logging.WARNING,
+                "Plugin 'test_plugin' has a React App 'Scoped' with destination 'dag_run', which cannot "
+                "evaluate ['operators', 'task_ids']. Those criteria will be ignored.",
+            ),
+        ]
+
+    def test_does_not_warn_about_valid_applies_to(self, caplog):
+        class TestPlugin(AirflowPlugin):
+            name = "test_plugin"
+
+            external_views = [
+                {
+                    "name": "Scoped",
+                    "url_route": "/scoped",
+                    "destination": "task",
+                    "applies_to": {
+                        "dag_tags": ["ml"],
+                        "task_ids": ["train"],
+                        "operator_names": ["@task.bash"],
+                    },
+                }
+            ]
+
+        with (
+            mock_plugin_manager(plugins=[TestPlugin()]),
+            caplog.at_level(logging.WARNING, logger="airflow.plugins_manager"),
+        ):
+            from airflow import plugins_manager
+
+            external_views, _ = plugins_manager._get_ui_plugins()
+
+            assert external_views[0]["applies_to"] == {
+                "dag_tags": ["ml"],
+                "task_ids": ["train"],
+                "operator_names": ["@task.bash"],
+            }
+
+        assert caplog.record_tuples == []
+
+    def test_should_not_warning_about_fab_plugins(self, caplog):
         class AirflowAdminViewsPlugin(AirflowPlugin):
             name = "test_admin_views_plugin"
 
@@ -242,13 +425,11 @@ class TestPluginsManager:
         ):
             from airflow import plugins_manager
 
-            plugins_manager.initialize_flask_plugins()
+            plugins_manager.get_flask_plugins()
 
         assert caplog.record_tuples == []
 
     def test_should_not_warning_about_fab_and_flask_admin_plugins(self, caplog):
-        pytest.importorskip("flask_appbuilder")  # Remove after upgrading to FAB5
-
         class AirflowAdminViewsPlugin(AirflowPlugin):
             name = "test_admin_views_plugin"
 
@@ -267,38 +448,9 @@ class TestPluginsManager:
         ):
             from airflow import plugins_manager
 
-            plugins_manager.initialize_flask_plugins()
+            plugins_manager.get_flask_plugins()
 
         assert caplog.record_tuples == []
-
-    def test_entrypoint_plugin_errors_dont_raise_exceptions(self, mock_metadata_distribution, caplog):
-        """
-        Test that Airflow does not raise an error if there is any Exception because of a plugin.
-        """
-        from airflow.plugins_manager import import_errors, load_entrypoint_plugins
-
-        mock_dist = mock.Mock()
-        mock_dist.metadata = {"Name": "test-dist"}
-
-        mock_entrypoint = mock.Mock()
-        mock_entrypoint.name = "test-entrypoint"
-        mock_entrypoint.group = "airflow.plugins"
-        mock_entrypoint.module = "test.plugins.test_plugins_manager"
-        mock_entrypoint.load.side_effect = ImportError("my_fake_module not found")
-        mock_dist.entry_points = [mock_entrypoint]
-
-        with (
-            mock_metadata_distribution(return_value=[mock_dist]),
-            caplog.at_level(logging.ERROR, logger="airflow.plugins_manager"),
-        ):
-            load_entrypoint_plugins()
-
-            received_logs = caplog.text
-            # Assert Traceback is shown too
-            assert "Traceback (most recent call last):" in received_logs
-            assert "my_fake_module not found" in received_logs
-            assert "Failed to import plugin test-entrypoint" in received_logs
-            assert ("test.plugins.test_plugins_manager", "my_fake_module not found") in import_errors.items()
 
     def test_registering_plugin_macros(self, request):
         """
@@ -338,15 +490,20 @@ class TestPluginsManager:
             # Verify that the symbol table in airflow.sdk.execution_time.macros has been updated with an entry for
             # this plugin, this is necessary in order to allow the plugin's macros to be used when
             # rendering templates.
-            assert hasattr(macros, MacroPlugin.name)
+            assert hasattr(macros, MacroPlugin.name or "")
 
     @skip_if_force_lowest_dependencies_marker
     def test_registering_plugin_listeners(self):
         from airflow import plugins_manager
 
         assert not get_listener_manager().has_listeners
-        with mock.patch("airflow.plugins_manager.plugins", []):
-            plugins_manager.load_plugins_from_plugin_directory()
+        with mock_plugin_manager(
+            plugins=plugins_manager._load_plugins_from_plugin_directory(
+                plugins_folder=conf.get("core", "plugins_folder"),
+                load_examples=conf.getboolean("core", "load_examples"),
+                example_plugins_module="airflow.example_dags.plugins",
+            )[0]
+        ):
             plugins_manager.integrate_listener_plugins(get_listener_manager())
 
             assert get_listener_manager().has_listeners
@@ -363,15 +520,12 @@ class TestPluginsManager:
     def test_should_import_plugin_from_providers(self):
         from airflow import plugins_manager
 
-        with mock.patch("airflow.plugins_manager.plugins", []):
-            assert len(plugins_manager.plugins) == 0
-            plugins_manager.load_providers_plugins()
-            assert len(plugins_manager.plugins) >= 2
+        plugins, import_errors = plugins_manager._load_providers_plugins()
+        assert len(plugins) >= 2
+        assert not import_errors
 
     @skip_if_force_lowest_dependencies_marker
     def test_does_not_double_import_entrypoint_provider_plugins(self):
-        pytest.importorskip("flask_appbuilder")  # Remove after upgrading to FAB5
-
         from airflow import plugins_manager
 
         mock_entrypoint = mock.Mock()
@@ -383,40 +537,106 @@ class TestPluginsManager:
         mock_dist.version = "1.0.0"
         mock_dist.entry_points = [mock_entrypoint]
 
-        with mock.patch("airflow.plugins_manager.plugins", []):
-            assert len(plugins_manager.plugins) == 0
-            plugins_manager.load_entrypoint_plugins()
-            plugins_manager.load_providers_plugins()
-            assert len(plugins_manager.plugins) == 4
+        # Mock/skip loading from plugin dir
+        with mock.patch("airflow.plugins_manager._load_plugins_from_plugin_directory", return_value=([], [])):
+            plugins = plugins_manager._get_plugins()[0]
+        assert len(plugins) == 7
 
 
-class TestPluginsDirectorySource:
-    def test_should_return_correct_path_name(self):
+class TestWindowPluginRegistration:
+    """``windows`` plugin attribute surfaces via ``get_windows_plugins()``."""
+
+    def test_windows_attribute_surfaces_via_getter(self):
         from airflow import plugins_manager
 
-        source = plugins_manager.PluginsDirectorySource(__file__)
-        assert source.path == "test_plugins_manager.py"
-        assert str(source) == "$PLUGINS_FOLDER/test_plugins_manager.py"
-        assert source.__html__() == "<em>$PLUGINS_FOLDER/</em>test_plugins_manager.py"
+        class MyCustomWindow(Window):
+            name = "test_window_plugin"
+
+            def to_upstream(self, decoded_downstream):
+                return [decoded_downstream]
+
+        class MyWindowPlugin(AirflowPlugin):
+            name = "test_window_plugin"
+            windows = [MyCustomWindow]
+
+        with mock_plugin_manager(plugins=[MyWindowPlugin()]):
+            plugins_manager.get_windows_plugins.cache_clear()
+            registered = plugins_manager.get_windows_plugins()
+
+        assert qualname(MyCustomWindow) in registered
+        assert registered[qualname(MyCustomWindow)] is MyCustomWindow
 
 
-class TestEntryPointSource:
-    def test_should_return_correct_source_details(self, mock_metadata_distribution):
+class TestPluginTeamName:
+    """``team_name`` exposure through ``get_plugin_info`` (attribute default is covered
+    by the shared plugins_manager tests)."""
+
+    def test_get_plugin_info_includes_team_name(self):
         from airflow import plugins_manager
 
-        mock_entrypoint = mock.Mock()
-        mock_entrypoint.name = "test-entrypoint-plugin"
-        mock_entrypoint.module = "module_name_plugin"
+        class GlobalPlugin(AirflowPlugin):
+            name = "global_plugin"
 
-        mock_dist = mock.Mock()
-        mock_dist.metadata = {"Name": "test-entrypoint-plugin"}
-        mock_dist.version = "1.0.0"
-        mock_dist.entry_points = [mock_entrypoint]
+        class TeamPlugin(AirflowPlugin):
+            name = "team_plugin"
+            team_name = "team_a"
 
-        with mock_metadata_distribution(return_value=[mock_dist]):
-            plugins_manager.load_entrypoint_plugins()
+        with mock_plugin_manager(plugins=[GlobalPlugin(), TeamPlugin()]):
+            info_by_name = {info["name"]: info for info in plugins_manager.get_plugin_info()}
 
-        source = plugins_manager.EntryPointSource(mock_entrypoint, mock_dist)
-        assert str(mock_entrypoint) == source.entrypoint
-        assert "test-entrypoint-plugin==1.0.0: " + str(mock_entrypoint) == str(source)
-        assert "<em>test-entrypoint-plugin==1.0.0:</em> " + str(mock_entrypoint) == source.__html__()
+        assert info_by_name["global_plugin"]["team_name"] is None
+        assert info_by_name["team_plugin"]["team_name"] == "team_a"
+
+
+class TestValidatePluginTeams:
+    """``validate_plugin_teams`` startup validation."""
+
+    def test_no_op_when_multi_team_disabled(self):
+        from airflow import plugins_manager
+
+        class TeamPlugin(AirflowPlugin):
+            name = "team_plugin"
+            team_name = "nonexistent_team"
+
+        # multi_team defaults to False; validation must return early without hitting
+        # the database, even for a plugin pointing at a nonexistent team.
+        with mock_plugin_manager(plugins=[TeamPlugin()]):
+            with mock.patch("airflow.models.team.Team.get_all_team_names") as mock_get_all_team_names:
+                plugins_manager.validate_plugin_teams()
+        mock_get_all_team_names.assert_not_called()
+
+    @conf_vars({("core", "multi_team"): "True"})
+    @mock.patch("airflow.models.team.Team.get_all_team_names", return_value={"team_a"})
+    def test_passes_for_global_and_known_team_plugins(self, mock_get_all_team_names):
+        from airflow import plugins_manager
+
+        class GlobalPlugin(AirflowPlugin):
+            name = "global_plugin"
+
+        class TeamPlugin(AirflowPlugin):
+            name = "team_plugin"
+            team_name = "team_a"
+
+        with mock_plugin_manager(plugins=[GlobalPlugin(), TeamPlugin()]):
+            plugins_manager.validate_plugin_teams()
+
+    @conf_vars({("core", "multi_team"): "True"})
+    @mock.patch("airflow.models.team.Team.get_all_team_names", return_value={"team_a"})
+    def test_get_fastapi_plugins_records_unknown_team_import_error(self, mock_get_all_team_names, caplog):
+        from airflow import plugins_manager
+
+        class TeamPlugin(AirflowPlugin):
+            name = "team_plugin"
+            team_name = "unknown_team"
+
+        # get_fastapi_plugins() is what init_plugins() calls, so validation runs
+        # automatically: a plugin on a nonexistent team is recorded as an import error
+        # and warned, not raised, so the API server and every other plugin still start.
+        with mock_plugin_manager(plugins=[TeamPlugin()], import_errors={}):
+            with caplog.at_level(logging.WARNING, logger="airflow.plugins_manager"):
+                plugins_manager.get_fastapi_plugins()
+            recorded = plugins_manager.get_import_errors()
+
+        assert "unknown_team" in recorded["team_plugin"]
+        warnings = [msg for _, level, msg in caplog.record_tuples if level == logging.WARNING]
+        assert any("team_plugin" in msg and "unknown_team" in msg for msg in warnings)

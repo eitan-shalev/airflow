@@ -34,18 +34,14 @@ from google.api_core.exceptions import GoogleAPICallError
 from google.cloud.exceptions import NotFound
 from google.cloud.storage.retry import DEFAULT_RETRY
 
-from airflow.exceptions import AirflowException
 from airflow.providers.common.compat.assets import Asset
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks import gcs
 from airflow.providers.google.cloud.hooks.gcs import _fallback_object_url_to_object_name_and_bucket_name
 from airflow.providers.google.common.consts import CLIENT_INFO
-
-try:
-    from airflow.sdk import timezone
-except ImportError:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
 from airflow.version import version
 
+from tests_common.test_utils.compat import timezone
 from unit.google.cloud.utils.base_gcp_mock import mock_base_gcp_hook_default_project_id
 
 BASE_STRING = "airflow.providers.google.common.hooks.base_google.{}"
@@ -96,7 +92,7 @@ class TestGCSHookHelperFunctions:
         assert gcs._parse_gcs_url("gs://bucket/") == ("bucket", "")
 
     @pytest.mark.parametrize(
-        "json_value, parsed_value",
+        ("json_value", "parsed_value"),
         [
             ("[1, 2, 3]", [1, 2, 3]),
             ('"string value"', "string value"),
@@ -181,18 +177,24 @@ class TestGCSHook:
         ):
             self.gcs_hook = gcs.GCSHook(gcp_conn_id="test")
 
+    @mock.patch(BASE_STRING.format("GoogleBaseHook.get_client_options"))
     @mock.patch(
         BASE_STRING.format("GoogleBaseHook.get_credentials_and_project_id"),
         return_value=("CREDENTIALS", "PROJECT_ID"),
     )
     @mock.patch(GCS_STRING.format("GoogleBaseHook.get_connection"))
     @mock.patch("google.cloud.storage.Client")
-    def test_storage_client_creation(self, mock_client, mock_get_connection, mock_get_creds_and_project_id):
+    def test_storage_client_creation(
+        self, mock_client, mock_get_connection, mock_get_creds_and_project_id, mock_get_client_options
+    ):
         hook = gcs.GCSHook()
         result = hook.get_conn()
         # test that Storage Client is called with required arguments
         mock_client.assert_called_once_with(
-            client_info=CLIENT_INFO, credentials="CREDENTIALS", project="PROJECT_ID"
+            client_info=CLIENT_INFO,
+            credentials="CREDENTIALS",
+            project="PROJECT_ID",
+            client_options=mock_get_client_options.return_value,
         )
         assert mock_client.return_value == result
 
@@ -499,6 +501,34 @@ class TestGCSHook:
                 destination_object=destination_object,
             )
 
+    @pytest.mark.parametrize(
+        ("retain_until_time", "retention_mode", "expected_error"),
+        [
+            pytest.param(
+                None,
+                "Locked",
+                "retention_mode cannot be set without retain_until_time.",
+                id="mode_without_retain_until_time",
+            ),
+            pytest.param(
+                datetime(2027, 1, 1),
+                "Invalid",
+                "retention_mode must be 'Locked' or 'Unlocked'",
+                id="invalid_mode_value",
+            ),
+        ],
+    )
+    def test_rewrite_invalid_retention_params(self, retain_until_time, retention_mode, expected_error):
+        with pytest.raises(ValueError, match=expected_error):
+            self.gcs_hook.rewrite(
+                source_bucket="test-source-bucket",
+                source_object="test-source-object",
+                destination_bucket="test-dest-bucket",
+                destination_object="test-dest-object",
+                retain_until_time=retain_until_time,
+                retention_mode=retention_mode,
+            )
+
     @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
     def test_rewrite_exposes_lineage(self, mock_service, hook_lineage_collector):
         source_bucket_name = "test-source-bucket"
@@ -532,21 +562,124 @@ class TestGCSHook:
 
     @mock.patch("google.cloud.storage.Bucket")
     @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
-    def test_delete(self, mock_service, mock_bucket):
+    def test_rewrite_with_retention(self, mock_service, mock_bucket):
+        source_bucket = "test-source-bucket"
+        source_object = "test-source-object"
+        destination_bucket = "test-dest-bucket"
+        destination_object = "test-dest-object"
+        retain_until = datetime(2027, 1, 1)
+
+        source_blob = mock_bucket.blob(source_object)
+
+        # Given
+        bucket_mock = mock_service.return_value.bucket
+        bucket_mock.return_value = mock_bucket
+        get_blob_method = bucket_mock.return_value.blob
+        destination_blob = get_blob_method.return_value
+        rewrite_method = destination_blob.rewrite
+        rewrite_method.side_effect = [(None, mock.ANY, mock.ANY)]
+
+        # When
+        self.gcs_hook.rewrite(
+            source_bucket=source_bucket,
+            source_object=source_object,
+            destination_bucket=destination_bucket,
+            destination_object=destination_object,
+            retain_until_time=retain_until,
+            retention_mode="Locked",
+        )
+
+        # Then
+        rewrite_method.assert_called_once_with(source=source_blob)
+        assert destination_blob.retention.mode == "Locked"
+        assert destination_blob.retention.retain_until_time == retain_until
+        destination_blob.patch.assert_called_once()
+
+    @mock.patch("google.cloud.storage.Bucket")
+    @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
+    def test_rewrite_without_retention_does_not_patch(self, mock_service, mock_bucket):
+        source_bucket = "test-source-bucket"
+        source_object = "test-source-object"
+        destination_bucket = "test-dest-bucket"
+        destination_object = "test-dest-object"
+
+        mock_bucket.blob(source_object)
+
+        # Given
+        bucket_mock = mock_service.return_value.bucket
+        bucket_mock.return_value = mock_bucket
+        get_blob_method = bucket_mock.return_value.blob
+        destination_blob = get_blob_method.return_value
+        rewrite_method = destination_blob.rewrite
+        rewrite_method.side_effect = [(None, mock.ANY, mock.ANY)]
+
+        # When
+        self.gcs_hook.rewrite(
+            source_bucket=source_bucket,
+            source_object=source_object,
+            destination_bucket=destination_bucket,
+            destination_object=destination_object,
+        )
+
+        # Then — no retention set, so patch should not be called
+        destination_blob.patch.assert_not_called()
+
+    @mock.patch("google.cloud.storage.Bucket")
+    @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
+    def test_rewrite_with_retention_defaults_to_unlocked(self, mock_service, mock_bucket):
+        source_bucket = "test-source-bucket"
+        source_object = "test-source-object"
+        destination_bucket = "test-dest-bucket"
+        destination_object = "test-dest-object"
+        retain_until = datetime(2027, 6, 1)
+
+        source_blob = mock_bucket.blob(source_object)
+
+        # Given
+        bucket_mock = mock_service.return_value.bucket
+        bucket_mock.return_value = mock_bucket
+        get_blob_method = bucket_mock.return_value.blob
+        destination_blob = get_blob_method.return_value
+        rewrite_method = destination_blob.rewrite
+        rewrite_method.side_effect = [(None, mock.ANY, mock.ANY)]
+
+        # When — retention_mode not specified, should default to "Unlocked"
+        self.gcs_hook.rewrite(
+            source_bucket=source_bucket,
+            source_object=source_object,
+            destination_bucket=destination_bucket,
+            destination_object=destination_object,
+            retain_until_time=retain_until,
+        )
+
+        # Then
+        rewrite_method.assert_called_once_with(source=source_blob)
+        assert destination_blob.retention.mode == "Unlocked"
+        assert destination_blob.retention.retain_until_time == retain_until
+        destination_blob.patch.assert_called_once()
+
+    @mock.patch("google.cloud.storage.Bucket")
+    @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
+    def test_delete(self, mock_service, mock_bucket, caplog):
         test_bucket = "test_bucket"
         test_object = "test_object"
         blob_to_be_deleted = storage.Blob(name=test_object, bucket=mock_bucket)
 
-        get_bucket_method = mock_service.return_value.get_bucket
-        get_blob_method = get_bucket_method.return_value.get_blob
-        delete_method = get_blob_method.return_value.delete
+        bucket_method = mock_service.return_value.bucket
+        blob = bucket_method.return_value.blob
+        delete_method = blob.return_value.delete
         delete_method.return_value = blob_to_be_deleted
 
-        response = self.gcs_hook.delete(bucket_name=test_bucket, object_name=test_object)
-        assert response is None
+        with caplog.at_level(logging.INFO):
+            self.gcs_hook.delete(bucket_name=test_bucket, object_name=test_object)
+
+        bucket_method.assert_called_once_with(test_bucket)
+        blob.assert_called_once_with(blob_name=test_object)
+        delete_method.assert_called_once()
+        assert "Blob test_object deleted" in caplog.text
 
     @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
-    def test_delete_nonexisting_object(self, mock_service):
+    def test_delete_nonexisting_object(self, mock_service, caplog):
         test_bucket = "test_bucket"
         test_object = "test_object"
 
@@ -555,8 +688,31 @@ class TestGCSHook:
         delete_method = blob.return_value.delete
         delete_method.side_effect = NotFound(message="Not Found")
 
-        with pytest.raises(NotFound):
+        with pytest.raises(NotFound), caplog.at_level(logging.INFO):
             self.gcs_hook.delete(bucket_name=test_bucket, object_name=test_object)
+
+        bucket_method.assert_called_once_with(test_bucket)
+        blob.assert_called_once_with(blob_name=test_object)
+        delete_method.assert_called_once()
+        assert "does not exist" in caplog.text
+
+    @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
+    def test_delete_nonexisting_object_ignore_error(self, mock_service, caplog):
+        test_bucket = "test_bucket"
+        test_object = "test_object"
+
+        bucket_method = mock_service.return_value.bucket
+        blob = bucket_method.return_value.blob
+        delete_method = blob.return_value.delete
+        delete_method.side_effect = NotFound(message="Not Found")
+
+        with caplog.at_level(logging.INFO):
+            self.gcs_hook.delete(bucket_name=test_bucket, object_name=test_object, ignore_error=True)
+
+        bucket_method.assert_called_once_with(test_bucket)
+        blob.assert_called_once_with(blob_name=test_object)
+        delete_method.assert_called_once()
+        assert "does not exist" in caplog.text
 
     @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
     def test_delete_exposes_lineage(self, mock_service, hook_lineage_collector):
@@ -739,6 +895,67 @@ class TestGCSHook:
         mock_service.return_value.bucket.return_value.create.assert_called_once_with(
             project=test_project, location=test_location
         )
+
+    @pytest.mark.parametrize(
+        ("bindings", "expected_bindings"),
+        [
+            (
+                [],
+                [{"role": "roles/storage.objectViewer", "members": {"serviceAccount:test@example.com"}}],
+            ),
+            (
+                [{"role": "roles/storage.objectViewer", "members": {"user:existing@example.com"}}],
+                [
+                    {
+                        "role": "roles/storage.objectViewer",
+                        "members": {
+                            "serviceAccount:test@example.com",
+                            "user:existing@example.com",
+                        },
+                    }
+                ],
+            ),
+            (
+                [
+                    {
+                        "role": "roles/storage.objectViewer",
+                        "members": {"user:conditional@example.com"},
+                        "condition": {"title": "conditional-binding"},
+                    }
+                ],
+                [
+                    {
+                        "role": "roles/storage.objectViewer",
+                        "members": {"user:conditional@example.com"},
+                        "condition": {"title": "conditional-binding"},
+                    },
+                    {
+                        "role": "roles/storage.objectViewer",
+                        "members": {"serviceAccount:test@example.com"},
+                    },
+                ],
+            ),
+        ],
+    )
+    @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
+    def test_add_bucket_iam_binding(self, mock_service, bindings, expected_bindings):
+        bucket = mock_service.return_value.bucket.return_value
+        policy = mock.MagicMock(bindings=copy.deepcopy(bindings))
+        bucket.get_iam_policy.return_value = policy
+
+        self.gcs_hook.add_bucket_iam_binding(
+            bucket_name="test-bucket",
+            role="roles/storage.objectViewer",
+            member="serviceAccount:test@example.com",
+            user_project="test-user-project",
+        )
+
+        mock_service.return_value.bucket.assert_called_once_with(
+            bucket_name="test-bucket", user_project="test-user-project"
+        )
+        bucket.get_iam_policy.assert_called_once_with(requested_policy_version=3)
+        assert policy.bindings == expected_bindings
+        bucket.set_iam_policy.assert_called_once_with(policy)
 
     @mock.patch("google.cloud.storage.Bucket.blob")
     @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
@@ -960,7 +1177,7 @@ class TestGCSHook:
         )
 
     @pytest.mark.parametrize(
-        "prefix, blob_names, returned_prefixes, call_args, result",
+        ("prefix", "blob_names", "returned_prefixes", "call_args", "result"),
         (
             (
                 "prefix",
@@ -1736,6 +1953,8 @@ class TestSyncGcsHook:
         bucket: MagicMock | None = None,
         kms_key_name: str | None = None,
         generation: int = 0,
+        size: int = 9,
+        updated: datetime | None = None,
     ):
         blob = mock.MagicMock(name=f"BLOB:{name}")
         blob.name = name
@@ -1743,9 +1962,133 @@ class TestSyncGcsHook:
         blob.bucket = bucket
         blob.kms_key_name = kms_key_name
         blob.generation = generation
+        blob.size = size
+        blob.updated = updated or timezone.utcnow()
         return blob
 
     def _create_bucket(self, name: str):
         bucket = mock.MagicMock(name=f"BUCKET:{name}")
         bucket.name = name
         return bucket
+
+    @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
+    def test_sync_to_local_dir_behaviour(self, mock_get_conn, tmp_path):
+        def get_logs_string(call_args_list):
+            return "".join([args[0][0] % args[0][1:] for args in call_args_list])
+
+        test_bucket = "test_bucket"
+        mock_bucket = self._create_bucket(name=test_bucket)
+        mock_get_conn.return_value.bucket.return_value = mock_bucket
+
+        blobs = [
+            self._create_blob("dag_01.py", "C1", mock_bucket),
+            self._create_blob("dag_02.py", "C1", mock_bucket),
+            self._create_blob("subproject1/dag_a.py", "C1", mock_bucket),
+            self._create_blob("subproject1/dag_b.py", "C1", mock_bucket),
+        ]
+        mock_bucket.list_blobs.return_value = blobs
+
+        sync_local_dir = tmp_path / "gcs_sync_dir"
+        self.gcs_hook.log.debug = MagicMock()
+        self.gcs_hook.download = MagicMock()
+
+        self.gcs_hook.sync_to_local_dir(
+            bucket_name=test_bucket, local_dir=sync_local_dir, prefix="", delete_stale=True
+        )
+        logs_string = get_logs_string(self.gcs_hook.log.debug.call_args_list)
+        assert f"Downloading data from gs://{test_bucket}/ to {sync_local_dir}" in logs_string
+        assert f"Local file {sync_local_dir}/dag_01.py does not exist." in logs_string
+        assert f"Downloading dag_01.py to {sync_local_dir}/dag_01.py" in logs_string
+        assert f"Local file {sync_local_dir}/subproject1/dag_a.py does not exist." in logs_string
+        assert f"Downloading subproject1/dag_a.py to {sync_local_dir}/subproject1/dag_a.py" in logs_string
+        assert self.gcs_hook.download.call_count == 4
+
+        # Create dummy local files to simulate download
+        for blob in blobs:
+            p = sync_local_dir / blob.name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("test data")
+            os.utime(p, (blob.updated.timestamp(), blob.updated.timestamp()))
+
+        # add new file to bucket and sync
+        self.gcs_hook.log.debug = MagicMock()
+        self.gcs_hook.download.reset_mock()
+        new_blob = self._create_blob("dag_03.py", "C1", mock_bucket)
+        mock_bucket.list_blobs.return_value = blobs + [new_blob]
+        self.gcs_hook.sync_to_local_dir(
+            bucket_name=test_bucket, local_dir=sync_local_dir, prefix="", delete_stale=True
+        )
+        logs_string = get_logs_string(self.gcs_hook.log.debug.call_args_list)
+        assert (
+            f"Local file {sync_local_dir}/subproject1/dag_b.py is up-to-date with GCS object subproject1/dag_b.py. Skipping download."
+            in logs_string
+        )
+        assert f"Local file {sync_local_dir}/dag_03.py does not exist." in logs_string
+        assert f"Downloading dag_03.py to {sync_local_dir}/dag_03.py" in logs_string
+        self.gcs_hook.download.assert_called_once()
+        (sync_local_dir / "dag_03.py").write_text("test data")
+        os.utime(
+            sync_local_dir / "dag_03.py",
+            (new_blob.updated.timestamp(), new_blob.updated.timestamp()),
+        )
+
+        # Test deletion of stale files
+        local_file_that_should_be_deleted = sync_local_dir / "file_that_should_be_deleted.py"
+        local_file_that_should_be_deleted.write_text("test dag")
+        local_folder_should_be_deleted = sync_local_dir / "local_folder_should_be_deleted"
+        local_folder_should_be_deleted.mkdir(exist_ok=True)
+        self.gcs_hook.log.debug = MagicMock()
+        self.gcs_hook.download.reset_mock()
+        self.gcs_hook.sync_to_local_dir(
+            bucket_name=test_bucket, local_dir=sync_local_dir, prefix="", delete_stale=True
+        )
+        logs_string = get_logs_string(self.gcs_hook.log.debug.call_args_list)
+        assert f"Deleting stale local file: {local_file_that_should_be_deleted.as_posix()}" in logs_string
+        assert f"Deleting stale empty directory: {local_folder_should_be_deleted.as_posix()}" in logs_string
+        assert not self.gcs_hook.download.called
+
+        # Test update of existing file (size change)
+        self.gcs_hook.log.debug = MagicMock()
+        self.gcs_hook.download.reset_mock()
+        updated_blob = self._create_blob(
+            "dag_03.py",
+            "C2",
+            mock_bucket,
+            size=15,
+        )
+        mock_bucket.list_blobs.return_value = blobs + [updated_blob]
+        self.gcs_hook.sync_to_local_dir(
+            bucket_name=test_bucket, local_dir=sync_local_dir, prefix="", delete_stale=True
+        )
+        logs_string = get_logs_string(self.gcs_hook.log.debug.call_args_list)
+        assert "GCS object size (15) and local file size (9) differ." in logs_string
+        assert f"Downloading dag_03.py to {sync_local_dir}/dag_03.py" in logs_string
+        self.gcs_hook.download.assert_called_once()
+
+    @mock.patch(GCS_STRING.format("GCSHook.get_conn"))
+    def test_sync_to_local_dir_rejects_path_traversal(self, mock_get_conn, tmp_path):
+        """A blob name that resolves outside ``local_dir`` must be refused.
+
+        GCS allows ``..`` segments in object names. Without a containment check,
+        ``local_dir.joinpath(blob.name)`` could write outside the intended directory
+        (CWE-22) — exploitable when the bucket is shared with untrusted writers.
+        """
+        test_bucket = "test_bucket"
+        mock_bucket = self._create_bucket(name=test_bucket)
+        mock_get_conn.return_value.bucket.return_value = mock_bucket
+        mock_bucket.list_blobs.return_value = [
+            self._create_blob("../escape.py", "C1", mock_bucket),
+        ]
+
+        sync_local_dir = tmp_path / "gcs_sync_dir"
+        sync_local_dir.mkdir()
+        self.gcs_hook.download = MagicMock()
+
+        with pytest.raises(ValueError, match="escapes the target directory"):
+            self.gcs_hook.sync_to_local_dir(
+                bucket_name=test_bucket, local_dir=sync_local_dir, prefix="", delete_stale=False
+            )
+
+        self.gcs_hook.download.assert_not_called()
+        # Nothing should have been written outside the sync dir.
+        assert not (tmp_path / "escape.py").exists()

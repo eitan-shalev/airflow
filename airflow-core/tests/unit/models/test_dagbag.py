@@ -16,908 +16,486 @@
 # under the License.
 from __future__ import annotations
 
-import contextlib
-import inspect
-import logging
-import os
-import pathlib
-import re
-import sys
-import textwrap
-import warnings
-import zipfile
-from copy import deepcopy
-from datetime import datetime, timedelta, timezone
-from unittest import mock
-from unittest.mock import patch
+import math
+import time
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import select
+import time_machine
+from cachetools import LRUCache, TTLCache
 
-from airflow import settings
-from airflow.dag_processing.dagbag import DagBag, _capture_with_reraise, _validate_executor_fields
-from airflow.exceptions import UnknownExecutorException
-from airflow.executors.executor_loader import ExecutorLoader
 from airflow.models.dag import DagModel
-from airflow.models.dagwarning import DagWarning, DagWarningType
+from airflow.models.dag_version import DagVersion
+from airflow.models.dagbag import CachedDBDagBag, DBDagBag, _CacheEntry
+from airflow.models.dagbundle import DagBundleModel
 from airflow.models.serialized_dag import SerializedDagModel
-from airflow.sdk import DAG, BaseOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.sdk import DAG
+from airflow.serialization.serialized_objects import LazyDeserializedDAG, SerializedDAG
+from airflow.utils.session import create_session
 
-from tests_common.pytest_plugin import AIRFLOW_ROOT_PATH
 from tests_common.test_utils import db
-from tests_common.test_utils.config import conf_vars
-from unit import cluster_policies
-from unit.models import TEST_DAGS_FOLDER
 
 pytestmark = pytest.mark.db_test
 
-example_dags_folder = AIRFLOW_ROOT_PATH / "airflow-core" / "src" / "airflow" / "example_dags" / "standard"
+STATS_PATH = "airflow.models.dagbag.stats"
 
-PY311 = sys.version_info >= (3, 11)
-PY313 = sys.version_info >= (3, 13)
+CACHE_METRIC_SUFFIXES = ("cache_hit", "cache_miss", "cache_clear", "cache_size")
 
-# Include the words "airflow" and "dag" in the file contents,
-# tricking airflow into thinking these
-# files contain a DAG (otherwise Airflow will skip them)
-INVALID_DAG_WITH_DEPTH_FILE_CONTENTS = "def something():\n    return airflow_DAG\nsomething()"
+# Every namespace a component can report under. CachedDBDagBag builds names from the prefix each
+# component passes in, so the shared plumbing is exercised once per component.
+METRIC_PREFIXES = ["api_server.dag_bag", "scheduler.dag_bag"]
 
-
-def test_validate_executor_field_executor_not_configured():
-    with DAG("test-dag", schedule=None) as dag:
-        BaseOperator(task_id="t1", executor="test.custom.executor")
-    with pytest.raises(
-        UnknownExecutorException,
-        match=re.escape(
-            "Task 't1' specifies executor 'test.custom.executor', which is not available. "
-            "Make sure it is listed in your [core] executors configuration, or update the task's "
-            "executor to use one of the configured executors."
-        ),
-    ):
-        _validate_executor_fields(dag)
+STUB_PREFIX = "test.dag_bag"
 
 
-def test_validate_executor_field():
-    with DAG("test-dag", schedule=None) as dag:
-        BaseOperator(task_id="t1", executor="test.custom.executor")
-    with patch.object(ExecutorLoader, "lookup_executor_name_by_str"):
-        _validate_executor_fields(dag)
+def _stub_dag_bag(*, cache_size: int, cache_ttl: int = 0) -> CachedDBDagBag:
+    """Build a configured cache with a test-only metric prefix."""
+    return CachedDBDagBag(
+        cache_size=cache_size,
+        cache_ttl=cache_ttl,
+        stats_prefix=STUB_PREFIX,
+    )
 
 
-def db_clean_up():
-    db.clear_db_dags()
-    db.clear_db_runs()
-    db.clear_db_serialized_dags()
-    db.clear_dag_specific_permissions()
+# This file previously contained tests for DagBag functionality, but those tests
+# have been moved to airflow-core/tests/unit/dag_processing/test_dagbag.py to match
+# the source code reorganization where DagBag moved from models to dag_processing.
+#
+# Tests for models-specific functionality (DBDagBag, DagPriorityParsingRequest, etc.)
+# remain in this file.
 
 
-class TestDagBag:
-    def setup_class(self):
-        db_clean_up()
+class TestDBDagBag:
+    def setup_method(self):
+        self.db_dag_bag = DBDagBag()
+        self.session = MagicMock()
 
-    def teardown_class(self):
-        db_clean_up()
+    def test__read_dag_stores_and_returns_dag(self):
+        """It should store the SerializedDAG with its hash, and return it."""
+        mock_dag = MagicMock(spec=SerializedDAG)
+        mock_serdag = MagicMock(spec=SerializedDagModel)
+        mock_serdag.dag = mock_dag
+        mock_serdag.dag_version_id = "v1"
+        mock_serdag.dag_hash = "hash1"
 
-    def test_timeout_context_manager_raises_exception(self):
-        """Test that the timeout context manager raises AirflowTaskTimeout when time limit is exceeded."""
-        import time
+        result = self.db_dag_bag._read_dag(mock_serdag)
 
-        from airflow.dag_processing.dagbag import timeout
-        from airflow.exceptions import AirflowTaskTimeout
+        assert result == mock_dag
+        entry = self.db_dag_bag._dags["v1"]
+        assert (entry.dag, entry.dag_hash) == (mock_dag, "hash1")
+        assert mock_serdag.load_op_links is True
 
-        with pytest.raises(AirflowTaskTimeout):
-            with timeout(1, "Test timeout"):
-                time.sleep(2)
+    def test__read_dag_returns_none_when_no_dag(self):
+        """It should return None and not modify _dags when no DAG is present."""
+        mock_serdag = MagicMock(spec=SerializedDagModel)
+        mock_serdag.dag = None
+        mock_serdag.dag_version_id = "v1"
 
-    def test_get_existing_dag(self, tmp_path):
+        result = self.db_dag_bag._read_dag(mock_serdag)
+
+        assert result is None
+        assert "v1" not in self.db_dag_bag._dags
+
+    def test_get_dag_fetches_from_db_on_miss(self):
+        """It should query the DB and cache the result (with its hash) when not in cache."""
+        mock_dag = MagicMock(spec=SerializedDAG)
+        mock_serdag = MagicMock(spec=SerializedDagModel)
+        mock_serdag.dag = mock_dag
+        mock_serdag.dag_version_id = "v1"
+        mock_serdag.dag_hash = "hash1"
+        mock_dag_version = MagicMock()
+        mock_dag_version.serialized_dag = mock_serdag
+        self.session.get.return_value = mock_dag_version
+
+        result = self.db_dag_bag.get_dag("v1", session=self.session)
+
+        self.session.get.assert_called_once()
+        assert result == mock_dag
+        entry = self.db_dag_bag._dags["v1"]
+        assert (entry.dag, entry.dag_hash) == (mock_dag, "hash1")
+
+    def test_get_dag_serves_within_revalidation_window_without_query(self):
+        """A recently validated entry is served straight from cache with no DB query at all."""
+        mock_dag = MagicMock(spec=SerializedDAG)
+        # Just-validated entry, well within the (default 30s) revalidation window.
+        self.db_dag_bag._dags["v1"] = _CacheEntry(mock_dag, "hash1", time.monotonic())
+
+        result = self.db_dag_bag.get_dag("v1", session=self.session)
+
+        assert result == mock_dag
+        self.session.scalar.assert_not_called()  # no revalidation query inside the window
+        self.session.get.assert_not_called()
+
+    def test_get_dag_serves_stale_within_window_even_if_db_changed(self):
+        """Inside the window the cached copy is served even if the DB has since changed.
+
+        This is the intended throttle tradeoff: staleness is bounded by the window, not zero.
         """
-        Test that we're able to parse some example DAGs and retrieve them
+        stale_dag = MagicMock(spec=SerializedDAG)
+        self.db_dag_bag._dags["v1"] = _CacheEntry(stale_dag, "old_hash", time.monotonic())
+        # The DB has a different hash now, but we are inside the window so it is never consulted.
+        self.session.scalar.return_value = "new_hash"
+
+        result = self.db_dag_bag.get_dag("v1", session=self.session)
+
+        assert result == stale_dag
+        self.session.scalar.assert_not_called()
+        self.session.get.assert_not_called()
+
+    def test_get_dag_revalidates_after_window_and_serves_when_hash_matches(self):
+        """Past the window, a hit is revalidated by hash and served (window restarted)."""
+        mock_dag = MagicMock(spec=SerializedDAG)
+        # last_validated=0.0 is far in the past, so the entry is revalidated.
+        self.db_dag_bag._dags["v1"] = _CacheEntry(mock_dag, "hash1", 0.0)
+        self.session.scalar.return_value = "hash1"
+
+        result = self.db_dag_bag.get_dag("v1", session=self.session)
+
+        assert result == mock_dag
+        # Validated via a cheap scalar() lookup, not a full DagVersion load.
+        self.session.scalar.assert_called_once()
+        self.session.get.assert_not_called()
+        # The window is restarted so the next hit can skip the query.
+        assert self.db_dag_bag._dags["v1"].last_validated > 0.0
+
+    def test_get_dag_reloads_when_version_updated_in_place(self):
+        """A version updated in place (same id, new hash) must be reloaded, not served stale."""
+        stale_dag = MagicMock(spec=SerializedDAG)
+        fresh_dag = MagicMock(spec=SerializedDAG)
+        # last_validated=0.0 forces revalidation regardless of the window.
+        self.db_dag_bag._dags["v1"] = _CacheEntry(stale_dag, "old_hash", 0.0)
+        mock_serdag = MagicMock(spec=SerializedDagModel)
+        mock_serdag.dag = fresh_dag
+        mock_serdag.dag_version_id = "v1"
+        mock_serdag.dag_hash = "new_hash"
+        mock_dag_version = MagicMock()
+        mock_dag_version.serialized_dag = mock_serdag
+        self.session.get.return_value = mock_dag_version
+        # The dag_hash validation lookup returns the new hash (mismatch -> reload).
+        self.session.scalar.return_value = "new_hash"
+
+        result = self.db_dag_bag.get_dag("v1", session=self.session)
+
+        assert result == fresh_dag
+        self.session.get.assert_called_once()
+        entry = self.db_dag_bag._dags["v1"]
+        assert (entry.dag, entry.dag_hash) == (fresh_dag, "new_hash")
+
+    def test_get_dag_reloads_when_cached_version_deleted(self):
+        """A cached entry whose serialized row no longer exists must not be served."""
+        stale_dag = MagicMock(spec=SerializedDAG)
+        self.db_dag_bag._dags["v1"] = _CacheEntry(stale_dag, "old_hash", 0.0)
+        self.session.scalar.return_value = None  # validation finds no row
+        self.session.get.return_value = None  # version is gone
+
+        result = self.db_dag_bag.get_dag("v1", session=self.session)
+
+        assert result is None
+        assert "v1" not in self.db_dag_bag._dags
+
+    def test_get_dag_returns_none_when_not_found(self):
+        """It should return None if version_id not found in DB."""
+        self.session.get.return_value = None
+
+        result = self.db_dag_bag.get_dag("v1", session=self.session)
+
+        assert result is None
+
+    def test_get_dag_reflects_in_place_version_update_end_to_end(self):
+        """End-to-end regression: an in-place version update must be re-read, not served stale.
+
+        When a DagVersion has no task instances, ``SerializedDagModel.write_dag`` updates the
+        serialized DAG in place (same ``dag_version_id``, new content). A long-lived DagBag (e.g.
+        the scheduler's) must reflect the new content instead of serving the cached old code.
+
+        Each step uses its own session, matching the real deployment where the dag processor
+        writes and the scheduler reads in separate processes/sessions.
         """
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=True)
+        dag_id = "stale_cache_dag"
+        bundle_name = "testing"
+        db.clear_db_dags()
+        db.clear_db_serialized_dags()
+        db.clear_db_dag_bundles()
 
-        some_expected_dag_ids = ["example_bash_operator", "example_branch_operator"]
+        def make_lazy(task_ids):
+            with DAG(dag_id, schedule=None) as dag:
+                for task_id in task_ids:
+                    EmptyOperator(task_id=task_id)
+            return LazyDeserializedDAG.from_dag(dag)
 
-        for dag_id in some_expected_dag_ids:
-            dag = dagbag.get_dag(dag_id)
+        # Long-lived bag, like the scheduler's process-lived scheduler_dag_bag. A 0s revalidation
+        # interval makes every hit revalidate, exercising the post-window reload path
+        # deterministically without manipulating the clock.
+        dag_bag = DBDagBag()
+        dag_bag._revalidation_interval = 0
 
-            assert dag is not None
-            assert dag_id == dag.dag_id
+        with create_session() as session:
+            session.add(DagBundleModel(name=bundle_name))
+            session.flush()
+            session.add(DagModel(dag_id=dag_id, bundle_name=bundle_name))
+            session.flush()
+            # Version 1: a single task, no task instances yet.
+            SerializedDagModel.write_dag(make_lazy(["a"]), bundle_name=bundle_name, session=session)
+            session.commit()
+            version_id = DagVersion.get_latest_version(dag_id, session=session).id
 
-        assert dagbag.size() >= 7
+        # The scheduler loads and caches the DAG.
+        with create_session() as session:
+            assert set(dag_bag.get_dag(version_id, session=session).task_ids) == {"a"}
 
-    def test_get_non_existing_dag(self, tmp_path):
+        # The dag processor adds a task and re-writes. With no task instances on the version,
+        # write_dag updates it in place (same dag_version_id, new content + hash).
+        with create_session() as session:
+            did_write = SerializedDagModel.write_dag(
+                make_lazy(["a", "b"]), bundle_name=bundle_name, session=session
+            )
+            session.commit()
+            assert did_write is True
+            assert DagVersion.get_latest_version(dag_id, session=session).id == version_id
+
+        # The scheduler reads again: it must serve the updated DAG, not the stale cached one.
+        with create_session() as session:
+            assert set(dag_bag.get_dag(version_id, session=session).task_ids) == {"a", "b"}
+
+        db.clear_db_dags()
+        db.clear_db_serialized_dags()
+        db.clear_db_dag_bundles()
+
+
+class TestDBDagBagCache:
+    """Tests for plain and configured DBDagBag caching behavior."""
+
+    @pytest.mark.parametrize(
+        ("cache_size", "cache_ttl", "expected_type", "expected_maxsize"),
+        [
+            pytest.param(10, 0, LRUCache, 10, id="size_only_lru"),
+            pytest.param(10, 60, TTLCache, 10, id="size_and_ttl_bounded_ttl"),
+            pytest.param(0, 60, TTLCache, math.inf, id="ttl_only_uncapped"),
+            pytest.param(0, 0, dict, None, id="no_eviction"),
+        ],
+    )
+    def test_cache_selection(self, cache_size, cache_ttl, expected_type, expected_maxsize):
+        dag_bag = _stub_dag_bag(cache_size=cache_size, cache_ttl=cache_ttl)
+        assert isinstance(dag_bag._dags, expected_type)
+        if expected_maxsize is not None:
+            assert dag_bag._dags.maxsize == expected_maxsize
+
+    def test_clear_cache_with_caching(self):
+        """Test clear_cache() with caching enabled."""
+        dag_bag = _stub_dag_bag(cache_size=10, cache_ttl=60)
+
+        mock_dag = MagicMock()
+        dag_bag._dags["version_1"] = mock_dag
+        dag_bag._dags["version_2"] = mock_dag
+        assert len(dag_bag._dags) == 2
+
+        count = dag_bag.clear_cache()
+        assert count == 2
+        assert len(dag_bag._dags) == 0
+
+    @pytest.mark.parametrize("prefix", METRIC_PREFIXES)
+    def test_stats_prefix_expands_to_registered_metrics(self, prefix):
+        """Every name a component can emit must exist in the metrics registry.
+
+        The registry prek check sees only the ``{_stats_prefix}.<suffix>`` template, so it can
+        verify the suffixes but not the prefix each component supplies. This pins the expanded
+        names so a renamed or misspelled prefix cannot ship unregistered.
         """
-        test that retrieving a non existing dag id returns None without crashing
-        """
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
+        from airflow._shared.observability.metrics.metrics_registry import MetricsRegistry
 
-        non_existing_dag_id = "non_existing_dag_id"
-        assert dagbag.get_dag(non_existing_dag_id) is None
-
-    def test_serialized_dag_not_existing_doesnt_raise(self, tmp_path, session):
-        """
-        test that retrieving a non existing dag id returns None without crashing
-        """
-        non_existing_dag_id = "non_existing_dag_id"
-        assert session.scalar(select(True).where(SerializedDagModel.dag_id == non_existing_dag_id)) is None
-
-    def test_dont_load_example(self, tmp_path):
-        """
-        test that the example are not loaded
-        """
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-
-        assert dagbag.size() == 0
-
-    def test_safe_mode_heuristic_match(self, tmp_path):
-        """
-        With safe mode enabled, a file matching the discovery heuristics
-        should be discovered.
-        """
-        path = tmp_path / "testfile.py"
-        path.write_text("# airflow\n# DAG")
-
-        with conf_vars({("core", "dags_folder"): os.fspath(path.parent)}):
-            dagbag = DagBag(include_examples=False, safe_mode=True)
-
-        assert len(dagbag.dagbag_stats) == 1
-        assert dagbag.dagbag_stats[0].file == f"/{path.name}"
-
-    def test_safe_mode_heuristic_mismatch(self, tmp_path):
-        """
-        With safe mode enabled, a file not matching the discovery heuristics
-        should not be discovered.
-        """
-        path = tmp_path / "testfile.py"
-        path.write_text("")
-        with conf_vars({("core", "dags_folder"): os.fspath(path.parent)}):
-            dagbag = DagBag(include_examples=False, safe_mode=True)
-        assert len(dagbag.dagbag_stats) == 0
-
-    def test_safe_mode_disabled(self, tmp_path):
-        """With safe mode disabled, an empty python file should be discovered."""
-        path = tmp_path / "testfile.py"
-        path.write_text("")
-        with conf_vars({("core", "dags_folder"): os.fspath(path.parent)}):
-            dagbag = DagBag(include_examples=False, safe_mode=False)
-        assert len(dagbag.dagbag_stats) == 1
-        assert dagbag.dagbag_stats[0].file == f"/{path.name}"
-
-    def test_process_file_that_contains_multi_bytes_char(self, tmp_path):
-        """
-        test that we're able to parse file that contains multi-byte char
-        """
-        path = tmp_path / "testfile"
-        path.write_text("\u3042")  # write multi-byte char (hiragana)
-
-        dagbag = DagBag(dag_folder=os.fspath(path.parent), include_examples=False)
-        assert dagbag.process_file(os.fspath(path)) == []
-
-    def test_process_file_duplicated_dag_id(self, tmp_path):
-        """Loading a DAG with ID that already existed in a DAG bag should result in an import error."""
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-
-        def create_dag():
-            from airflow.sdk import dag
-
-            @dag(schedule=None, default_args={"owner": "owner1"})
-            def my_flow():
-                pass
-
-            my_dag = my_flow()  # noqa: F841
-
-        source_lines = [line[12:] for line in inspect.getsource(create_dag).splitlines(keepends=True)[1:]]
-        path1 = tmp_path / "testfile1"
-        path2 = tmp_path / "testfile2"
-        path1.write_text("".join(source_lines))
-        path2.write_text("".join(source_lines))
-
-        found_1 = dagbag.process_file(os.fspath(path1))
-        assert len(found_1) == 1
-        assert found_1[0].dag_id == "my_flow"
-        assert dagbag.import_errors == {}
-        dags_in_bag = dagbag.dags
-
-        found_2 = dagbag.process_file(os.fspath(path2))
-        assert len(found_2) == 0
-        assert dagbag.import_errors[os.fspath(path2)].startswith(
-            "AirflowDagDuplicatedIdException: Ignoring DAG"
-        )
-        assert dagbag.dags == dags_in_bag  # Should not change.
-
-    def test_zip_skip_log(self, caplog, test_zip_path):
-        """
-        test the loading of a DAG from within a zip file that skips another file because
-        it doesn't have "airflow" and "DAG"
-        """
-        caplog.set_level(logging.INFO)
-        dagbag = DagBag(dag_folder=test_zip_path, include_examples=False)
-
-        assert dagbag.has_logged
-        assert (
-            f"File {test_zip_path}:file_no_airflow_dag.py "
-            "assumed to contain no DAGs. Skipping." in caplog.text
-        )
-
-    def test_zip(self, tmp_path, test_zip_path):
-        """
-        test the loading of a DAG within a zip file that includes dependencies
-        """
-        syspath_before = deepcopy(sys.path)
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-        dagbag.process_file(test_zip_path)
-        assert dagbag.get_dag("test_zip_dag")
-        assert sys.path == syspath_before  # sys.path doesn't change
-        assert not dagbag.import_errors
-
-    @patch("airflow.dag_processing.dagbag.timeout")
-    @patch("airflow.dag_processing.dagbag.settings.get_dagbag_import_timeout")
-    def test_process_dag_file_without_timeout(
-        self, mocked_get_dagbag_import_timeout, mocked_timeout, tmp_path
-    ):
-        """
-        Test dag file parsing without timeout
-        """
-        mocked_get_dagbag_import_timeout.return_value = 0
-
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-        dagbag.process_file(os.path.join(TEST_DAGS_FOLDER, "test_sensor.py"))
-        mocked_timeout.assert_not_called()
-
-        mocked_get_dagbag_import_timeout.return_value = -1
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-        dagbag.process_file(os.path.join(TEST_DAGS_FOLDER, "test_sensor.py"))
-        mocked_timeout.assert_not_called()
-
-    @patch("airflow.dag_processing.dagbag.timeout")
-    @patch("airflow.dag_processing.dagbag.settings.get_dagbag_import_timeout")
-    def test_process_dag_file_with_non_default_timeout(
-        self, mocked_get_dagbag_import_timeout, mocked_timeout, tmp_path
-    ):
-        """
-        Test customized dag file parsing timeout
-        """
-        timeout_value = 100
-        mocked_get_dagbag_import_timeout.return_value = timeout_value
-
-        # ensure the test value is not equal to the default value
-        assert timeout_value != settings.conf.getfloat("core", "DAGBAG_IMPORT_TIMEOUT")
-
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-        dagbag.process_file(os.path.join(TEST_DAGS_FOLDER, "test_sensor.py"))
-
-        mocked_timeout.assert_called_once_with(timeout_value, error_message=mock.ANY)
-
-    @patch("airflow.dag_processing.dagbag.settings.get_dagbag_import_timeout")
-    def test_check_value_type_from_get_dagbag_import_timeout(
-        self, mocked_get_dagbag_import_timeout, tmp_path
-    ):
-        """
-        Test correctness of value from get_dagbag_import_timeout
-        """
-        mocked_get_dagbag_import_timeout.return_value = "1"
-
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-        with pytest.raises(
-            TypeError, match=r"Value \(1\) from get_dagbag_import_timeout must be int or float"
-        ):
-            dagbag.process_file(os.path.join(TEST_DAGS_FOLDER, "test_sensor.py"))
-
-    @pytest.fixture
-    def invalid_cron_dag(self) -> str:
-        return os.path.join(TEST_DAGS_FOLDER, "test_invalid_cron.py")
-
-    @pytest.fixture
-    def invalid_cron_zipped_dag(self, invalid_cron_dag: str, tmp_path: pathlib.Path) -> str:
-        zipped = tmp_path / "test_zip_invalid_cron.zip"
-        with zipfile.ZipFile(zipped, "w") as zf:
-            zf.write(invalid_cron_dag, os.path.basename(invalid_cron_dag))
-        return os.fspath(zipped)
-
-    @pytest.mark.parametrize("invalid_dag_name", ["invalid_cron_dag", "invalid_cron_zipped_dag"])
-    def test_process_file_cron_validity_check(
-        self, request: pytest.FixtureRequest, invalid_dag_name: str, tmp_path
-    ):
-        """Test if an invalid cron expression as schedule interval can be identified"""
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-        assert len(dagbag.import_errors) == 0
-        dagbag.process_file(request.getfixturevalue(invalid_dag_name))
-        assert len(dagbag.import_errors) == 1
-        assert len(dagbag.dags) == 0
-
-    def test_process_file_invalid_param_check(self, tmp_path):
-        """
-        test if an invalid param in the dags can be identified
-        """
-        invalid_dag_files = [
-            "test_invalid_param.py",
-            "test_invalid_param2.py",
-            "test_invalid_param3.py",
-            "test_invalid_param4.py",
+        registry = MetricsRegistry()
+        missing = [
+            name for suffix in CACHE_METRIC_SUFFIXES if registry.get(name := f"{prefix}.{suffix}") is None
         ]
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-
-        assert len(dagbag.import_errors) == 0
-        for file in invalid_dag_files:
-            dagbag.process_file(os.path.join(TEST_DAGS_FOLDER, file))
-        assert len(dagbag.import_errors) == len(invalid_dag_files)
-        assert len(dagbag.dags) == 0
-
-    def test_process_file_valid_param_check(self, tmp_path):
-        """
-        test if valid params in the dags param can be validated (positive test)
-        """
-        valid_dag_files = [
-            "test_valid_param.py",
-            "test_valid_param2.py",
-        ]
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-
-        assert len(dagbag.import_errors) == 0
-        for file in valid_dag_files:
-            dagbag.process_file(os.path.join(TEST_DAGS_FOLDER, file))
-        assert len(dagbag.import_errors) == 0
-        assert len(dagbag.dags) == len(valid_dag_files)
-
-    @patch.object(DagModel, "get_current")
-    def test_get_dag_without_refresh(self, mock_dagmodel):
-        """
-        Test that, once a DAG is loaded, it doesn't get refreshed again if it
-        hasn't been expired.
-        """
-        dag_id = "example_bash_operator"
-
-        mock_dagmodel.return_value = DagModel()
-        mock_dagmodel.return_value.last_expired = None
-        mock_dagmodel.return_value.fileloc = "foo"
-
-        class _TestDagBag(DagBag):
-            process_file_calls = 0
-
-            def process_file(self, filepath, only_if_updated=True, safe_mode=True):
-                if os.path.basename(filepath) == "example_bash_operator.py":
-                    _TestDagBag.process_file_calls += 1
-                super().process_file(filepath, only_if_updated, safe_mode)
-
-        dagbag = _TestDagBag(include_examples=True)
-        dagbag.process_file_calls
-
-        # Should not call process_file again, since it's already loaded during init.
-        assert dagbag.process_file_calls == 1
-        assert dagbag.get_dag(dag_id) is not None
-        assert dagbag.process_file_calls == 1
-
-    @pytest.mark.parametrize(
-        ("file_to_load", "expected"),
-        (
-            pytest.param(
-                pathlib.Path(example_dags_folder) / "example_bash_operator.py",
-                {
-                    "example_bash_operator": f"{example_dags_folder.relative_to(AIRFLOW_ROOT_PATH) / 'example_bash_operator.py'}"
-                },
-                id="example_bash_operator",
-            ),
-        ),
-    )
-    def test_get_dag_registration(self, file_to_load, expected):
-        pytest.importorskip("system.standard")
-        dagbag = DagBag(dag_folder=os.devnull, include_examples=False)
-        dagbag.process_file(os.fspath(file_to_load))
-        for dag_id, path in expected.items():
-            dag = dagbag.get_dag(dag_id)
-            assert dag, f"{dag_id} was bagged"
-            assert dag.fileloc.endswith(path)
-
-    @pytest.mark.parametrize(
-        ("expected"),
-        (
-            pytest.param(
-                {
-                    "test_zip_dag": "test_zip.zip/test_zip.py",
-                    "test_zip_autoregister": "test_zip.zip/test_zip.py",
-                },
-                id="test_zip.zip",
-            ),
-        ),
-    )
-    def test_get_zip_dag_registration(self, test_zip_path, expected):
-        dagbag = DagBag(dag_folder=os.devnull, include_examples=False)
-        dagbag.process_file(test_zip_path)
-        for dag_id, path in expected.items():
-            dag = dagbag.get_dag(dag_id)
-            assert dag, f"{dag_id} was bagged"
-            assert dag.fileloc.endswith(f"{pathlib.Path(test_zip_path).parent}/{path}")
-
-    def test_dag_registration_with_failure(self):
-        dagbag = DagBag(dag_folder=os.devnull, include_examples=False)
-        found = dagbag.process_file(str(TEST_DAGS_FOLDER / "test_invalid_dup_task.py"))
-        assert found == []
-
-    @pytest.fixture
-    def zip_with_valid_dag_and_dup_tasks(self, tmp_path: pathlib.Path) -> str:
-        failing_dag_file = TEST_DAGS_FOLDER / "test_invalid_dup_task.py"
-        working_dag_file = TEST_DAGS_FOLDER / "test_example_bash_operator.py"
-        zipped = tmp_path / "test_zip_invalid_dup_task.zip"
-        with zipfile.ZipFile(zipped, "w") as zf:
-            zf.write(failing_dag_file, failing_dag_file.name)
-            zf.write(working_dag_file, working_dag_file.name)
-        return os.fspath(zipped)
-
-    def test_dag_registration_with_failure_zipped(self, zip_with_valid_dag_and_dup_tasks):
-        dagbag = DagBag(dag_folder=os.devnull, include_examples=False)
-        found = dagbag.process_file(zip_with_valid_dag_and_dup_tasks)
-        assert len(found) == 1
-        assert [dag.dag_id for dag in found] == ["test_example_bash_operator"]
-
-    @patch.object(DagModel, "get_current")
-    def test_refresh_py_dag(self, mock_dagmodel, tmp_path):
-        """
-        Test that we can refresh an ordinary .py DAG
-        """
-        dag_id = "example_bash_operator"
-        fileloc = str(example_dags_folder / "example_bash_operator.py")
-
-        mock_dagmodel.return_value = DagModel()
-        mock_dagmodel.return_value.last_expired = datetime.max.replace(tzinfo=timezone.utc)
-        mock_dagmodel.return_value.fileloc = fileloc
-
-        class _TestDagBag(DagBag):
-            process_file_calls = 0
-
-            def process_file(self, filepath, only_if_updated=True, safe_mode=True):
-                if filepath == fileloc:
-                    _TestDagBag.process_file_calls += 1
-                return super().process_file(filepath, only_if_updated, safe_mode)
-
-        dagbag = _TestDagBag(dag_folder=os.fspath(tmp_path), include_examples=True)
-
-        assert dagbag.process_file_calls == 1
-        dag = dagbag.get_dag(dag_id)
-        assert dag is not None
-        assert dag_id == dag.dag_id
-        assert dagbag.process_file_calls == 2
-
-    @patch.object(DagModel, "get_current")
-    def test_refresh_packaged_dag(self, mock_dagmodel, test_zip_path):
-        """
-        Test that we can refresh a packaged DAG
-        """
-        dag_id = "test_zip_dag"
-        fileloc = os.path.realpath(os.path.join(test_zip_path, "test_zip.py"))
-
-        mock_dagmodel.return_value = DagModel()
-        mock_dagmodel.return_value.last_expired = datetime.max.replace(tzinfo=timezone.utc)
-        mock_dagmodel.return_value.fileloc = fileloc
-
-        class _TestDagBag(DagBag):
-            process_file_calls = 0
-
-            def process_file(self, filepath, only_if_updated=True, safe_mode=True):
-                if filepath in fileloc:
-                    _TestDagBag.process_file_calls += 1
-                return super().process_file(filepath, only_if_updated, safe_mode)
-
-        dagbag = _TestDagBag(dag_folder=os.path.realpath(test_zip_path), include_examples=False)
-
-        assert dagbag.process_file_calls == 1
-        dag = dagbag.get_dag(dag_id)
-        assert dag is not None
-        assert dag_id == dag.dag_id
-        assert dagbag.process_file_calls == 2
-
-    def process_dag(self, create_dag, tmp_path):
-        """
-        Helper method to process a file generated from the input create_dag function.
-        """
-        # write source to file
-        source = textwrap.dedent("".join(inspect.getsource(create_dag).splitlines(True)[1:-1]))
-        path = tmp_path / "testfile"
-        path.write_text(source)
-
-        dagbag = DagBag(dag_folder=os.fspath(path.parent), include_examples=False)
-        found_dags = dagbag.process_file(os.fspath(path))
-        return dagbag, found_dags, os.fspath(path)
-
-    def validate_dags(self, expected_dag, actual_found_dags, actual_dagbag, should_be_found=True):
-        actual_found_dag_ids = [dag.dag_id for dag in actual_found_dags]
-        dag_id = expected_dag.dag_id
-        actual_dagbag.log.info("validating %s", dag_id)
-        assert (dag_id in actual_found_dag_ids) == should_be_found, (
-            f'dag "{dag_id}" should {"" if should_be_found else "not "}'
-            f'have been found after processing dag "{expected_dag.dag_id}"'
-        )
-        assert (dag_id in actual_dagbag.dags) == should_be_found, (
-            f'dag "{dag_id}" should {"" if should_be_found else "not "}'
-            f'be in dagbag.dags after processing dag "{expected_dag.dag_id}"'
-        )
-
-    def test_skip_cycle_dags(self, tmp_path):
-        """
-        Don't crash when loading an invalid (contains a cycle) DAG file.
-        Don't load the dag into the DagBag either
-        """
-
-        # Define Dag to load
-        def basic_cycle():
-            import datetime
-
-            from airflow.models.dag import DAG
-            from airflow.providers.standard.operators.empty import EmptyOperator
-
-            dag_name = "cycle_dag"
-            default_args = {"owner": "owner1", "start_date": datetime.datetime(2016, 1, 1)}
-            dag = DAG(dag_name, schedule=timedelta(days=1), default_args=default_args)
-
-            # A -> A
-            with dag:
-                op_a = EmptyOperator(task_id="A")
-                op_a.set_downstream(op_a)
-
-            return dag
-
-        test_dag = basic_cycle()
-
-        # Perform processing dag
-        dagbag, found_dags, file_path = self.process_dag(basic_cycle, tmp_path)
-
-        # #Validate correctness
-        # None of the dags should be found
-        self.validate_dags(test_dag, found_dags, dagbag, should_be_found=False)
-        assert file_path in dagbag.import_errors
-
-    def test_process_file_with_none(self, tmp_path):
-        """
-        test that process_file can handle Nones
-        """
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-
-        assert dagbag.process_file(None) == []
-
-    def test_timeout_dag_errors_are_import_errors(self, tmp_path, caplog):
-        """
-        Test that if the DAG contains Timeout error it will be still loaded to DB as import_errors
-        """
-        code_to_save = """
-# Define Dag to load
-import datetime
-import time
-
-import airflow
-from airflow.providers.standard.operators.python import PythonOperator
-
-time.sleep(1)
-
-with airflow.DAG(
-    "import_timeout",
-    start_date=datetime.datetime(2022, 1, 1),
-    schedule=None) as dag:
-    def f():
-        print("Sleeping")
-        time.sleep(1)
-
-
-    for ind in range(10):
-        PythonOperator(
-            dag=dag,
-            task_id=f"sleep_2_{ind}",
-            python_callable=f,
-        )
-        """
-        with open("tmp_file.py", "w") as f:
-            f.write(code_to_save)
-
-        with conf_vars({("core", "DAGBAG_IMPORT_TIMEOUT"): "0.01"}):
-            dagbag = DagBag(dag_folder=os.fspath("tmp_file.py"), include_examples=False)
-            dag = dagbag._load_modules_from_file("tmp_file.py", safe_mode=False)
-
-        assert dag is not None
-        assert "tmp_file.py" in dagbag.import_errors
-        assert "DagBag import timeout for" in caplog.text
-
-    @staticmethod
-    def _make_test_traceback(unparseable_filename: str, depth=None) -> str:
-        python_311_marker = "           ^^^^^^^^^^^\n" if PY311 else ""
-        python_313_marker = ["    ~~~~~~~~~^^\n"] if PY313 else []
-        frames = (
-            f'  File "{unparseable_filename}", line 3, in <module>\n    something()\n',
-            *python_313_marker,
-            f'  File "{unparseable_filename}", line 2, in something\n    return airflow_DAG\n{python_311_marker}',
-        )
-        depth = 0 if depth is None else -depth
-        return (
-            "Traceback (most recent call last):\n"
-            + "".join(frames[depth:])
-            + "NameError: name 'airflow_DAG' is not defined\n"
-        )
-
-    @pytest.mark.parametrize(("depth",), ((None,), (1,)))
-    def test_import_error_tracebacks(self, tmp_path, depth):
-        unparseable_filename = tmp_path.joinpath("dag.py").as_posix()
-        with open(unparseable_filename, "w") as unparseable_file:
-            unparseable_file.writelines(INVALID_DAG_WITH_DEPTH_FILE_CONTENTS)
-
-        with contextlib.ExitStack() as cm:
-            if depth is not None:
-                cm.enter_context(conf_vars({("core", "dagbag_import_error_traceback_depth"): str(depth)}))
-            dagbag = DagBag(dag_folder=unparseable_filename, include_examples=False)
-        import_errors = dagbag.import_errors
-
-        assert unparseable_filename in import_errors
-        assert import_errors[unparseable_filename] == self._make_test_traceback(unparseable_filename, depth)
-
-    @pytest.mark.parametrize(("depth",), ((None,), (1,)))
-    def test_import_error_tracebacks_zip(self, tmp_path, depth):
-        invalid_zip_filename = (tmp_path / "test_zip_invalid.zip").as_posix()
-        invalid_dag_filename = os.path.join(invalid_zip_filename, "dag.py")
-        with zipfile.ZipFile(invalid_zip_filename, "w") as invalid_zip_file:
-            invalid_zip_file.writestr("dag.py", INVALID_DAG_WITH_DEPTH_FILE_CONTENTS)
-
-        with contextlib.ExitStack() as cm:
-            if depth is not None:
-                cm.enter_context(conf_vars({("core", "dagbag_import_error_traceback_depth"): str(depth)}))
-            dagbag = DagBag(dag_folder=invalid_zip_filename, include_examples=False)
-        import_errors = dagbag.import_errors
-        assert invalid_dag_filename in import_errors
-        assert import_errors[invalid_dag_filename] == self._make_test_traceback(invalid_dag_filename, depth)
-
-    @patch("airflow.settings.task_policy", cluster_policies.example_task_policy)
-    def test_task_cluster_policy_violation(self):
-        """
-        test that file processing results in import error when task does not
-        obey cluster policy.
-        """
-        dag_file = os.path.join(TEST_DAGS_FOLDER, "test_missing_owner.py")
-        dag_id = "test_missing_owner"
-        err_cls_name = "AirflowClusterPolicyViolation"
-
-        dagbag = DagBag(dag_folder=dag_file, include_examples=False)
-        assert set() == set(dagbag.dag_ids)
-        expected_import_errors = {
-            dag_file: (
-                f"""{err_cls_name}: DAG policy violation (DAG ID: {dag_id}, Path: {dag_file}):\n"""
-                """Notices:\n"""
-                """ * Task must have non-None non-default owner. Current value: airflow"""
-            )
-        }
-        assert expected_import_errors == dagbag.import_errors
-
-    @patch("airflow.settings.task_policy", cluster_policies.example_task_policy)
-    def test_task_cluster_policy_nonstring_owner(self):
-        """
-        test that file processing results in import error when task does not
-        obey cluster policy and has owner whose type is not string.
-        """
-        TEST_DAGS_CORRUPTED_FOLDER = pathlib.Path(__file__).parent.with_name("dags_corrupted")
-        dag_file = os.path.join(TEST_DAGS_CORRUPTED_FOLDER, "test_nonstring_owner.py")
-        dag_id = "test_nonstring_owner"
-        err_cls_name = "AirflowClusterPolicyViolation"
-
-        dagbag = DagBag(dag_folder=dag_file, include_examples=False)
-        assert set() == set(dagbag.dag_ids)
-        expected_import_errors = {
-            dag_file: (
-                f"""{err_cls_name}: DAG policy violation (DAG ID: {dag_id}, Path: {dag_file}):\n"""
-                """Notices:\n"""
-                """ * owner should be a string. Current value: ['a']"""
-            )
-        }
-        assert expected_import_errors == dagbag.import_errors
-
-    @patch("airflow.settings.task_policy", cluster_policies.example_task_policy)
-    def test_task_cluster_policy_obeyed(self):
-        """
-        test that dag successfully imported without import errors when tasks
-        obey cluster policy.
-        """
-        dag_file = os.path.join(TEST_DAGS_FOLDER, "test_with_non_default_owner.py")
-
-        dagbag = DagBag(dag_folder=dag_file, include_examples=False)
-        assert {"test_with_non_default_owner"} == set(dagbag.dag_ids)
-
-        assert dagbag.import_errors == {}
-
-    @patch("airflow.settings.dag_policy", cluster_policies.dag_policy)
-    def test_dag_cluster_policy_obeyed(self):
-        dag_file = os.path.join(TEST_DAGS_FOLDER, "test_dag_with_no_tags.py")
-
-        dagbag = DagBag(dag_folder=dag_file, include_examples=False)
-        assert len(dagbag.dag_ids) == 0
-        assert "has no tags" in dagbag.import_errors[dag_file]
-
-    def test_dagbag_dag_collection(self):
-        dagbag = DagBag(dag_folder=TEST_DAGS_FOLDER, include_examples=False, collect_dags=False)
-        # since collect_dags is False, dagbag.dags should be empty
-        assert not dagbag.dags
-
-        dagbag.collect_dags()
-        assert dagbag.dags
-
-        # test that dagbag.dags is not empty if collect_dags is True
-        dagbag = DagBag(dag_folder=TEST_DAGS_FOLDER, include_examples=False)
-        assert dagbag.dags
-
-    def test_dabgag_captured_warnings(self):
-        dag_file = os.path.join(TEST_DAGS_FOLDER, "test_dag_warnings.py")
-        dagbag = DagBag(dag_folder=dag_file, include_examples=False, collect_dags=False)
-        assert dag_file not in dagbag.captured_warnings
-
-        dagbag.collect_dags(dag_folder=dagbag.dag_folder, include_examples=False, only_if_updated=False)
-        assert dagbag.dagbag_stats[0].warning_num == 2
-        assert dagbag.captured_warnings == {
-            dag_file: (
-                f"{dag_file}:46: DeprecationWarning: Deprecated Parameter",
-                f"{dag_file}:48: UserWarning: Some Warning",
-            )
-        }
-
-        with warnings.catch_warnings():
-            # Disable capture DeprecationWarning, and it should be reflected in captured warnings
-            warnings.simplefilter("ignore", DeprecationWarning)
-            dagbag.collect_dags(dag_folder=dagbag.dag_folder, include_examples=False, only_if_updated=False)
-            assert dag_file in dagbag.captured_warnings
-            assert len(dagbag.captured_warnings[dag_file]) == 1
-            assert dagbag.dagbag_stats[0].warning_num == 1
-
-            # Disable all warnings, no captured warnings expected
-            warnings.simplefilter("ignore")
-            dagbag.collect_dags(dag_folder=dagbag.dag_folder, include_examples=False, only_if_updated=False)
-            assert dag_file not in dagbag.captured_warnings
-            assert dagbag.dagbag_stats[0].warning_num == 0
-
-    @pytest.fixture
-    def warning_zipped_dag_path(self, tmp_path: pathlib.Path) -> str:
-        warnings_dag_file = TEST_DAGS_FOLDER / "test_dag_warnings.py"
-        zipped = tmp_path / "test_dag_warnings.zip"
-        with zipfile.ZipFile(zipped, "w") as zf:
-            zf.write(warnings_dag_file, warnings_dag_file.name)
-        return os.fspath(zipped)
-
-    def test_dabgag_captured_warnings_zip(self, warning_zipped_dag_path: str):
-        in_zip_dag_file = f"{warning_zipped_dag_path}/test_dag_warnings.py"
-        dagbag = DagBag(dag_folder=warning_zipped_dag_path, include_examples=False)
-        assert dagbag.dagbag_stats[0].warning_num == 2
-        assert dagbag.captured_warnings == {
-            warning_zipped_dag_path: (
-                f"{in_zip_dag_file}:46: DeprecationWarning: Deprecated Parameter",
-                f"{in_zip_dag_file}:48: UserWarning: Some Warning",
-            )
-        }
-
-    @pytest.mark.parametrize(
-        ("known_pools", "expected"),
-        (
-            pytest.param(None, set(), id="disabled"),
-            pytest.param(
-                {"default_pool"},
-                {
-                    DagWarning(
-                        "test",
-                        DagWarningType.NONEXISTENT_POOL,
-                        "Dag 'test' references non-existent pools: ['pool1']",
-                    ),
-                },
-                id="only-default",
-            ),
-            pytest.param(
-                {"default_pool", "pool1"},
-                set(),
-                id="known-pools",
-            ),
-        ),
-    )
-    def test_dag_warnings_invalid_pool(self, known_pools, expected):
-        with DAG(dag_id="test") as dag:
-            BaseOperator(task_id="1")
-            BaseOperator(task_id="2", pool="pool1")
-
-        dagbag = DagBag(dag_folder="", include_examples=False, collect_dags=False, known_pools=known_pools)
-        dagbag.bag_dag(dag)
-        assert dagbag.dag_warnings == expected
-
-    def test_sigsegv_handling(self, tmp_path, caplog):
-        """
-        Test that a SIGSEGV in a DAG file is handled gracefully and does not crash the process.
-        """
-        # Create a DAG file that will raise a SIGSEGV
-        dag_file = tmp_path / "bad_dag.py"
-        dag_file.write_text(
-            textwrap.dedent(
-                """\
-                import signal
-                from airflow import DAG
-                import os
-                from airflow.decorators import task
-
-                os.kill(os.getpid(), signal.SIGSEGV)
-
-                with DAG('testbug'):
-                    @task
-                    def mytask():
-                        print(1)
-                    mytask()
-                """
-            )
-        )
-
-        dagbag = DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-        assert "Received SIGSEGV signal while processing" in caplog.text
-        assert dag_file.as_posix() in dagbag.import_errors
-
-    def test_failed_signal_registration_does_not_crash_the_process(self, tmp_path, caplog):
-        """Test that a ValueError raised by a signal setting on child process does not crash the main process.
-        This was raised in test_dag_report.py module in api_fastapi/core_api/routes/public tests
-        """
-        dag_file = tmp_path / "test_dag.py"
-        dag_file.write_text(
-            textwrap.dedent(
-                """\
-                from airflow import DAG
-                from airflow.decorators import task
-
-                with DAG('testbug'):
-                    @task
-                    def mytask():
-                        print(1)
-                    mytask()
-                """
-            )
-        )
-        with mock.patch("airflow.dag_processing.dagbag.signal.signal") as mock_signal:
-            mock_signal.side_effect = ValueError("Invalid signal setting")
-            DagBag(dag_folder=os.fspath(tmp_path), include_examples=False)
-            assert "SIGSEGV signal handler registration failed. Not in the main thread" in caplog.text
-
-
-class TestCaptureWithReraise:
-    @staticmethod
-    def raise_warnings():
-        warnings.warn("Foo", UserWarning, stacklevel=2)
-        warnings.warn("Bar", UserWarning, stacklevel=2)
-        warnings.warn("Baz", UserWarning, stacklevel=2)
-
-    def test_capture_no_warnings(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            with _capture_with_reraise() as cw:
-                pass
-            assert cw == []
-
-    def test_capture_warnings(self):
-        with pytest.warns(UserWarning, match="(Foo|Bar|Baz)") as ctx:
-            with _capture_with_reraise() as cw:
-                self.raise_warnings()
-        assert len(cw) == 3
-        assert len(ctx.list) == 3
-
-    def test_capture_warnings_with_parent_error_filter(self):
-        with warnings.catch_warnings(record=True) as records:
-            warnings.filterwarnings("error", message="Bar")
-            with _capture_with_reraise() as cw:
-                with pytest.raises(UserWarning, match="Bar"):
-                    self.raise_warnings()
-            assert len(cw) == 1
-        assert len(records) == 1
-
-    def test_capture_warnings_with_parent_ignore_filter(self):
-        with warnings.catch_warnings(record=True) as records:
-            warnings.filterwarnings("ignore", message="Baz")
-            with _capture_with_reraise() as cw:
-                self.raise_warnings()
-            assert len(cw) == 2
-        assert len(records) == 2
-
-    def test_capture_warnings_with_filters(self):
-        with warnings.catch_warnings(record=True) as records:
-            with _capture_with_reraise() as cw:
-                warnings.filterwarnings("ignore", message="Foo")
-                self.raise_warnings()
-            assert len(cw) == 2
-        assert len(records) == 2
-
-    def test_capture_warnings_with_error_filters(self):
-        with warnings.catch_warnings(record=True) as records:
-            with _capture_with_reraise() as cw:
-                warnings.filterwarnings("error", message="Bar")
-                with pytest.raises(UserWarning, match="Bar"):
-                    self.raise_warnings()
-            assert len(cw) == 1
-        assert len(records) == 1
+        assert not missing
+
+    def test_api_server_reports_under_its_own_namespace(self):
+        from airflow.api_fastapi.common.dagbag import create_dag_bag
+
+        assert create_dag_bag()._stats_prefix == "api_server.dag_bag"
+
+    def test_cached_bag_requires_non_empty_stats_prefix(self):
+        """A cache with no namespace to report under must fail at wiring time, not mid-request."""
+        with pytest.raises(ValueError, match="requires a stats_prefix"):
+            CachedDBDagBag(cache_size=10, cache_ttl=60, stats_prefix="")
+
+    def test_plain_bag_emits_no_metrics(self):
+        """The unbounded base implementation does not report component cache metrics."""
+        dag_bag = DBDagBag()
+        mock_serdag = MagicMock()
+        mock_serdag.dag_version_id = "test_version_1"
+        mock_serdag.dag = MagicMock()
+
+        with patch(STATS_PATH) as mock_stats:
+            dag_bag._read_dag(mock_serdag)
+            dag_bag.clear_cache()
+
+        mock_stats.incr.assert_not_called()
+        mock_stats.gauge.assert_not_called()
+
+    def test_clear_cache_without_caching(self):
+        """Test clear_cache() without caching enabled."""
+        dag_bag = DBDagBag()
+
+        mock_dag = MagicMock()
+        dag_bag._dags["version_1"] = mock_dag
+        assert len(dag_bag._dags) == 1
+
+        count = dag_bag.clear_cache()
+        assert count == 1
+        assert len(dag_bag._dags) == 0
+
+    def test_ttl_cache_expiry(self):
+        """Test that cached DAGs expire after TTL."""
+        # TTLCache defaults to time.monotonic which time_machine cannot control.
+        # Use time.time as the timer so time_machine can advance it.
+        dag_bag = _stub_dag_bag(cache_size=10, cache_ttl=1)
+        dag_bag._dags = TTLCache(maxsize=10, ttl=1, timer=time.time)
+
+        with time_machine.travel("2025-01-01 00:00:00", tick=False):
+            dag_bag._dags["test_version_id"] = MagicMock()
+            assert "test_version_id" in dag_bag._dags
+
+        # Jump ahead beyond TTL
+        with time_machine.travel("2025-01-01 00:00:02", tick=False):
+            assert dag_bag._dags.get("test_version_id") is None
+
+    def test_lru_eviction(self):
+        """Test that LRU eviction works when cache is full."""
+        dag_bag = _stub_dag_bag(cache_size=2)
+
+        dag_bag._dags["version_1"] = MagicMock()
+        dag_bag._dags["version_2"] = MagicMock()
+        dag_bag._dags["version_3"] = MagicMock()
+
+        # version_1 should be evicted (LRU)
+        assert dag_bag._dags.get("version_1") is None
+        assert dag_bag._dags.get("version_2") is not None
+        assert dag_bag._dags.get("version_3") is not None
+
+    def test_thread_safety_with_caching(self):
+        """Test concurrent access doesn't cause race conditions with caching enabled."""
+        dag_bag = _stub_dag_bag(cache_size=100, cache_ttl=60)
+        errors = []
+        mock_session = MagicMock()
+
+        def make_dag_version(version_id):
+            serdag = MagicMock()
+            serdag.dag = MagicMock()
+            serdag.dag_version_id = version_id
+            return MagicMock(serialized_dag=serdag)
+
+        def get_dag_version(model, version_id, options=None):
+            return make_dag_version(version_id)
+
+        mock_session.get.side_effect = get_dag_version
+
+        def access_cache(i):
+            try:
+                dag_bag._get_dag(f"version_{i % 5}", mock_session)
+            except Exception as e:
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(access_cache, i) for i in range(100)]
+            for f in futures:
+                f.result()
+
+        assert not errors
+
+    def test_read_dag_stores_in_bounded_cache(self):
+        """Test that _read_dag stores DAG in bounded cache when cache_size > 0."""
+        dag_bag = _stub_dag_bag(cache_size=10, cache_ttl=60)
+
+        mock_sdm = MagicMock()
+        mock_sdm.dag = MagicMock()
+        mock_sdm.dag_version_id = "test_version"
+
+        result = dag_bag._read_dag(mock_sdm)
+
+        assert result == mock_sdm.dag
+        assert "test_version" in dag_bag._dags
+
+    def test_read_dag_stores_in_unbounded_dict(self):
+        """Test that _read_dag stores DAG in unbounded dict when no cache_size."""
+        dag_bag = DBDagBag()
+
+        mock_sdm = MagicMock()
+        mock_sdm.dag = MagicMock()
+        mock_sdm.dag_version_id = "test_version"
+
+        result = dag_bag._read_dag(mock_sdm)
+
+        assert result == mock_sdm.dag
+        assert "test_version" in dag_bag._dags
+
+    def test_iter_all_latest_version_dags_does_not_cache(self):
+        """Test that iter_all_latest_version_dags does not cache to prevent thrashing."""
+        dag_bag = _stub_dag_bag(cache_size=10, cache_ttl=60)
+
+        mock_session = MagicMock()
+        mock_sdm = MagicMock()
+        mock_sdm.dag = MagicMock()
+        mock_sdm.dag_version_id = "test_version"
+        mock_session.scalars.return_value = [mock_sdm]
+
+        list(dag_bag.iter_all_latest_version_dags(session=mock_session))
+
+        # Cache should be empty -- iter doesn't cache to prevent thrashing
+        assert len(dag_bag._dags) == 0
+
+    @patch("airflow.models.dagbag.stats")
+    def test_cache_hit_metric_emitted(self, mock_stats):
+        """Test that cache hit metric is emitted when caching is enabled."""
+        dag_bag = _stub_dag_bag(cache_size=10, cache_ttl=60)
+        mock_session = MagicMock()
+        # last_validated=0.0 forces revalidation; the hash matches, so it counts as a hit.
+        dag_bag._dags["test_version"] = _CacheEntry(MagicMock(), "hash1", 0.0)
+        mock_session.scalar.return_value = "hash1"
+
+        dag_bag._get_dag("test_version", mock_session)
+
+        mock_stats.incr.assert_called_with(f"{STUB_PREFIX}.cache_hit")
+
+    @patch("airflow.models.dagbag.stats")
+    def test_cache_miss_metric_emitted(self, mock_stats):
+        """Test that cache miss metric is emitted when DAG is found in DB but not in cache."""
+        dag_bag = _stub_dag_bag(cache_size=10, cache_ttl=60)
+        mock_session = MagicMock()
+
+        # Set up a DB result so _get_dag reaches the miss metric path
+        mock_serdag = MagicMock(spec=SerializedDagModel)
+        mock_serdag.dag = MagicMock(spec=SerializedDAG)
+        mock_serdag.dag_version_id = "uncached_version"
+        mock_dag_version = MagicMock()
+        mock_dag_version.serialized_dag = mock_serdag
+        mock_session.get.return_value = mock_dag_version
+
+        dag_bag._get_dag("uncached_version", mock_session)
+
+        mock_stats.incr.assert_any_call(f"{STUB_PREFIX}.cache_miss")
+
+    @patch("airflow.models.dagbag.stats")
+    def test_cache_clear_metric_emitted(self, mock_stats):
+        """Test that cache clear metric is emitted when caching is enabled."""
+        dag_bag = _stub_dag_bag(cache_size=10, cache_ttl=60)
+        dag_bag._dags["test_version"] = MagicMock()
+
+        dag_bag.clear_cache()
+
+        mock_stats.incr.assert_called_with(f"{STUB_PREFIX}.cache_clear")
+
+    @patch("airflow.models.dagbag.stats")
+    def test_cache_size_gauge_emitted(self, mock_stats):
+        """Test that cache size gauge is emitted when a DAG is cached."""
+        dag_bag = _stub_dag_bag(cache_size=10, cache_ttl=60)
+        mock_serdag = MagicMock()
+        mock_serdag.dag_version_id = "test_version_1"
+        mock_serdag.dag = MagicMock()
+        mock_serdag.load_op_links = True
+
+        dag_bag._read_dag(mock_serdag)
+
+        mock_stats.gauge.assert_called_with(f"{STUB_PREFIX}.cache_size", 1, rate=0.1)

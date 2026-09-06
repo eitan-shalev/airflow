@@ -17,20 +17,40 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
+from typing import TYPE_CHECKING, Annotated
 
-from pydantic import AliasPath, Field, NonNegativeInt, field_validator
+from pydantic import (
+    AliasPath,
+    AwareDatetime,
+    ConfigDict,
+    Field,
+    JsonValue,
+    NonNegativeInt,
+    StringConstraints,
+    field_validator,
+)
 
 from airflow._shared.secrets_masker import redact
+from airflow._shared.timezones import timezone
 from airflow.api_fastapi.core_api.base import BaseModel, StrictBaseModel
+from airflow.api_fastapi.core_api.datamodels.dag_run import TriggerDAGRunPostBody
+from airflow.models.base import ID_LEN
+from airflow.utils.types import DagRunType
+
+if TYPE_CHECKING:
+    from airflow.models.asset import AssetModel
+    from airflow.serialization.definitions.dag import SerializedDAG
 
 
 class DagScheduleAssetReference(StrictBaseModel):
-    """DAG schedule reference serializer for assets."""
+    """Dag schedule reference serializer for assets."""
 
     dag_id: str
     created_at: datetime
     updated_at: datetime
+    team_name: str | None = None
 
 
 class TaskInletAssetReference(StrictBaseModel):
@@ -49,6 +69,7 @@ class TaskOutletAssetReference(StrictBaseModel):
     task_id: str
     created_at: datetime
     updated_at: datetime
+    team_name: str | None = None
 
 
 class LastAssetEventResponse(BaseModel):
@@ -73,7 +94,7 @@ class AssetResponse(BaseModel):
     name: str
     uri: str
     group: str
-    extra: dict | None = None
+    extra: dict[str, JsonValue] | None = None
     created_at: datetime
     updated_at: datetime
     scheduled_dags: list[DagScheduleAssetReference]
@@ -87,6 +108,34 @@ class AssetResponse(BaseModel):
     @classmethod
     def redact_extra(cls, v: dict):
         return redact(v)
+
+    @classmethod
+    def from_asset_row(
+        cls,
+        asset: AssetModel,
+        last_asset_event_id: int | None,
+        last_asset_event_timestamp: datetime | None,
+    ) -> AssetResponse:
+        """Build a response from an ``AssetModel`` row joined with its last AssetEvent id/timestamp."""
+        watchers_data = [
+            {
+                "name": watcher.name,
+                "trigger_id": watcher.trigger_id,
+                "created_date": watcher.trigger.created_date,
+            }
+            for watcher in asset.watchers
+        ]
+        return cls.model_validate(
+            {
+                **asset.__dict__,
+                "aliases": asset.aliases,
+                "watchers": watchers_data,
+                "last_asset_event": {
+                    "id": last_asset_event_id,
+                    "timestamp": last_asset_event_timestamp,
+                },
+            }
+        )
 
 
 class AssetCollectionResponse(BaseModel):
@@ -107,21 +156,29 @@ class AssetAliasResponse(BaseModel):
 class AssetAliasCollectionResponse(BaseModel):
     """Asset alias collection response."""
 
-    asset_aliases: list[AssetAliasResponse]
+    asset_aliases: Iterable[AssetAliasResponse]
     total_entries: int
 
 
 class DagRunAssetReference(StrictBaseModel):
-    """DAGRun serializer for asset responses."""
+    """DagRun serializer for asset responses."""
 
     run_id: str
     dag_id: str
     logical_date: datetime | None
-    start_date: datetime
+    start_date: datetime | None
     end_date: datetime | None
     state: str
     data_interval_start: datetime | None
     data_interval_end: datetime | None
+    partition_key: str | None
+    triggering: bool = Field(
+        description=(
+            "Whether this asset event triggered the referenced dag run. Only a run's most recent "
+            "consumed asset event triggers it; earlier consumed events are included in the run but "
+            "did not trigger it."
+        ),
+    )
 
 
 class AssetEventResponse(BaseModel):
@@ -132,13 +189,14 @@ class AssetEventResponse(BaseModel):
     uri: str | None = Field(alias="uri", default=None)
     name: str | None = Field(alias="name", default=None)
     group: str | None = Field(alias="group", default=None)
-    extra: dict | None = None
+    extra: dict[str, JsonValue] | None = None
     source_task_id: str | None = None
     source_dag_id: str | None = None
     source_run_id: str | None = None
     source_map_index: int
     created_dagruns: list[DagRunAssetReference]
     timestamp: datetime
+    partition_key: str | None = None
 
     @field_validator("extra", mode="after")
     @classmethod
@@ -149,7 +207,7 @@ class AssetEventResponse(BaseModel):
 class AssetEventCollectionResponse(BaseModel):
     """Asset event collection response."""
 
-    asset_events: list[AssetEventResponse]
+    asset_events: Iterable[AssetEventResponse]
     total_entries: int
 
 
@@ -169,18 +227,44 @@ class QueuedEventCollectionResponse(BaseModel):
     total_entries: int
 
 
+class AssetEventAccessControl(StrictBaseModel):
+    """Access control settings for asset event consumer team filtering."""
+
+    consumer_teams: list[str] | None = None
+    allow_global: bool = True
+
+
 class CreateAssetEventsBody(StrictBaseModel):
     """Create asset events request."""
 
     asset_id: int
+    # pattern (not strip_whitespace) so the value isn't mutated — must stay byte-identical to what
+    # `_validate_outlet_event_partition_keys` in the Execution API accepts for the same raw input.
+    partition_key: Annotated[str, StringConstraints(pattern=r"\S", max_length=ID_LEN)] | None = None
     extra: dict = Field(default_factory=dict)
+    access_control: AssetEventAccessControl | None = None
 
     @field_validator("extra", mode="after")
     def set_from_rest_api(cls, v: dict) -> dict:
         v["from_rest_api"] = True
         return v
 
-    class Config:
-        """Pydantic config."""
+    model_config = ConfigDict(extra="forbid")
 
-        extra = "forbid"
+
+class MaterializeAssetBody(TriggerDAGRunPostBody):
+    """Materialize asset request."""
+
+    logical_date: AwareDatetime | None = None
+
+    def validate_context(self, dag: SerializedDAG) -> dict:
+        params = super().validate_context(dag)
+        if self.dag_run_id is None:
+            params["run_id"] = dag.timetable.generate_run_id(
+                run_type=DagRunType.ASSET_MATERIALIZATION,
+                run_after=timezone.coerce_datetime(params["run_after"]),
+                data_interval=params["data_interval"],
+            )
+        return params
+
+    model_config = ConfigDict(extra="forbid")

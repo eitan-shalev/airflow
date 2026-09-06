@@ -83,7 +83,7 @@ Communication
 --------------
 
 Airflow executes tasks of a Dag on different servers in case you are using :doc:`Kubernetes executor <apache-airflow-providers-cncf-kubernetes:kubernetes_executor>` or :doc:`Celery executor <apache-airflow-providers-celery:celery_executor>`.
-Therefore, you should not store any file or config in the local filesystem as the next task is likely to run on a different server without access to it — for example, a task that downloads the data file that the next task processes.
+Therefore, you should not store any file or config in the local filesystem as the downstream task is likely to run on a different server without access to it — for example, a task that downloads the data file that the downstream task processes.
 In the case of :class:`Local executor <airflow.executors.local_executor.LocalExecutor>`,
 storing a file on disk can make retries harder e.g., your task requires a config file that is deleted by another task in Dag.
 
@@ -291,17 +291,26 @@ When you execute that code you will see:
 
 .. code-block:: bash
 
-    root@cf85ab34571e:/opt/airflow# python /files/test_python.py
+    [Breeze:3.10.19] root@cf85ab34571e:/opt/airflow# python /files/test_python.py
     Executing 1
 
 This means that the ``get_array`` is not executed as top-level code, but ``get_task_id`` is.
 
+.. _best_practices/code_quality_and_linting:
+
 Code Quality and Linting
 ------------------------
 
-Maintaining high code quality is essential for the reliability and maintainability of your Airflow workflows. Utilizing linting tools can help identify potential issues and enforce coding standards. One such tool is ``ruff``, a fast Python linter that now includes specific rules for Airflow.
+Maintaining high code quality is essential for the reliability and maintainability of your Airflow workflows.
+The following points summarize how this relates to Ruff:
 
-ruff assists in detecting deprecated features and patterns that may affect your migration to Airflow 3.0. For instance, it includes rules prefixed with ``AIR`` to flag potential issues. The full list is detailed in `Airflow (AIR) <https://docs.astral.sh/ruff/rules/#airflow-air>`_.
+1. This page documents Airflow best practices. Some of those practices are also supported by Ruff ``AIR`` rules,
+   which help detect and enforce Airflow-specific best practices, including deprecated patterns and migration issues.
+   The full list is available in
+   `Airflow (AIR) <https://docs.astral.sh/ruff/rules/#airflow-air>`_.
+2. If you want to suggest a new Airflow best practice and add a matching Ruff ``AIR`` rule, follow the contributor
+   process described in
+   `Proposing Airflow Best Practices and Ruff AIR Rules <https://github.com/apache/airflow/blob/main/contributing-docs/24_proposing_best_practices_and_air_rules.rst>`_.
 
 Installing and Using ruff
 -------------------------
@@ -310,7 +319,7 @@ Installing and Using ruff
 
    .. code-block:: bash
 
-      pip install "ruff>=0.13.2"
+      pip install "ruff>=0.16.3"
 
 2. **Running ruff**: Execute ``ruff`` to check your Dags for potential issues:
 
@@ -346,6 +355,16 @@ Running ``ruff`` will produce:
    dags/legacy_dag.py:19:5: AIR303 airflow.sensors.filesystem.FileSensor is moved into ``standard`` provider in Airflow 3.0
 
 By integrating ``ruff`` into your development workflow, you can proactively address deprecations and maintain code quality, facilitating smoother transitions between Airflow versions.
+
+.. _best_practices/static_type_checking:
+
+Static Type Checking for Dags
+-----------------------------
+
+If you type-check your Dags with ``mypy``, the optional
+`apache-airflow-mypy <https://pypi.org/project/apache-airflow-mypy/>`_ plugins give accurate results for
+Airflow-specific patterns such as typed decorators and operator outputs. See
+:doc:`/howto/static-type-checking` for installation and configuration.
 
 .. _best_practices/dynamic_dag_generation:
 
@@ -714,6 +733,8 @@ the example_python_operator.py above so the actual parsing time is about ~ 0.62 
 
 You can look into :ref:`Testing a Dag <testing>` for details on how to test individual operators.
 
+.. _best_practices:unit_tests:
+
 Unit tests
 -----------
 
@@ -767,36 +788,69 @@ This is an example test want to verify the structure of a code-generated Dag aga
 
 **Unit test for custom operator:**
 
+To unit test an operator or a sensor, call it directly. You do not need a Dag run, a Dag, or a
+metadata database — instantiate the operator and call ``execute()`` with the context keys your
+code actually reads:
+
 .. code-block:: python
 
-    import pendulum
+    def test_my_custom_operator_execute():
+        op = MyCustomOperator(task_id="my_custom_operator_task", prefix="s3://bucket/some/prefix")
 
-    from airflow.sdk import DAG, TaskInstanceState
+        assert op.execute(context={}) == "expected return value"
+
+For a sensor, call ``poke()`` and assert on the returned boolean:
+
+.. code-block:: python
+
+    def test_my_custom_sensor_poke():
+        sensor = MyCustomSensor(task_id="my_custom_sensor_task", key="some-key")
+
+        assert sensor.poke(context={}) is True
+
+If your operator renders templated fields, render them before asserting:
+
+.. code-block:: python
+
+    op.render_template_fields(context={"ds": "2021-09-13"})
+    assert op.prefix == "s3://bucket/2021-09-13"
+
+For a deferrable operator, assert that it defers with the trigger you expect, then drive the
+resume path directly:
+
+.. code-block:: python
+
+    from airflow.sdk.exceptions import TaskDeferred
 
 
-    def test_my_custom_operator_execute_no_trigger(dag):
-        TEST_TASK_ID = "my_custom_operator_task"
-        with DAG(
-            dag_id="my_custom_operator_dag",
-            schedule="@daily",
-            start_date=pendulum.datetime(2021, 9, 13, tz="UTC"),
-        ) as dag:
-            MyCustomOperator(
-                task_id=TEST_TASK_ID,
-                prefix="s3://bucket/some/prefix",
-            )
+    def test_my_custom_operator_defers():
+        op = MyCustomOperator(task_id="my_custom_operator_task", deferrable=True)
 
-        dagrun = dag.test()
-        ti = dagrun.get_task_instance(task_id=TEST_TASK_ID)
-        assert ti.state == TaskInstanceState.SUCCESS
-        # Assert something related to tasks results: ti.xcom_pull()
+        with pytest.raises(TaskDeferred) as exc:
+            op.execute(context={})
+        assert isinstance(exc.value.trigger, MyCustomTrigger)
+
+        # Drive the method the trigger resumes into.
+        getattr(op, exc.value.method_name)(context={}, event={"status": "success"})
+
+.. note::
+
+    ``TaskInstance.run()`` and ``TaskInstance.render_templates()`` were removed in Airflow 3.2 —
+    ``TaskInstance`` has been an internal class since Airflow 3.0. Replace ``ti.run()`` with
+    ``op.execute(context)`` and ``ti.render_templates(context)`` with
+    ``op.render_template_fields(context)`` as shown above.
+
+To exercise a whole Dag run rather than a single operator, see
+:ref:`Testing Dags with dag.test() <concepts:debugging>`. That is an integration test: it needs a
+metadata database and a Dag that Airflow can serialize, so it is not a substitute for the unit
+tests above.
 
 
 Self-Checks
 ------------
 
 You can also implement checks in a Dag to make sure the tasks are producing the results as expected.
-As an example, if you have a task that pushes data to S3, you can implement a check in the next task. For example, the check could
+As an example, if you have a task that pushes data to S3, you can implement a check in the downstream task. For example, the check could
 make sure that the partition is created in S3 and perform some simple checks to determine if the data is correct.
 
 
@@ -833,7 +887,7 @@ You can use environment variables to parameterize the Dag.
 Mocking variables and connections
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-When you write tests for code that uses variables or a connection, you must ensure that they exist when you run the tests. The obvious solution is to save these objects to the database so they can be read while your code is executing. However, reading and writing objects to the database are burdened with additional time overhead. In order to speed up the test execution, it is worth simulating the existence of these objects without saving them to the database. For this, you can create environment variables with mocking :any:`os.environ` using :meth:`unittest.mock.patch.dict`.
+When you write tests for code that uses variables or a connection, you must ensure that they exist when you run the tests. The obvious solution is to save these objects to the database so they can be read while your code is executing. However, reading and writing objects to the database are burdened with additional time overhead. In order to speed up the test execution, it is worth simulating the existence of these objects without saving them to the database. For this, you can create environment variables with mocking :data:`os.environ` using :meth:`unittest.mock.patch.dict`.
 
 For variable, use :envvar:`AIRFLOW_VAR_{KEY}`.
 
@@ -846,6 +900,8 @@ For connection, use :envvar:`AIRFLOW_CONN_{CONN_ID}`.
 
 .. code-block:: python
 
+    from airflow.sdk import Connection
+
     conn = Connection(
         conn_type="gcpssh",
         login="cat",
@@ -853,7 +909,7 @@ For connection, use :envvar:`AIRFLOW_CONN_{CONN_ID}`.
     )
     conn_uri = conn.get_uri()
     with mock.patch.dict("os.environ", AIRFLOW_CONN_MY_CONN=conn_uri):
-        assert "cat" == Connection.get_connection_from_secrets("my_conn").login
+        assert "cat" == Connection.get("my_conn").login
 
 Metadata DB maintenance
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -1087,8 +1143,10 @@ The benefits of using those operators are:
   environment is optimized for the case where you have multiple similar, but different environments.
 * The dependencies can be pre-vetted by the admins and your security team, no unexpected, new code will
   be added dynamically. This is good for both, security and stability.
-* Complete isolation between tasks. They cannot influence one another in other ways than using standard
-  Airflow XCom mechanisms.
+* Strong process-level isolation between tasks. Tasks run in separate containers/pods and cannot
+  influence one another at the process or filesystem level. They can still interact through standard
+  Airflow mechanisms (XComs, connections, variables) via the Execution API. See
+  :doc:`/security/security_model` for the full isolation model.
 
 The drawbacks:
 

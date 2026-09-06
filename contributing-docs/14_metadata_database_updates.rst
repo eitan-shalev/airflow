@@ -29,9 +29,12 @@ database schema that you have made. To generate a new migration file, run the fo
 .. code-block:: bash
 
     # starting at the root of the project
+    # Use breeze:
+    $ breeze generate-migration-file -m "Add new field to db."
+    # Or, go to the airflow directory and use alembic directly:
     $ breeze --backend postgres
     $ cd airflow-core/src/airflow
-    $ alembic revision -m "add new field to db" --autogenerate
+    $ alembic revision -m "Add new field to db." --autogenerate
 
        Generating
     ~/airflow-core/src/airflow/migrations/versions/a1e23c41f123_add_new_field_to_db.py
@@ -49,6 +52,13 @@ After your new migration file is run through prek hook it will look like this:
 
 This represents that your migration is the 1234th migration and expected for release in Airflow version A.B.C.
 
+.. warning::
+
+   In rare cases, you may need to manually modify the migration logic of your auto-generated migration script.
+   If you must make manual changes to your migration script, **you must ensure you're not referencing any ORM classes
+   within your migration script**. Directly referring to an ORM class definition within a migration script can lead to
+   unexpected and / or broken downgrade pathways in the future, `as described here <https://github.com/apache/airflow/issues/59871>`_.
+
 How to Resolve Conflicts When Rebasing
 --------------------------------------
 
@@ -56,24 +66,45 @@ When rebasing your branch onto the latest ``main``, you may encounter conflicts 
 
 The affected files may include:
 
-- ``docs/apache-airflow/img/airflow_erd.sha256``
-- ``docs/apache-airflow/img/airflow_erd.svg``
-- ``docs/apache-airflow/migrations-ref.rst``
-- ``airflow/migrations/versions/1234_A_B_C_<your_migration_name>.py``
+- ``airflow-core/docs/migrations-ref.rst``
+- ``airflow-core/src/airflow/migrations/versions/1234_A_B_C_<your_migration_name>.py``
 
     There should be another file, ``1234_A_B_C_<other_migration_name>.py``, with the same ``1234_A_B_C`` prefix.
 
 To resolve these conflicts:
 
 1. First, resolve all conflicts **except** those in the files listed above. This includes conflicts in other ``.py`` files within the ``airflow/`` or ``tests/`` directories.
-2. Then, run the following commands to automatically update the affected files:
+2. Then, run the following command to automatically update the affected files:
 
 .. code-block:: bash
 
     prek update-migration-references --all-files
-    prek update-er-diagram --all-files
 
 3. Add the updated files to the staging area and continue with the rebase.
+
+.. note::
+
+    The ERD diagram (``airflow_erd.svg``) is no longer committed to the repository. It is
+    automatically generated during the documentation build by the ``generate_erd`` Sphinx extension.
+
+Running migration CI tests locally
+----------------------------------
+
+The various CI migration tests are defined in ``.github/actions/migration_tests/action.yml``. These tests ensure the
+database upgrades and downgrades are still functional from the lowest supported source migration version, to the latest version,
+and back down to the former. To run any of those CI tests on your machine, you can:
+
+1. Copy the relevant command (specified by the ``run`` key for the relevant CI job), and replace the environment variable references with their literal values defined in the sibling ``env`` section.
+2. Run the command you created from step 1, troubleshooting errors as needed.
+
+SQLite FK round-trip safety
+---------------------------
+
+Migrations that rebuild a parent table via ``op.batch_alter_table`` must wrap their entire body in
+``disable_sqlite_fkeys(op)`` *before* any DML or DDL opens an implicit transaction — otherwise the
+wrapper's PRAGMA is a no-op and the rebuild's implicit ``DROP TABLE`` cascade-deletes child rows
+(or aborts on a RESTRICT chain). The placement convention and the round-trip prek hook that
+enforces it are documented in `Migration round-trip regression check <26_migration_round_trip_check.rst>`__.
 
 How to hook your application into Airflow's migration process
 -------------------------------------------------------------
@@ -83,12 +114,12 @@ This feature is useful if you have a custom database schema that you want to mig
 This guide will show you how to hook your application into Airflow's migration process.
 
 Subclass the BaseDBManager
-==========================
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 To hook your application into Airflow's migration process, you need to subclass the ``BaseDBManager`` class from the
 ``airflow.utils.db_manager`` module. This class provides methods for running Alembic migrations.
 
-Create Alembic migration scripts
-================================
+Create Alembic migration scripts for your application
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 At the root of your application, run "alembic init migrations" to create a new migrations directory. Set the
 ``version_table`` variable in the ``env.py`` file to the name of the table that stores the migration history. Specify this
 version_table in the ``version_table`` argument of the alembic's ``context.configure`` method of the ``run_migration_online``
@@ -110,7 +141,7 @@ Replace the content of your application's ``alembic.ini`` file with Airflow's ``
 If the above is not clear, you might want to look at the FAB implementation of this migration.
 
 After setting up those, and you want Airflow to run the migration for you when running ``airflow db migrate`` then you need to
-add your DBManager to the ``[core] external_db_managers`` configuration.
+add your DBManager to the ``[database] external_db_managers`` configuration.
 
 --------
 

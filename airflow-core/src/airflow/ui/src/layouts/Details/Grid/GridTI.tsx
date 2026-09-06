@@ -16,137 +16,125 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Badge, Flex } from "@chakra-ui/react";
-import type { MouseEvent } from "react";
-import React, { useCallback } from "react";
-import { useTranslation } from "react-i18next";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Badge, Box, Flex } from "@chakra-ui/react";
+import { Link, useLocation, useParams, useSearchParams } from "react-router-dom";
 
 import type { LightGridTaskInstanceSummary } from "openapi/requests/types.gen";
 import { StateIcon } from "src/components/StateIcon";
-import Time from "src/components/Time";
-import { Tooltip } from "src/components/ui";
-import { type HoverContextType, useHover } from "src/context/hover";
+import TaskInstanceTooltip from "src/components/TaskInstanceTooltip";
+import { useColorMode } from "src/context/colorMode";
 import { buildTaskInstanceUrl } from "src/utils/links";
 
-const handleMouseEnter =
-  (setHoveredTaskId: HoverContextType["setHoveredTaskId"]) => (event: MouseEvent<HTMLDivElement>) => {
-    const tasks = document.querySelectorAll<HTMLDivElement>(`#${event.currentTarget.id}`);
-
-    tasks.forEach((task) => {
-      task.style.backgroundColor = "var(--chakra-colors-info-subtle)";
-    });
-
-    setHoveredTaskId(event.currentTarget.id.replaceAll("-", "."));
-  };
-
-const handleMouseLeave = (taskId: string, setHoveredTaskId: HoverContextType["setHoveredTaskId"]) => () => {
-  const tasks = document.querySelectorAll<HTMLDivElement>(`#${taskId.replaceAll(".", "-")}`);
-
-  tasks.forEach((task) => {
-    task.style.backgroundColor = "";
-  });
-
-  setHoveredTaskId(undefined);
-};
+import { NOTE_GRADIENT, SELECTED_TASK_OUTLINE_COLOR } from "./constants";
 
 type Props = {
   readonly dagId: string;
+  readonly hasNote?: boolean;
   readonly instance: LightGridTaskInstanceSummary;
   readonly isGroup?: boolean;
   readonly isMapped?: boolean | null;
   readonly label: string;
   readonly onClick?: () => void;
   readonly runId: string;
-  readonly search: string;
   readonly taskId: string;
 };
 
-const Instance = ({ dagId, instance, isGroup, isMapped, onClick, runId, search, taskId }: Props) => {
-  const { setHoveredTaskId } = useHover();
-  const { groupId: selectedGroupId, taskId: selectedTaskId } = useParams();
-  const { t: translate } = useTranslation();
+export const GridTI = ({
+  dagId,
+  hasNote = false,
+  instance,
+  isGroup,
+  isMapped,
+  onClick,
+  runId,
+  taskId,
+}: Props) => {
+  const { groupId: selectedGroupId, runId: selectedRunId, taskId: selectedTaskId } = useParams();
+  const { colorMode = "light" } = useColorMode();
   const location = useLocation();
 
-  const onMouseEnter = handleMouseEnter(setHoveredTaskId);
-  const onMouseLeave = handleMouseLeave(taskId, setHoveredTaskId);
+  const [searchParams] = useSearchParams();
 
-  const getTaskUrl = useCallback(
-    () =>
-      buildTaskInstanceUrl({
+  const hasTaskInstance = instance.dag_version_number !== null && instance.dag_version_number !== undefined;
+  const taskUrl = hasTaskInstance
+    ? buildTaskInstanceUrl({
         currentPathname: location.pathname,
         dagId,
         isGroup,
         isMapped: Boolean(isMapped),
         runId,
         taskId,
-      }),
-    [dagId, isGroup, isMapped, location.pathname, runId, taskId],
-  );
+      })
+    : `/dags/${dagId}/tasks/${isGroup ? "group/" : ""}${taskId}`;
+
+  // Remove try_number query param when navigating to reset to the
+  // latest try of the task instance and avoid issues with invalid try numbers:
+  // https://github.com/apache/airflow/issues/56977
+  searchParams.delete("try_number");
+  const redirectionSearch = searchParams.toString();
+
+  const isSelectedRow = selectedTaskId === taskId || selectedGroupId === taskId;
+  const isSelectedTaskInstance = selectedRunId === runId && isSelectedRow;
+  const selectedOutlineColor = SELECTED_TASK_OUTLINE_COLOR[colorMode];
 
   return (
     <Flex
       alignItems="center"
-      bg={selectedTaskId === taskId || selectedGroupId === taskId ? "info.muted" : undefined}
+      bg={isSelectedRow ? "brand.emphasized" : undefined}
+      data-run-id={runId}
+      data-selected={isSelectedRow}
+      data-task-id={taskId}
       height="20px"
-      id={taskId.replaceAll(".", "-")}
+      id={`task-${taskId.replaceAll(".", "-")}`}
       justifyContent="center"
       key={taskId}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
       position="relative"
       px="2px"
       py={0}
       transition="background-color 0.2s"
     >
-      <Link
-        id={`grid-${runId}-${taskId}`}
-        onClick={onClick}
-        replace
-        to={{
-          pathname: getTaskUrl(),
-          search,
-        }}
+      <TaskInstanceTooltip
+        openDelay={500}
+        positioning={{ placement: "bottom" }}
+        runId={runId}
+        taskInstance={instance}
       >
-        <Tooltip
-          content={
-            <>
-              {translate("taskId")}: {taskId}
-              <br />
-              {translate("state")}: {instance.state}
-              {instance.min_start_date !== null && (
-                <>
-                  <br />
-                  {translate("startDate")}: <Time datetime={instance.min_start_date} />
-                </>
-              )}
-              {instance.max_end_date !== null && (
-                <>
-                  <br />
-                  {translate("endDate")}: <Time datetime={instance.max_end_date} />
-                </>
-              )}
-            </>
-          }
-        >
-          <Badge
-            alignItems="center"
-            borderRadius={4}
-            colorPalette={instance.state ?? "none"}
-            display="flex"
-            height="14px"
-            justifyContent="center"
-            minH={0}
-            p={0}
-            variant="solid"
-            width="14px"
+        <Box as="span" display="inline-block">
+          <Link
+            data-testid={`grid-${runId}-${taskId}`}
+            id={`grid-${runId}-${taskId}`}
+            onClick={onClick}
+            replace
+            to={{
+              pathname: taskUrl,
+              search: redirectionSearch,
+            }}
           >
-            <StateIcon size={10} state={instance.state} />
-          </Badge>
-        </Tooltip>
-      </Link>
+            <Badge
+              alignItems="center"
+              borderRadius={4}
+              colorPalette={instance.state ?? "none"}
+              data-selected={isSelectedTaskInstance || undefined}
+              data-testid="task-state-badge"
+              display="flex"
+              height="14px"
+              justifyContent="center"
+              minH={0}
+              outlineColor={isSelectedTaskInstance ? selectedOutlineColor : undefined}
+              outlineOffset="1px"
+              outlineStyle={isSelectedTaskInstance ? "solid" : undefined}
+              outlineWidth={isSelectedTaskInstance ? "2px" : undefined}
+              p={0}
+              style={hasNote ? { background: NOTE_GRADIENT } : undefined}
+              transition="outline-color 0.2s"
+              variant="solid"
+              width="14px"
+            >
+              <StateIcon size={10} state={instance.state} />
+            </Badge>
+          </Link>
+        </Box>
+      </TaskInstanceTooltip>
     </Flex>
   );
 };
-
-export const GridTI = React.memo(Instance);

@@ -17,7 +17,7 @@
 # under the License.
 from __future__ import annotations
 
-import warnings
+from contextlib import suppress
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, TextIO
@@ -32,16 +32,29 @@ from pydantic import JsonValue  # noqa: TC002
 if TYPE_CHECKING:
     from structlog.typing import EventDict, FilteringBoundLogger, Processor
 
-    from airflow.logging_config import RemoteLogIO
+    from airflow.sdk._shared.logging.remote import RemoteLogIO
     from airflow.sdk.types import Logger, RuntimeTaskInstanceProtocol as RuntimeTI
 
 
-__all__ = ["configure_logging", "reset_logging", "mask_secret"]
+from airflow.sdk._shared.secrets_masker import _secrets_masker, redact
+
+
+class _ActiveLoggingConfig:
+    """Internal class to track active logging configuration."""
+
+    logging_config_loaded = False
+    remote_task_log: RemoteLogIO | None = None
+    default_remote_conn_id: str | None = None
+
+    @classmethod
+    def set(cls, remote_task_log: RemoteLogIO | None, default_remote_conn_id: str | None) -> None:
+        """Set remote logging configuration."""
+        cls.remote_task_log = remote_task_log
+        cls.default_remote_conn_id = default_remote_conn_id
+        cls.logging_config_loaded = True
 
 
 def mask_logs(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:
-    from airflow.sdk._shared.secrets_masker import redact
-
     event_dict = redact(event_dict)  # type: ignore[assignment]
     return event_dict
 
@@ -80,7 +93,7 @@ def configure_logging(
     colored_console_log: bool | None = None,
 ):
     """Set up struct logging and stdlib logging config."""
-    from airflow.configuration import conf
+    from airflow.sdk.configuration import conf
 
     if log_level == "DEFAULT":
         log_level = "INFO"
@@ -121,13 +134,6 @@ def configure_logging(
         callsite_parameters=callsite_params,
     )
 
-    global _warnings_showwarning
-
-    if _warnings_showwarning is None:
-        _warnings_showwarning = warnings.showwarning
-        # Capture warnings and show them via structlog -- i.e. in task logs
-        warnings.showwarning = _showwarning
-
 
 def logger_at_level(name: str, level: int) -> Logger:
     """Create a new logger at the given level."""
@@ -144,8 +150,8 @@ def init_log_file(local_relative_path: str) -> Path:
 
     Any directories that are missing are created with the right permission bits.
     """
-    from airflow.configuration import conf
     from airflow.sdk._shared.logging import init_log_file
+    from airflow.sdk.configuration import conf
 
     new_file_permissions = int(
         conf.get("logging", "file_task_handler_new_file_permissions", fallback="0o664"),
@@ -166,20 +172,41 @@ def init_log_file(local_relative_path: str) -> Path:
     )
 
 
-def load_remote_log_handler() -> RemoteLogIO | None:
-    import airflow.logging_config
+def _load_logging_config() -> None:
+    """
+    Load and cache the remote logging configuration from SDK config.
 
-    return airflow.logging_config.REMOTE_TASK_LOG
+    SDK mirror of :func:`airflow.logging_config.load_logging_config` — see that
+    function for the ``logging_config_class`` / ``REMOTE_TASK_LOG`` contract.
+    """
+    from airflow.sdk._shared.logging.factory import resolve_remote_task_log
+    from airflow.sdk._shared.module_loading import import_string
+    from airflow.sdk.configuration import conf
+    from airflow.sdk.providers_manager_runtime import ProvidersManagerTaskRuntime
+
+    remote_task_log, default_remote_conn_id = resolve_remote_task_log(
+        conf=conf,
+        providers_manager=ProvidersManagerTaskRuntime(),
+        import_string=import_string,
+    )
+    _ActiveLoggingConfig.set(remote_task_log, default_remote_conn_id)
+
+
+def load_remote_log_handler() -> RemoteLogIO | None:
+    if not _ActiveLoggingConfig.logging_config_loaded:
+        _load_logging_config()
+    return _ActiveLoggingConfig.remote_task_log
 
 
 def load_remote_conn_id() -> str | None:
-    import airflow.logging_config
-    from airflow.configuration import conf
+    from airflow.sdk.configuration import conf
 
     if conn_id := conf.get("logging", "remote_log_conn_id", fallback=None):
         return conn_id
 
-    return airflow.logging_config.DEFAULT_REMOTE_CONN_ID
+    if not _ActiveLoggingConfig.logging_config_loaded:
+        _load_logging_config()
+    return _ActiveLoggingConfig.default_remote_conn_id
 
 
 def relative_path_from_logger(logger) -> Path | None:
@@ -195,13 +222,14 @@ def relative_path_from_logger(logger) -> Path | None:
     if fh.fileno() == 1 or not isinstance(fname, str):
         # Logging to stdout, or something odd about this logger, don't try to upload!
         return None
-    from airflow.configuration import conf
+
+    from airflow.sdk.configuration import conf
 
     base_log_folder = conf.get("logging", "base_log_folder")
     return Path(fname).relative_to(base_log_folder)
 
 
-def upload_to_remote(logger: FilteringBoundLogger, ti: RuntimeTI):
+def upload_to_remote(logger: FilteringBoundLogger, ti: RuntimeTI | None = None):
     raw_logger = getattr(logger, "_logger")
 
     handler = load_remote_log_handler()
@@ -227,10 +255,6 @@ def mask_secret(secret: JsonValue, name: str | None = None) -> None:
     they're masked in both the task subprocess AND supervisor's log output.
     Works safely in both sync and async contexts.
     """
-    from contextlib import suppress
-
-    from airflow.sdk._shared.secrets_masker import _secrets_masker
-
     _secrets_masker().add_mask(secret, name)
 
     with suppress(Exception):
@@ -242,49 +266,32 @@ def mask_secret(secret: JsonValue, name: str | None = None) -> None:
             comms.send(MaskSecret(value=secret, name=name))
 
 
+async def amask_secret(secret: JsonValue, name: str | None = None) -> None:
+    """
+    Async version of mask_secret for use in async contexts.
+
+    Uses asend() instead of send() to avoid deadlock when called from within
+    an async task that already has an asend() in flight.
+    """
+    _secrets_masker().add_mask(secret, name)
+
+    with suppress(Exception):
+        # Try to tell supervisor (only if in task execution context)
+        from airflow.sdk.execution_time import task_runner
+        from airflow.sdk.execution_time.comms import MaskSecret
+
+        if comms := getattr(task_runner, "SUPERVISOR_COMMS", None):
+            await comms.asend(MaskSecret(value=secret, name=name))
+
+
 def reset_logging():
     """
     Convince for testing. Not for production use.
 
     :meta private:
     """
-    from airflow.sdk._shared.logging.structlog import structlog_processors
+    from airflow.sdk._shared.logging.structlog import _WarningsInterceptor, structlog_processors
 
-    global _warnings_showwarning
-    warnings.showwarning = _warnings_showwarning
-    _warnings_showwarning = None
+    _WarningsInterceptor.reset()
     structlog_processors.cache_clear()
     logging_processors.cache_clear()
-
-
-_warnings_showwarning: Any = None
-
-
-def _showwarning(
-    message: Warning | str,
-    category: type[Warning],
-    filename: str,
-    lineno: int,
-    file: TextIO | None = None,
-    line: str | None = None,
-) -> Any:
-    """
-    Redirects warnings to structlog so they appear in task logs etc.
-
-    Implementation of showwarnings which redirects to logging, which will first
-    check to see if the file parameter is None. If a file is specified, it will
-    delegate to the original warnings implementation of showwarning. Otherwise,
-    it will call warnings.formatwarning and will log the resulting string to a
-    warnings logger named "py.warnings" with level logging.WARNING.
-    """
-    if file is not None:
-        if _warnings_showwarning is not None:
-            _warnings_showwarning(message, category, filename, lineno, file, line)
-    else:
-        from airflow.sdk._shared.logging.structlog import reconfigure_logger
-
-        log = reconfigure_logger(
-            structlog.get_logger("py.warnings").bind(), structlog.processors.CallsiteParameterAdder
-        )
-
-        log.warning(str(message), category=category.__name__, filename=filename, lineno=lineno)

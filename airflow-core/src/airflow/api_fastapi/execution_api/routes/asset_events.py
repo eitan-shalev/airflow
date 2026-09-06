@@ -23,14 +23,20 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import and_, select
 
 from airflow.api_fastapi.common.db.common import SessionDep
+from airflow.api_fastapi.common.parameters import (
+    BaseParam,
+    QueryAssetEventPartitionKeyFilter,
+    QueryAssetEventPartitionKeyRegex,
+)
+from airflow.api_fastapi.common.types import UtcDateTime
 from airflow.api_fastapi.execution_api.datamodels.asset import AssetResponse
 from airflow.api_fastapi.execution_api.datamodels.asset_event import (
     AssetEventResponse,
     AssetEventsResponse,
 )
 from airflow.models.asset import AssetAliasModel, AssetEvent, AssetModel
+from airflow.utils.sqlalchemy import JsonContains
 
-# TODO: Add dependency on JWT token
 router = APIRouter(
     responses={
         status.HTTP_404_NOT_FOUND: {"description": "Asset not found"},
@@ -40,11 +46,23 @@ router = APIRouter(
 
 
 def _get_asset_events_through_sql_clauses(
-    *, join_clause, where_clause, session: SessionDep
+    *,
+    join_clause,
+    where_clause,
+    session: SessionDep,
+    ascending: bool = True,
+    limit: int | None = None,
+    filters: list[BaseParam] | None = None,
 ) -> AssetEventsResponse:
-    asset_events = session.scalars(
-        select(AssetEvent).join(join_clause).where(where_clause).order_by(AssetEvent.timestamp)
-    )
+    order_by_clause = AssetEvent.timestamp.asc() if ascending else AssetEvent.timestamp.desc()
+    asset_events_query = select(AssetEvent).join(join_clause).where(where_clause).order_by(order_by_clause)
+    for filter_ in filters or []:
+        asset_events_query = filter_.to_orm(asset_events_query)
+    if limit:
+        asset_events_query = asset_events_query.limit(limit)
+    # A regexp partition-key filter bounds the query runtime automatically (its dependency applies
+    # apply_regex_query_timeout to this request's session), so no explicit wrapping is needed here.
+    asset_events = session.scalars(asset_events_query).all()
     return AssetEventsResponse.model_validate(
         {
             "asset_events": [
@@ -63,6 +81,7 @@ def _get_asset_events_through_sql_clauses(
                     source_dag_id=event.source_dag_id,
                     source_run_id=event.source_run_id,
                     source_map_index=event.source_map_index,
+                    partition_key=event.partition_key,
                 )
                 for event in asset_events
             ]
@@ -70,11 +89,40 @@ def _get_asset_events_through_sql_clauses(
     )
 
 
+def _parse_extra_params(extra: list[str] | None) -> dict[str, str]:
+    """Parse repeated ``key=value`` query params into a dict."""
+    result: dict[str, str] = {}
+    for item in extra or []:
+        if "=" not in item:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "reason": "Invalid parameter",
+                    "message": f"Invalid extra parameter format: {item!r}. Expected 'key=value'.",
+                },
+            )
+        k, v = item.split("=", 1)
+        result[k] = v
+    return result
+
+
 @router.get("/by-asset")
 def get_asset_event_by_asset_name_uri(
     name: Annotated[str | None, Query(description="The name of the Asset")],
     uri: Annotated[str | None, Query(description="The URI of the Asset")],
     session: SessionDep,
+    partition_key: QueryAssetEventPartitionKeyFilter,
+    partition_key_regexp_pattern: QueryAssetEventPartitionKeyRegex,
+    after: Annotated[UtcDateTime | None, Query(description="The start of the time range")] = None,
+    before: Annotated[UtcDateTime | None, Query(description="The end of the time range")] = None,
+    ascending: Annotated[bool, Query(description="Whether to sort results in ascending order")] = True,
+    limit: Annotated[int | None, Query(description="The maximum number of results to return")] = None,
+    extra: Annotated[
+        list[str] | None,
+        Query(
+            description="Filter by extra JSON key-value pairs. Format: key=value. Repeat for AND logic.",
+        ),
+    ] = None,
 ) -> AssetEventsResponse:
     if name and uri:
         where_clause = and_(AssetModel.name == name, AssetModel.uri == uri)
@@ -91,10 +139,21 @@ def get_asset_event_by_asset_name_uri(
             },
         )
 
+    if after:
+        where_clause = and_(where_clause, AssetEvent.timestamp >= after)
+    if before:
+        where_clause = and_(where_clause, AssetEvent.timestamp <= before)
+    extra_dict = _parse_extra_params(extra)
+    if extra_dict:
+        where_clause = and_(where_clause, JsonContains(AssetEvent.extra, extra_dict))
+
     return _get_asset_events_through_sql_clauses(
         join_clause=AssetEvent.asset,
         where_clause=where_clause,
         session=session,
+        ascending=ascending,
+        limit=limit,
+        filters=[partition_key, partition_key_regexp_pattern],
     )
 
 
@@ -102,9 +161,33 @@ def get_asset_event_by_asset_name_uri(
 def get_asset_event_by_asset_alias(
     name: Annotated[str, Query(description="The name of the Asset Alias")],
     session: SessionDep,
+    partition_key: QueryAssetEventPartitionKeyFilter,
+    partition_key_regexp_pattern: QueryAssetEventPartitionKeyRegex,
+    after: Annotated[UtcDateTime | None, Query(description="The start of the time range")] = None,
+    before: Annotated[UtcDateTime | None, Query(description="The end of the time range")] = None,
+    ascending: Annotated[bool, Query(description="Whether to sort results in ascending order")] = True,
+    limit: Annotated[int | None, Query(description="The maximum number of results to return")] = None,
+    extra: Annotated[
+        list[str] | None,
+        Query(
+            description="Filter by extra JSON key-value pairs. Format: key=value. Repeat for AND logic.",
+        ),
+    ] = None,
 ) -> AssetEventsResponse:
+    where_clause = AssetAliasModel.name == name
+    if after:
+        where_clause = and_(where_clause, AssetEvent.timestamp >= after)
+    if before:
+        where_clause = and_(where_clause, AssetEvent.timestamp <= before)
+    extra_dict = _parse_extra_params(extra)
+    if extra_dict:
+        where_clause = and_(where_clause, JsonContains(AssetEvent.extra, extra_dict))
+
     return _get_asset_events_through_sql_clauses(
         join_clause=AssetEvent.source_aliases,
-        where_clause=(AssetAliasModel.name == name),
+        where_clause=where_clause,
         session=session,
+        ascending=ascending,
+        limit=limit,
+        filters=[partition_key, partition_key_regexp_pattern],
     )

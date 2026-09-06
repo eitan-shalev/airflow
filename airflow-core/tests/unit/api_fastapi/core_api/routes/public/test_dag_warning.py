@@ -18,11 +18,13 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.orm import Session
 
 from airflow.models.dag import DagModel
 from airflow.models.dagwarning import DagWarning
-from airflow.utils.session import provide_session
+from airflow.utils.session import NEW_SESSION, provide_session
 
+from tests_common.test_utils.asserts import assert_queries_count
 from tests_common.test_utils.db import clear_db_dag_warnings, clear_db_dags
 
 pytestmark = pytest.mark.db_test
@@ -47,7 +49,7 @@ expected_display_names = {
 
 @pytest.fixture(autouse=True)
 @provide_session
-def setup(dag_maker, testing_dag_bundle, session=None) -> None:
+def setup(dag_maker, testing_dag_bundle, *, session: Session = NEW_SESSION) -> None:
     clear_db_dags()
     clear_db_dag_warnings()
 
@@ -70,7 +72,7 @@ def setup(dag_maker, testing_dag_bundle, session=None) -> None:
 
 class TestGetDagWarnings:
     @pytest.mark.parametrize(
-        "query_params, expected_total_entries, expected_messages",
+        ("query_params", "expected_total_entries", "expected_messages"),
         [
             ({}, 3, [DAG1_MESSAGE, DAG2_MESSAGE, DAG3_MESSAGE]),
             ({"dag_id": DAG1_ID}, 1, [DAG1_MESSAGE]),
@@ -88,7 +90,8 @@ class TestGetDagWarnings:
         ],
     )
     def test_get_dag_warnings(self, test_client, query_params, expected_total_entries, expected_messages):
-        response = test_client.get("/dagWarnings", params=query_params)
+        with assert_queries_count(3 if query_params.get("dag_id") is None else 4):
+            response = test_client.get("/dagWarnings", params=query_params)
         assert response.status_code == 200
         response_json = response.json()
         assert response_json["total_entries"] == expected_total_entries
@@ -112,4 +115,7 @@ class TestGetDagWarnings:
         response = test_client.get("/dagWarnings", params={"warning_type": "invalid"})
         response_json = response.json()
         assert response.status_code == 422
-        assert response_json["detail"][0]["msg"] == "Input should be 'asset conflict' or 'non-existent pool'"
+        assert (
+            response_json["detail"][0]["msg"]
+            == "Input should be 'asset conflict', 'duplicate dag id', 'non-existent pool' or 'runtime varying value'"
+        )

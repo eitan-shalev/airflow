@@ -29,9 +29,15 @@ export type RunCounts = {
   total: number;
 };
 
+export type DeadlineCounts = {
+  missed: number;
+  pending: number;
+};
+
 export type CalendarCellData = {
   readonly counts: RunCounts;
   readonly date: string;
+  readonly deadlineCounts?: DeadlineCounts;
   readonly runs: Array<CalendarTimeRangeResponse>;
 };
 
@@ -65,7 +71,13 @@ export type LegendItem = {
 export type CalendarScaleType = "empty" | "gradient" | "single_value";
 
 export type CalendarScale = {
-  readonly getColor: (counts: RunCounts) => string | { _dark: string; _light: string };
+  readonly getColor: (counts: RunCounts) =>
+    | string
+    | { _dark: string; _light: string }
+    | {
+        primary: string | { _dark: string; _light: string };
+        secondary: string | { _dark: string; _light: string };
+      };
   readonly legendItems: Array<LegendItem>;
   readonly type: CalendarScaleType;
 };

@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Flex, GridItem, Heading, HStack, Spinner } from "@chakra-ui/react";
+import { Box, Flex, GridItem, Heading, HStack } from "@chakra-ui/react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -24,41 +24,44 @@ import type { TaskInstanceState } from "openapi/requests/types.gen";
 import { Stat } from "src/components/Stat";
 import { StateBadge } from "src/components/StateBadge";
 
+import { DagDeactivatedBanner } from "./DagDeactivatedBanner";
+
 type Props = {
   readonly actions?: ReactNode;
   readonly icon: ReactNode;
-  readonly isRefreshing?: boolean;
   readonly state?: TaskInstanceState | null;
-  readonly stats: Array<{ label: string; value: ReactNode | string }>;
+  readonly stats: Array<{ key?: string; label: string; value: ReactNode | string }>;
   readonly subTitle?: ReactNode | string;
   readonly title: ReactNode | string;
 };
 
-export const HeaderCard = ({ actions, icon, isRefreshing, state, stats, subTitle, title }: Props) => {
+export const HeaderCard = ({ actions, icon, state, stats, subTitle, title }: Props) => {
   const { t: translate } = useTranslation();
 
   return (
-    <Box borderColor="border.emphasized" borderRadius={8} borderWidth={1} p={2}>
-      <Flex alignItems="center" flexWrap="wrap" justifyContent="space-between" mb={2}>
-        <Flex alignItems="center" flexWrap="wrap" gap={2}>
-          <Heading size="xl">{icon}</Heading>
-          <Heading size="lg">{title}</Heading>
-          <Heading size="lg">{subTitle}</Heading>
-          {state === undefined ? undefined : (
-            <StateBadge state={state}>{state ? translate(`common:states.${state}`) : undefined}</StateBadge>
-          )}
-          {isRefreshing ? <Spinner /> : <div />}
+    <Box data-testid="header-card" flexShrink={0} overflow="hidden">
+      <DagDeactivatedBanner />
+      <Box p={2}>
+        <Flex alignItems="center" flexWrap="wrap" justifyContent="space-between" mb={2}>
+          <Flex alignItems="center" flexWrap="wrap" gap={2}>
+            <Heading size="xl">{icon}</Heading>
+            <Heading size="lg">{title}</Heading>
+            <Heading size="lg">{subTitle}</Heading>
+            {state === undefined ? undefined : (
+              <StateBadge state={state}>{state ? translate(`common:states.${state}`) : undefined}</StateBadge>
+            )}
+          </Flex>
+          <HStack gap={1}>{actions}</HStack>
         </Flex>
-        <HStack gap={1}>{actions}</HStack>
-      </Flex>
 
-      <HStack alignItems="flex-start" flexWrap="wrap" gap={5} justifyContent="space-between" my={2}>
-        {stats.map(({ label, value }) => (
-          <GridItem key={label}>
-            <Stat label={label}>{value}</Stat>
-          </GridItem>
-        ))}
-      </HStack>
+        <HStack alignItems="flex-start" flexWrap="wrap" gap={5} justifyContent="space-between" my={2}>
+          {stats.map((stat) => (
+            <GridItem key={stat.key ?? stat.label}>
+              <Stat label={stat.label}>{stat.value}</Stat>
+            </GridItem>
+          ))}
+        </HStack>
+      </Box>
     </Box>
   );
 };

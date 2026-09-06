@@ -16,27 +16,33 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Button, Box, Spacer, HStack, Accordion, Text } from "@chakra-ui/react";
+import { Button, Box, Spacer, HStack, Text } from "@chakra-ui/react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FiSend } from "react-icons/fi";
 import { useSearchParams } from "react-router-dom";
 
-import type { HITLDetail, TaskInstanceResponse } from "openapi/requests/types.gen";
+import type { HITLDetailHistory, TaskInstanceHistoryResponse } from "openapi/requests/types.gen";
 import { FlexibleForm } from "src/components/FlexibleForm/FlexibleForm";
 import Time from "src/components/Time";
 import { useParamStore } from "src/queries/useParamStore";
 import { useUpdateHITLDetail } from "src/queries/useUpdateHITLDetail";
 import { DEFAULT_DATETIME_FORMAT } from "src/utils/datetimeUtils";
-import { getHITLParamsDict, getHITLFormData, getPreloadHITLFormData } from "src/utils/hitl";
+import { getHITLParamsDict, getHITLFormData, getPreloadHITLFormData, isHITLPending } from "src/utils/hitl";
 
 type HITLResponseFormProps = {
   readonly hitlDetail: {
-    task_instance: TaskInstanceResponse;
-  } & Omit<HITLDetail, "task_instance">;
+    task_instance: TaskInstanceHistoryResponse;
+  } & Omit<HITLDetailHistory, "task_instance">;
+  readonly namespace?: string;
+  readonly onResponded?: () => void;
 };
 
-const isHighlightOption = (option: string, hitlDetail: HITLDetail, preloadedHITLOptions: Array<string>) => {
+const isHighlightOption = (
+  option: string,
+  hitlDetail: HITLDetailHistory,
+  preloadedHITLOptions: Array<string>,
+) => {
   // preload's priority is higher than default
   const defaultOptions = preloadedHITLOptions.length > 0 ? preloadedHITLOptions : hitlDetail.defaults;
 
@@ -50,11 +56,11 @@ const isHighlightOption = (option: string, hitlDetail: HITLDetail, preloadedHITL
   return isSelected ?? isDefault ?? !Boolean(hitlDetail.defaults);
 };
 
-export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
+export const HITLResponseForm = ({ hitlDetail, namespace = "hitl", onResponded }: HITLResponseFormProps) => {
   const { t: translate } = useTranslation("hitl");
   const [errors, setErrors] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const { paramsDict } = useParamStore("hitl");
+  const { paramsDict } = useParamStore(namespace);
   const [searchParams] = useSearchParams();
   const { preloadedHITLOptions } = getPreloadHITLFormData(searchParams, hitlDetail);
 
@@ -64,14 +70,15 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
     hitlDetail.options.length === 2;
 
   const shouldRenderOptionButton =
-    hitlDetail.options.length < 4 && !hitlDetail.multiple && preloadedHITLOptions.length === 0;
+    hitlDetail.options.length <= 4 && !hitlDetail.multiple && preloadedHITLOptions.length === 0;
 
-  const isPending = hitlDetail.task_instance.state === "deferred";
+  const isPending = isHITLPending(hitlDetail.task_instance.state);
 
   const { updateHITLResponse } = useUpdateHITLDetail({
     dagId: hitlDetail.task_instance.dag_id,
     dagRunId: hitlDetail.task_instance.dag_run_id,
     mapIndex: hitlDetail.task_instance.map_index,
+    onSuccess: onResponded,
     taskId: hitlDetail.task_instance.task_id,
   });
 
@@ -88,9 +95,9 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
       updateHITLResponse(formData);
     } catch {
       setErrors(true);
-    } finally {
-      setIsSubmitting(false);
     }
+
+    setIsSubmitting(false);
   };
 
   return (
@@ -104,14 +111,7 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
             : undefined}
         </Text>
       ) : undefined}
-      <Accordion.Root
-        defaultValue={[hitlDetail.subject]}
-        mb={4}
-        mt={4}
-        overflow="visible"
-        size="lg"
-        variant="enclosed"
-      >
+      <Box mb={4} mt={4} overflow="visible">
         <FlexibleForm
           disabled={!isPending || hitlDetail.response_received}
           flexFormDescription={hitlDetail.body ?? undefined}
@@ -121,10 +121,11 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
           }}
           isHITL
           key={hitlDetail.subject}
-          namespace="hitl"
+          namespace={namespace}
+          noAccordion
           setError={setErrors}
         />
-      </Accordion.Root>
+      </Box>
 
       <Box as="footer" display="flex" justifyContent="flex-end" mt={4}>
         <HStack w="full">
@@ -133,6 +134,7 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
             hitlDetail.options.map((option) => (
               <Button
                 colorPalette={isHighlightOption(option, hitlDetail, preloadedHITLOptions) ? "brand" : "gray"}
+                data-testid={`hitl-option-${option}`}
                 disabled={errors || isSubmitting || !isPending || hitlDetail.response_received}
                 key={option}
                 onClick={() => handleSubmit(option)}
@@ -143,8 +145,7 @@ export const HITLResponseForm = ({ hitlDetail }: HITLResponseFormProps) => {
             ))
           ) : hitlDetail.response_received ? undefined : (
             <Button
-              colorPalette="brand"
-              disabled={errors || isSubmitting}
+              disabled={errors || isSubmitting || !isPending}
               loading={isSubmitting}
               onClick={() => handleSubmit()}
             >

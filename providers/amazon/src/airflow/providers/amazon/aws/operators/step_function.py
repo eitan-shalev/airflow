@@ -21,8 +21,6 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.step_function import StepFunctionHook
 from airflow.providers.amazon.aws.links.step_function import (
     StateMachineDetailsLink,
@@ -32,9 +30,10 @@ from airflow.providers.amazon.aws.operators.base_aws import AwsBaseOperator
 from airflow.providers.amazon.aws.triggers.step_function import StepFunctionsExecutionCompleteTrigger
 from airflow.providers.amazon.aws.utils import validate_execute_complete_event
 from airflow.providers.amazon.aws.utils.mixins import aws_template_fields
+from airflow.providers.common.compat.sdk import AirflowException, conf
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class StepFunctionStartExecutionOperator(AwsBaseOperator[StepFunctionHook]):
@@ -77,7 +76,7 @@ class StepFunctionStartExecutionOperator(AwsBaseOperator[StepFunctionHook]):
 
     aws_hook_class = StepFunctionHook
     template_fields: Sequence[str] = aws_template_fields(
-        "state_machine_arn", "name", "input", "is_redrive_execution"
+        "state_machine_arn", "name", "state_machine_input", "is_redrive_execution"
     )
     ui_color = "#f9c915"
     operator_extra_links = (StateMachineDetailsLink(), StateMachineExecutionsDetailsLink())
@@ -98,7 +97,7 @@ class StepFunctionStartExecutionOperator(AwsBaseOperator[StepFunctionHook]):
         self.state_machine_arn = state_machine_arn
         self.name = name
         self.is_redrive_execution = is_redrive_execution
-        self.input = state_machine_input
+        self.state_machine_input = state_machine_input
         self.waiter_delay = waiter_delay
         self.waiter_max_attempts = waiter_max_attempts
         self.deferrable = deferrable
@@ -114,7 +113,7 @@ class StepFunctionStartExecutionOperator(AwsBaseOperator[StepFunctionHook]):
 
         if not (
             execution_arn := self.hook.start_execution(
-                self.state_machine_arn, self.name, self.input, self.is_redrive_execution
+                self.state_machine_arn, self.name, self.state_machine_input, self.is_redrive_execution
             )
         ):
             raise AirflowException(f"Failed to start State Machine execution for: {self.state_machine_arn}")

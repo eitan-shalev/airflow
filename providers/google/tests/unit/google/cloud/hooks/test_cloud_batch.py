@@ -23,7 +23,7 @@ import pytest
 from google.cloud.batch import ListJobsRequest
 from google.cloud.batch_v1 import CreateJobRequest, Job, JobStatus
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.cloud_batch import CloudBatchAsyncHook, CloudBatchHook
 
 from unit.google.cloud.utils.base_gcp_mock import mock_base_gcp_hook_default_project_id
@@ -107,7 +107,7 @@ class TestCloudBathHook:
     def test_wait_job_does_not_succeed(self, mock_batch_service_client, state, cloud_batch_hook):
         mock_job = self._mock_job_with_status(state)
         mock_batch_service_client.return_value.get_job.return_value = mock_job
-        with pytest.raises(AirflowException):
+        with pytest.raises(AirflowException, match="job1"):
             cloud_batch_hook.wait_for_job("job1")
 
     @mock.patch(

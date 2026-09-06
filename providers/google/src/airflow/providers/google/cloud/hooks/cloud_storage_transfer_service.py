@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from google.cloud.storage_transfer_v1 import (
     ListTransferJobsRequest,
+    RunTransferJobRequest,
     StorageTransferServiceAsyncClient,
     TransferJob,
     TransferOperation,
@@ -46,7 +47,8 @@ from google.protobuf.json_format import MessageToDict
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
-from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import (
     PROVIDE_PROJECT_ID,
@@ -55,6 +57,7 @@ from airflow.providers.google.common.hooks.base_google import (
 )
 
 if TYPE_CHECKING:
+    from google.api_core import operation_async
     from google.cloud.storage_transfer_v1.services.storage_transfer_service.pagers import (
         ListTransferJobsAsyncPager,
     )
@@ -179,7 +182,11 @@ class CloudDataTransferServiceHook(GoogleBaseHook):
         if not self._conn:
             http_authorized = self._authorize()
             self._conn = build(
-                "storagetransfer", self.api_version, http=http_authorized, cache_discovery=False
+                "storagetransfer",
+                self.api_version,
+                http=http_authorized,
+                cache_discovery=False,
+                client_options=self.get_client_options(),
             )
         return self._conn
 
@@ -564,10 +571,13 @@ class CloudDataTransferServiceAsyncHook(GoogleBaseAsyncHook):
         :return: Google Storage Transfer asynchronous client.
         """
         if not self._client:
-            credentials = (await self.get_sync_hook()).get_credentials()
+            sync_hook = await self.get_sync_hook()
+            credentials = sync_hook.get_credentials()
+            client_options = sync_hook.get_client_options()
             self._client = StorageTransferServiceAsyncClient(
                 credentials=credentials,
                 client_info=CLIENT_INFO,
+                client_options=client_options,
             )
         return self._client
 
@@ -712,3 +722,17 @@ class CloudDataTransferServiceAsyncHook(GoogleBaseAsyncHook):
                 f"Expected: {', '.join(expected_statuses_set)}"
             )
         return False
+
+    async def run_transfer_job(self, job_name: str) -> operation_async.AsyncOperation:
+        """
+        Run Google Storage Transfer Service job.
+
+        :param job_name: (Required) Name of the job to run.
+        """
+        client = await self.get_conn()
+        request = RunTransferJobRequest(
+            job_name=job_name,
+            project_id=self.project_id,
+        )
+        operation = await client.run_transfer_job(request=request)
+        return operation

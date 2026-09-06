@@ -17,14 +17,20 @@
 
 [build-system]
 requires = [
-    "hatchling==1.27.0",
+    "hatchling==1.32.0",
+    "packaging==26.3",
+    "pathspec==1.1.1",
+    "pluggy==1.6.0",
+    "tomli==2.4.1; python_version < '3.11'",
+    "tomlkit==0.15.1",
+    "trove-classifiers==2026.6.1.19",
 ]
 build-backend = "hatchling.build"
 
 [project]
 name = "apache-airflow-helm-chart"
 description = "Programmatically author, schedule and monitor data pipelines"
-requires-python = ">=3.10"
+requires-python = ">=3.10,!=3.15"
 authors = [
     { name = "Apache Software Foundation", email = "dev@airflow.apache.org" },
 ]
@@ -39,10 +45,11 @@ classifiers = [
     "Framework :: Apache Airflow",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: System :: Monitoring",
     "Topic :: System :: Monitoring",
 ]
@@ -51,7 +58,40 @@ version = "0.0.1"
 
 dependencies = [
     "apache-airflow-core",
+    "apache-airflow-devel-common",
+    "apache-airflow-providers-cncf-kubernetes",
 ]
+
+[tool.pytest]
+addopts = [
+    "-rasl",
+    "--verbosity=2",
+    "-p", "no:flaky",
+    "-p", "no:nose",
+    "-p", "no:legacypath",
+]
+norecursedirs = [
+    ".eggs",
+    # Overlay smoke-test modules live under chart/tests/overlay_tests/ but
+    # are only meaningful when the overlay-under-test has been applied
+    # to a kind cluster. `breeze k8s smoke-test-overlay <name>` invokes
+    # them directly by path (which bypasses norecursedirs), so the
+    # smoke test still works; `breeze testing helm-tests --test-type all`
+    # would otherwise recurse into them and fail with `Secret not found`
+    # because no cluster / overlay is set up at that point.
+    "overlay_tests",
+]
+log_level = "INFO"
+filterwarnings = [
+    "error::pytest.PytestCollectionWarning",
+]
+python_files = [
+    "*.py",
+]
+
+# Keep temporary directories (created by `tmp_path`) for 2 recent runs only failed tests.
+tmp_path_retention_count = "2"
+tmp_path_retention_policy = "failed"
 
 [tool.hatch.build.targets.sdist]
 exclude = ["*"]
@@ -74,6 +114,9 @@ bypass-selection = true
 #
 docs = [
     "apache-airflow-devel-common[docs]"
+]
+mypy = [
+    "apache-airflow-devel-common[mypy]",
 ]
 
 packages = []

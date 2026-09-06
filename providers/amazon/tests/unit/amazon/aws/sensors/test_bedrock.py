@@ -21,7 +21,6 @@ from unittest import mock
 
 import pytest
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.providers.amazon.aws.hooks.bedrock import BedrockAgentHook, BedrockHook
 from airflow.providers.amazon.aws.sensors.bedrock import (
     BedrockBatchInferenceSensor,
@@ -30,6 +29,7 @@ from airflow.providers.amazon.aws.sensors.bedrock import (
     BedrockKnowledgeBaseActiveSensor,
     BedrockProvisionModelThroughputCompletedSensor,
 )
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 
 
 class TestBedrockCustomizeModelCompletedSensor:
@@ -239,12 +239,24 @@ class TestBedrockIngestionJobSensor:
         assert self.sensor.poke({}) is False
 
     @pytest.mark.parametrize("state", SENSOR.FAILURE_STATES)
+    @pytest.mark.parametrize(
+        ("job_detail", "expected_suffix"),
+        [
+            pytest.param({}, "", id="no reasons"),
+            pytest.param(
+                {"failureReasons": ["User is not authorized", "index not found"]},
+                " Failure reasons: User is not authorized; index not found",
+                id="with reasons",
+            ),
+        ],
+    )
     @mock.patch.object(BedrockAgentHook, "conn")
-    def test_poke_failure_states(self, mock_conn, state):
-        mock_conn.get_ingestion_job.return_value = {"ingestionJob": {"status": state}}
+    def test_poke_failure_states(self, mock_conn, state, job_detail, expected_suffix):
+        mock_conn.get_ingestion_job.return_value = {"ingestionJob": {"status": state, **job_detail}}
         sensor = self.SENSOR(**self.default_op_kwargs, aws_conn_id=None)
-        with pytest.raises(AirflowException, match=sensor.FAILURE_MESSAGE):
+        with pytest.raises(AirflowException, match=sensor.FAILURE_MESSAGE) as exception_info:
             sensor.poke({})
+        assert str(exception_info.value) == f"{sensor.FAILURE_MESSAGE}{expected_suffix}"
 
 
 class TestBedrockBatchInferenceSensor:

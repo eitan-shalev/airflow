@@ -17,6 +17,7 @@
 # under the License.
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import shutil
@@ -27,8 +28,8 @@ from urllib.parse import urlsplit
 
 import attrs
 
-from airflow.configuration import conf
 from airflow.providers.apache.hdfs.hooks.webhdfs import WebHDFSHook
+from airflow.providers.common.compat.sdk import conf
 from airflow.utils.log.file_task_handler import FileTaskHandler
 from airflow.utils.log.logging_mixin import LoggingMixin
 
@@ -46,7 +47,32 @@ class HdfsRemoteLogIO(LoggingMixin):  # noqa: D101
 
     processors = ()
 
-    def upload(self, path: os.PathLike | str, ti: RuntimeTI):
+    @classmethod
+    def from_config(cls) -> HdfsRemoteLogIO:
+        """Build the remote log IO from Airflow logging configuration."""
+        remote_task_handler_kwargs = conf.getjson("logging", "remote_task_handler_kwargs", fallback={})
+        if not isinstance(remote_task_handler_kwargs, dict):
+            raise ValueError(
+                "logging/remote_task_handler_kwargs must be a JSON object (a python dict), we got "
+                f"{type(remote_task_handler_kwargs)}"
+            )
+        # remote_task_handler_kwargs mixes FileTaskHandler kwargs with IO kwargs; only the
+        # latter belong to this class (same split as airflow_local_settings.py).
+        fth_params = frozenset(inspect.signature(FileTaskHandler.__init__).parameters) - {
+            "self",
+            "base_log_folder",
+        }
+        io_kwargs = {k: v for k, v in remote_task_handler_kwargs.items() if k not in fth_params}
+        return cls(
+            **{
+                "base_log_folder": os.path.expanduser(conf.get_mandatory_value("logging", "base_log_folder")),
+                "remote_base": urlsplit(conf.get_mandatory_value("logging", "remote_base_log_folder")).path,
+                "delete_local_copy": conf.getboolean("logging", "delete_local_logs"),
+            }
+            | io_kwargs,
+        )
+
+    def upload(self, path: os.PathLike | str, ti: RuntimeTI | None = None) -> None:
         """Upload the given log path to the remote storage."""
         path = Path(path)
         if path.is_absolute():

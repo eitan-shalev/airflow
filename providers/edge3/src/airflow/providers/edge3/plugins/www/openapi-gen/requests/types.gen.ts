@@ -52,10 +52,11 @@ export type EdgeWorkerState = 'starting' | 'running' | 'idle' | 'shutdown reques
  */
 export type ExecuteTask = {
     token: string;
-    ti: TaskInstance;
     dag_rel_path: string;
     bundle_info: BundleInfo;
     log_path: string | null;
+    ti: TaskInstance;
+    sentry_integration?: string;
     type?: "ExecuteTask";
 };
 
@@ -466,6 +467,12 @@ export type HealthResponse = {
     [key: string]: (string);
 };
 
+export type WorkerData = {
+    queueNamePattern?: string | null;
+    state?: Array<EdgeWorkerState> | null;
+    workerNamePattern?: string | null;
+};
+
 export type WorkerResponse = WorkerCollectionResponse;
 
 export type JobsResponse = JobCollectionResponse;
@@ -515,6 +522,20 @@ export type RemoveWorkerQueueData = {
 };
 
 export type RemoveWorkerQueueResponse = unknown;
+
+export type ConcurrencyRequest = {
+    /**
+     * New concurrency limit for the worker.
+     */
+    concurrency: number;
+};
+
+export type SetWorkerConcurrencyLimitData = {
+    workerName: string;
+    requestBody: ConcurrencyRequest;
+};
+
+export type SetWorkerConcurrencyLimitResponse = unknown;
 
 export type $OpenApiTs = {
     '/edge_worker/v1/jobs/fetch/{worker_name}': {
@@ -626,6 +647,10 @@ export type $OpenApiTs = {
                  */
                 403: HTTPExceptionResponse;
                 /**
+                 * Conflict
+                 */
+                409: HTTPExceptionResponse;
+                /**
                  * Validation Error
                  */
                 422: HTTPValidationError;
@@ -646,6 +671,10 @@ export type $OpenApiTs = {
                  * Forbidden
                  */
                 403: HTTPExceptionResponse;
+                /**
+                 * Conflict
+                 */
+                409: HTTPExceptionResponse;
                 /**
                  * Validation Error
                  */
@@ -670,6 +699,10 @@ export type $OpenApiTs = {
                  */
                 403: HTTPExceptionResponse;
                 /**
+                 * Conflict
+                 */
+                409: HTTPExceptionResponse;
+                /**
                  * Validation Error
                  */
                 422: HTTPValidationError;
@@ -690,11 +723,16 @@ export type $OpenApiTs = {
     };
     '/edge_worker/ui/worker': {
         get: {
+            req: WorkerData;
             res: {
                 /**
                  * Successful Response
                  */
                 200: WorkerCollectionResponse;
+                /**
+                 * Validation Error
+                 */
+                422: HTTPValidationError;
             };
         };
     };
@@ -795,6 +833,21 @@ export type $OpenApiTs = {
         };
         delete: {
             req: RemoveWorkerQueueData;
+            res: {
+                /**
+                 * Successful Response
+                 */
+                200: unknown;
+                /**
+                 * Validation Error
+                 */
+                422: HTTPValidationError;
+            };
+        };
+    };
+    '/edge_worker/ui/worker/{worker_name}/concurrency': {
+        patch: {
+            req: SetWorkerConcurrencyLimitData;
             res: {
                 /**
                  * Successful Response

@@ -45,6 +45,8 @@ def get_provider_info():
                 "external-doc-url": "https://databricks.com/product/databricks-sql",
                 "how-to-guide": [
                     "/docs/apache-airflow-providers-databricks/operators/sql.rst",
+                    "/docs/apache-airflow-providers-databricks/operators/sql_statements.rst",
+                    "/docs/apache-airflow-providers-databricks/operators/warehouse.rst",
                     "/docs/apache-airflow-providers-databricks/operators/copy_into.rst",
                 ],
                 "tags": ["service"],
@@ -73,7 +75,10 @@ def get_provider_info():
             },
             {
                 "integration-name": "Databricks SQL",
-                "python-modules": ["airflow.providers.databricks.operators.databricks_sql"],
+                "python-modules": [
+                    "airflow.providers.databricks.operators.databricks_sql",
+                    "airflow.providers.databricks.operators.warehouse",
+                ],
             },
             {
                 "integration-name": "Databricks Repos",
@@ -83,6 +88,22 @@ def get_provider_info():
                 "integration-name": "Databricks Workflow",
                 "python-modules": ["airflow.providers.databricks.operators.databricks_workflow"],
             },
+        ],
+        "asset-uris": [
+            {
+                "schemes": ["databricks"],
+                "handler": "airflow.providers.databricks.assets.databricks.sanitize_uri",
+                "factory": "airflow.providers.databricks.assets.databricks.create_asset",
+                "to_openlineage_converter": "airflow.providers.databricks.assets.databricks.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["databricks"],
+                "handler": "airflow.providers.databricks.assets.databricks.sanitize_uri",
+                "factory": "airflow.providers.databricks.assets.databricks.create_asset",
+                "to_openlineage_converter": "airflow.providers.databricks.assets.databricks.convert_asset_to_openlineage",
+            }
         ],
         "hooks": [
             {
@@ -116,6 +137,7 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.databricks.hooks.databricks.DatabricksHook",
+                "hook-name": "Databricks",
                 "connection-type": "databricks",
             }
         ],

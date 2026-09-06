@@ -16,9 +16,33 @@
 # under the License.
 from __future__ import annotations
 
+import msgspec
 from flask import request
 from flask.sessions import SecureCookieSessionInterface
-from flask_session.sessions import SqlAlchemySessionInterface
+from flask_babel import LazyString
+from flask_session.sqlalchemy import SqlAlchemySessionInterface
+
+
+class _LazySafeSerializer:
+    """
+    Serializer that handles LazyString and uses msgpack for efficient storage.
+
+    Returns bytes (suitable for database BLOB columns).
+    """
+
+    def dumps(self, session_dict):
+        encoder = msgspec.msgpack.Encoder(
+            enc_hook=lambda obj: str(obj) if isinstance(obj, LazyString) else obj
+        )
+        return encoder.encode(dict(session_dict))
+
+    def loads(self, data):
+        decoder = msgspec.msgpack.Decoder()
+        return decoder.decode(data)
+
+    # optional old API
+    encode = dumps
+    decode = loads
 
 
 class SessionExemptMixin:
@@ -26,8 +50,6 @@ class SessionExemptMixin:
 
     def save_session(self, *args, **kwargs):
         """Prevent creating session from REST API and health requests."""
-        if request.blueprint == "/api/v1":
-            return None
         if request.path == "/health":
             return None
         return super().save_session(*args, **kwargs)
@@ -35,6 +57,10 @@ class SessionExemptMixin:
 
 class AirflowDatabaseSessionInterface(SessionExemptMixin, SqlAlchemySessionInterface):
     """Session interface that exempts some routes and stores session data in the database."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.serializer = _LazySafeSerializer()
 
 
 class AirflowSecureCookieSessionInterface(SessionExemptMixin, SecureCookieSessionInterface):

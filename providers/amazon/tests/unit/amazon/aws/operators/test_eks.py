@@ -21,9 +21,10 @@ from typing import Any, TypedDict
 from unittest import mock
 
 import pytest
+from botocore.exceptions import ClientError
 from botocore.waiter import Waiter
 
-from airflow.exceptions import AirflowProviderDeprecationWarning, TaskDeferred
+from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
 from airflow.providers.amazon.aws.hooks.eks import ClusterStates, EksHook
 from airflow.providers.amazon.aws.operators.eks import (
     EksCreateClusterOperator,
@@ -38,8 +39,10 @@ from airflow.providers.amazon.aws.triggers.eks import (
     EksCreateFargateProfileTrigger,
     EksCreateNodegroupTrigger,
     EksDeleteFargateProfileTrigger,
+    EksPodTrigger,
 )
 from airflow.providers.cncf.kubernetes.utils.pod_manager import OnFinishAction
+from airflow.providers.common.compat.sdk import TaskDeferred
 
 from unit.amazon.aws.utils.eks_test_constants import (
     NODEROLE_ARN,
@@ -68,6 +71,15 @@ CREATE_NODEGROUP_KWARGS = {
     "capacityType": "ON_DEMAND",
     "instanceTypes": "t4g.large",
 }
+
+RESOURCE_IN_USE_ERROR = ClientError(
+    error_response={"Error": {"Code": "ResourceInUseException", "Message": "update in progress"}},
+    operation_name="DeleteCluster",
+)
+RESOURCE_NOT_FOUND_ERROR = ClientError(
+    error_response={"Error": {"Code": "ResourceNotFoundException", "Message": "not found"}},
+    operation_name="DeleteCluster",
+)
 
 
 class ClusterParams(TypedDict):
@@ -504,7 +516,7 @@ class TestEksCreateNodegroupOperator:
             op_kwargs["create_nodegroup_kwargs"] = create_nodegroup_kwargs
             parameters = {**self.create_nodegroup_params, **create_nodegroup_kwargs}
         else:
-            assert "create_nodegroup_params" not in op_kwargs
+            assert "create_nodegroup_kwargs" not in op_kwargs
             parameters = self.create_nodegroup_params
 
         operator = EksCreateNodegroupOperator(task_id=TASK_ID, **op_kwargs)
@@ -512,31 +524,36 @@ class TestEksCreateNodegroupOperator:
         mock_create_nodegroup.assert_called_with(**convert_keys(parameters))
         mock_waiter.assert_not_called()
 
-        @pytest.mark.parametrize(
-            "create_nodegroup_kwargs",
-            [
-                pytest.param(None, id="without nodegroup kwargs"),
-                pytest.param(CREATE_NODEGROUP_KWARGS, id="with nodegroup kwargs"),
-            ],
-        )
-        @mock.patch.object(Waiter, "wait")
-        @mock.patch.object(EksHook, "create_nodegroup")
-        def test_execute_with_wait_when_nodegroup_does_not_already_exist(
-            self, mock_create_nodegroup, mock_waiter, create_nodegroup_kwargs
-        ):
-            op_kwargs = {**self.create_nodegroup_params}
-            if create_nodegroup_kwargs:
-                op_kwargs["create_nodegroup_kwargs"] = create_nodegroup_kwargs
-                parameters = {**self.create_nodegroup_params, **create_nodegroup_kwargs}
-            else:
-                assert "create_nodegroup_params" not in op_kwargs
-                parameters = self.create_nodegroup_params
+    @pytest.mark.parametrize(
+        "create_nodegroup_kwargs",
+        [
+            pytest.param(None, id="without nodegroup kwargs"),
+            pytest.param(CREATE_NODEGROUP_KWARGS, id="with nodegroup kwargs"),
+        ],
+    )
+    @mock.patch.object(Waiter, "wait")
+    @mock.patch.object(EksHook, "create_nodegroup")
+    def test_execute_with_wait_when_nodegroup_does_not_already_exist(
+        self, mock_create_nodegroup, mock_waiter, create_nodegroup_kwargs
+    ):
+        op_kwargs = {**self.create_nodegroup_params}
+        if create_nodegroup_kwargs:
+            op_kwargs["create_nodegroup_kwargs"] = create_nodegroup_kwargs
+            parameters = {**self.create_nodegroup_params, **create_nodegroup_kwargs}
+        else:
+            assert "create_nodegroup_kwargs" not in op_kwargs
+            parameters = self.create_nodegroup_params
 
-            operator = EksCreateNodegroupOperator(task_id=TASK_ID, **op_kwargs, wait_for_completion=True)
-            operator.execute({})
-            mock_create_nodegroup.assert_called_with(**convert_keys(parameters))
-            mock_waiter.assert_called_with(mock.ANY, clusterName=CLUSTER_NAME, nodegroupName=NODEGROUP_NAME)
-            assert_expected_waiter_type(mock_waiter, "NodegroupActive")
+        operator = EksCreateNodegroupOperator(task_id=TASK_ID, **op_kwargs, wait_for_completion=True)
+        operator.execute({})
+        mock_create_nodegroup.assert_called_with(**convert_keys(parameters))
+        mock_waiter.assert_called_with(
+            mock.ANY,
+            clusterName=CLUSTER_NAME,
+            nodegroupName=NODEGROUP_NAME,
+            WaiterConfig={"MaxAttempts": mock.ANY},
+        )
+        assert_expected_waiter_type(mock_waiter, "NodegroupActive")
 
     @mock.patch.object(EksHook, "create_nodegroup")
     def test_create_nodegroup_deferrable(self, mock_create_nodegroup):
@@ -585,6 +602,125 @@ class TestEksCreateNodegroupOperator:
             )
         assert m.operator.region_name == "us-east-2"
 
+    @mock.patch.object(EksHook, "delete_nodegroup")
+    @mock.patch("airflow.providers.amazon.aws.operators.eks.wait")
+    @mock.patch.object(EksHook, "create_nodegroup")
+    def test_nodegroup_cleanup_on_waiter_auth_failure(
+        self,
+        mock_create_nodegroup,
+        mock_waiter,
+        mock_delete_nodegroup,
+    ):
+        # Airflow currently wraps waiter errors with AirflowException, but the code intentionally supports both.
+        waiter_error = AirflowException("Nodegroup creation failed: Waiter NodegroupActive failed")
+        mock_waiter.side_effect = waiter_error
+
+        operator = EksCreateNodegroupOperator(
+            task_id=TASK_ID,
+            cluster_name=CLUSTER_NAME,
+            nodegroup_name=NODEGROUP_NAME,
+            nodegroup_subnets=SUBNET_IDS,
+            nodegroup_role_arn=NODEROLE_ARN[1],
+            wait_for_completion=True,
+            delete_nodegroup_on_failure=True,
+        )
+
+        with pytest.raises(AirflowException):
+            operator.execute({})
+
+        # Nodegroup creation happened.
+        mock_create_nodegroup.assert_called_once()
+
+        # Cleanup attempted.
+        mock_delete_nodegroup.assert_called_once_with(
+            clusterName=CLUSTER_NAME,
+            nodegroupName=NODEGROUP_NAME,
+        )
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch.object(EksHook, "delete_nodegroup")
+    @mock.patch("airflow.providers.amazon.aws.operators.eks.wait")
+    @mock.patch.object(EksHook, "create_nodegroup")
+    def test_nodegroup_cleanup_retries_on_resource_in_use(
+        self,
+        mock_create_nodegroup,
+        mock_waiter,
+        mock_delete_nodegroup,
+        mock_sleep,
+    ):
+        mock_waiter.side_effect = AirflowException("Nodegroup creation failed: Waiter NodegroupActive failed")
+        # A freshly-failed nodegroup may still be settling, so the cleanup delete rides out
+        # transient ResourceInUseException before succeeding.
+        mock_delete_nodegroup.side_effect = [RESOURCE_IN_USE_ERROR, RESOURCE_IN_USE_ERROR, None]
+
+        operator = EksCreateNodegroupOperator(
+            task_id=TASK_ID,
+            cluster_name=CLUSTER_NAME,
+            nodegroup_name=NODEGROUP_NAME,
+            nodegroup_subnets=SUBNET_IDS,
+            nodegroup_role_arn=NODEROLE_ARN[1],
+            wait_for_completion=True,
+            delete_nodegroup_on_failure=True,
+        )
+
+        # The original creation error is still raised once cleanup eventually succeeds.
+        with pytest.raises(AirflowException, match="Nodegroup creation failed"):
+            operator.execute({})
+
+        assert mock_delete_nodegroup.call_count == 3
+        mock_delete_nodegroup.assert_called_with(clusterName=CLUSTER_NAME, nodegroupName=NODEGROUP_NAME)
+
+    @mock.patch.object(EksHook, "delete_nodegroup")
+    @mock.patch("airflow.providers.amazon.aws.operators.eks.wait")
+    @mock.patch.object(EksHook, "create_nodegroup")
+    def test_nodegroup_cleanup_failure_does_not_mask_original_error(
+        self,
+        mock_create_nodegroup,
+        mock_waiter,
+        mock_delete_nodegroup,
+    ):
+        # Airflow currently wraps waiter errors with AirflowException, but the code intentionally supports both.
+        waiter_error = AirflowException("Nodegroup creation failed: Waiter NodegroupActive failed")
+
+        cleanup_error = ClientError(
+            error_response={
+                "Error": {
+                    "Code": "UnauthorizedOperation",
+                    "Message": "You are not authorized to perform this operation",
+                }
+            },
+            operation_name="DeleteNodegroup",
+        )
+
+        mock_waiter.side_effect = waiter_error
+        mock_delete_nodegroup.side_effect = cleanup_error
+
+        operator = EksCreateNodegroupOperator(
+            task_id=TASK_ID,
+            cluster_name=CLUSTER_NAME,
+            nodegroup_name=NODEGROUP_NAME,
+            nodegroup_subnets=SUBNET_IDS,
+            nodegroup_role_arn=NODEROLE_ARN[1],
+            wait_for_completion=True,
+            delete_nodegroup_on_failure=True,
+        )
+
+        with pytest.raises(AirflowException) as exc:
+            operator.execute({})
+
+        # Original error preserved.
+        assert isinstance(exc.value, AirflowException)
+        assert "Nodegroup creation failed" in str(exc.value)
+
+        # Nodegroup creation happened.
+        mock_create_nodegroup.assert_called_once()
+
+        # Cleanup attempted.
+        mock_delete_nodegroup.assert_called_once_with(
+            clusterName=CLUSTER_NAME,
+            nodegroupName=NODEGROUP_NAME,
+        )
+
 
 class TestEksDeleteClusterOperator:
     def setup_method(self) -> None:
@@ -623,6 +759,53 @@ class TestEksDeleteClusterOperator:
         self.delete_cluster_operator.deferrable = True
         with pytest.raises(TaskDeferred):
             self.delete_cluster_operator.execute({})
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch.object(Waiter, "wait")
+    @mock.patch.object(EksHook, "list_nodegroups")
+    @mock.patch.object(EksHook, "delete_cluster")
+    def test_delete_cluster_retries_on_resource_in_use(
+        self, mock_delete_cluster, mock_list_nodegroups, mock_waiter, mock_sleep
+    ):
+        mock_list_nodegroups.return_value = []
+        mock_delete_cluster.side_effect = [RESOURCE_IN_USE_ERROR, RESOURCE_IN_USE_ERROR, None]
+
+        self.delete_cluster_operator.execute({})
+
+        assert mock_delete_cluster.call_count == 3
+        mock_delete_cluster.assert_called_with(name=self.cluster_name)
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch.object(EksHook, "get_waiter")
+    @mock.patch.object(EksHook, "list_nodegroups")
+    @mock.patch.object(EksHook, "delete_nodegroup")
+    def test_delete_any_nodegroups_retries_on_resource_in_use(
+        self, mock_delete_nodegroup, mock_list_nodegroups, mock_get_waiter, mock_sleep
+    ):
+        mock_list_nodegroups.return_value = ["ng1"]
+        mock_delete_nodegroup.side_effect = [RESOURCE_IN_USE_ERROR, RESOURCE_IN_USE_ERROR, None]
+
+        self.delete_cluster_operator.delete_any_nodegroups()
+
+        assert mock_delete_nodegroup.call_count == 3
+        mock_delete_nodegroup.assert_called_with(clusterName=self.cluster_name, nodegroupName="ng1")
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch.object(Waiter, "wait")
+    @mock.patch.object(EksHook, "list_fargate_profiles")
+    @mock.patch.object(EksHook, "delete_fargate_profile")
+    def test_delete_any_fargate_profiles_retries_on_resource_in_use(
+        self, mock_delete_fargate_profile, mock_list_fargate_profiles, mock_waiter, mock_sleep
+    ):
+        mock_list_fargate_profiles.return_value = ["fp1"]
+        mock_delete_fargate_profile.side_effect = [RESOURCE_IN_USE_ERROR, RESOURCE_IN_USE_ERROR, None]
+
+        self.delete_cluster_operator.delete_any_fargate_profiles()
+
+        assert mock_delete_fargate_profile.call_count == 3
+        mock_delete_fargate_profile.assert_called_with(
+            clusterName=self.cluster_name, fargateProfileName="fp1"
+        )
 
     def test_template_fields(self):
         validate_template_fields(self.delete_cluster_operator)
@@ -666,6 +849,21 @@ class TestEksDeleteNodegroupOperator:
         )
         mock_waiter.assert_called_with(mock.ANY, clusterName=CLUSTER_NAME, nodegroupName=NODEGROUP_NAME)
         assert_expected_waiter_type(mock_waiter, "NodegroupDeleted")
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch.object(Waiter, "wait")
+    @mock.patch.object(EksHook, "delete_nodegroup")
+    def test_delete_nodegroup_retries_on_resource_in_use(
+        self, mock_delete_nodegroup, mock_waiter, mock_sleep
+    ):
+        mock_delete_nodegroup.side_effect = [RESOURCE_IN_USE_ERROR, RESOURCE_IN_USE_ERROR, None]
+
+        self.delete_nodegroup_operator.execute({})
+
+        assert mock_delete_nodegroup.call_count == 3
+        mock_delete_nodegroup.assert_called_with(
+            clusterName=self.cluster_name, nodegroupName=self.nodegroup_name
+        )
 
     def test_template_fields(self):
         validate_template_fields(self.delete_nodegroup_operator)
@@ -726,6 +924,21 @@ class TestEksDeleteFargateProfileOperator:
             self.delete_fargate_profile_operator.execute({})
         assert isinstance(exc.value.trigger, EksDeleteFargateProfileTrigger), (
             "Trigger is not a EksDeleteFargateProfileTrigger"
+        )
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch.object(Waiter, "wait")
+    @mock.patch.object(EksHook, "delete_fargate_profile")
+    def test_delete_fargate_profile_retries_on_resource_in_use(
+        self, mock_delete_fargate_profile, mock_waiter, mock_sleep
+    ):
+        mock_delete_fargate_profile.side_effect = [RESOURCE_IN_USE_ERROR, RESOURCE_IN_USE_ERROR, None]
+
+        self.delete_fargate_profile_operator.execute({})
+
+        assert mock_delete_fargate_profile.call_count == 3
+        mock_delete_fargate_profile.assert_called_with(
+            clusterName=self.cluster_name, fargateProfileName=self.fargate_profile_name
         )
 
     def test_template_fields(self):
@@ -808,7 +1021,7 @@ class TestEksPodOperator:
         assert op.config_file == mock_config_file
 
     @pytest.mark.parametrize(
-        "compatible_kpo, kwargs, expected_attributes",
+        ("compatible_kpo", "kwargs", "expected_attributes"),
         [
             (
                 True,
@@ -923,3 +1136,160 @@ class TestEksPodOperator:
             credentials_file=mock_credentials_file,
         )
         assert op.config_file == mock_config_file
+
+    @mock.patch("airflow.providers.amazon.aws.hooks.eks.EksHook.get_session")
+    @mock.patch("airflow.providers.amazon.aws.hooks.eks.EksHook.__init__", return_value=None)
+    @mock.patch(
+        "airflow.providers.cncf.kubernetes.operators.pod.KubernetesPodOperator._refresh_cached_properties"
+    )
+    def test_refresh_cached_properties_refreshes_credentials(
+        self,
+        mock_super_refresh,
+        mock_eks_hook,
+        mock_get_session,
+        tmp_path,
+    ):
+        """Test that _refresh_cached_properties refreshes AWS credentials file."""
+        # Create a temporary credentials file
+        credentials_file = tmp_path / "test_creds.aws_creds"
+        credentials_file.write_text(
+            "export AWS_ACCESS_KEY_ID='old_key'\n"
+            "export AWS_SECRET_ACCESS_KEY='old_secret'\n"
+            "export AWS_SESSION_TOKEN='old_token'\n"
+        )
+
+        # Mock the credential chain for refresh
+        mock_session = mock.MagicMock()
+        mock_credentials = mock.MagicMock()
+        mock_frozen_credentials = mock.MagicMock()
+        mock_frozen_credentials.access_key = "new_access_key"
+        mock_frozen_credentials.secret_key = "new_secret_key"
+        mock_frozen_credentials.token = "new_token"
+
+        mock_get_session.return_value = mock_session
+        mock_session.get_credentials.return_value = mock_credentials
+        mock_credentials.get_frozen_credentials.return_value = mock_frozen_credentials
+
+        op = EksPodOperator(
+            task_id="run_pod",
+            pod_name="run_pod",
+            cluster_name=CLUSTER_NAME,
+            image="amazon/aws-cli:latest",
+            cmds=["sh", "-c", "ls"],
+            labels={"demo": "hello_world"},
+            get_logs=True,
+            on_finish_action="delete_pod",
+        )
+        # Set the credentials file path as it would be during execute()
+        op._credentials_file_path = str(credentials_file)
+
+        # Call the refresh method
+        op._refresh_cached_properties()
+
+        # Verify the credentials file was updated with new credentials
+        updated_content = credentials_file.read_text()
+        assert "new_access_key" in updated_content
+        assert "new_secret_key" in updated_content
+        assert "new_token" in updated_content
+        assert "old_key" not in updated_content
+
+        # Verify super()._refresh_cached_properties() was called
+        mock_super_refresh.assert_called_once()
+
+    @mock.patch("airflow.providers.amazon.aws.hooks.eks.EksHook.get_session")
+    @mock.patch("airflow.providers.amazon.aws.hooks.eks.EksHook.__init__", return_value=None)
+    @mock.patch(
+        "airflow.providers.cncf.kubernetes.operators.pod.KubernetesPodOperator._refresh_cached_properties"
+    )
+    def test_refresh_cached_properties_raises_when_no_credentials(
+        self,
+        mock_super_refresh,
+        mock_eks_hook,
+        mock_get_session,
+        tmp_path,
+    ):
+        """Test that _refresh_cached_properties raises when credentials cannot be retrieved."""
+        # Create a temporary credentials file
+        credentials_file = tmp_path / "test_creds.aws_creds"
+        credentials_file.write_text("export AWS_ACCESS_KEY_ID='old_key'\n")
+
+        # Mock the credential chain to return None (simulating expired/missing credentials)
+        mock_session = mock.MagicMock()
+        mock_get_session.return_value = mock_session
+        mock_session.get_credentials.return_value = None
+
+        op = EksPodOperator(
+            task_id="run_pod",
+            pod_name="run_pod",
+            cluster_name=CLUSTER_NAME,
+            image="amazon/aws-cli:latest",
+            cmds=["sh", "-c", "ls"],
+            labels={"demo": "hello_world"},
+            get_logs=True,
+            on_finish_action="delete_pod",
+        )
+        op._credentials_file_path = str(credentials_file)
+
+        # Call the refresh method and expect it to raise
+        with pytest.raises(AirflowException, match="Unable to retrieve fresh AWS credentials"):
+            op._refresh_cached_properties()
+
+        # Verify super()._refresh_cached_properties() was NOT called since we raised
+        mock_super_refresh.assert_not_called()
+
+    @mock.patch(
+        "airflow.providers.cncf.kubernetes.operators.pod.KubernetesPodOperator.convert_config_file_to_dict"
+    )
+    def test_invoke_defer_method_uses_eks_trigger(self, mock_convert_config):
+        """invoke_defer_method should create an EksPodTrigger and call defer."""
+        op = EksPodOperator(
+            task_id="run_pod",
+            pod_name="run_pod",
+            cluster_name=CLUSTER_NAME,
+            image="amazon/aws-cli:latest",
+            cmds=["sh", "-c", "ls"],
+            labels={"demo": "hello_world"},
+            get_logs=True,
+            on_finish_action="delete_pod",
+        )
+
+        # Set up pod metadata as it would be after execute creates the pod
+        mock_pod = mock.MagicMock()
+        mock_pod.metadata.name = "test-pod-abc123"
+        mock_pod.metadata.namespace = "default"
+        # Set status to None so define_container_state returns UNDEFINED (not terminal)
+        mock_pod.status = None
+        op.pod = mock_pod
+
+        with pytest.raises(TaskDeferred) as exc:
+            op.invoke_defer_method()
+
+        # Verify the trigger is an EksPodTrigger (not the base KubernetesPodTrigger)
+        trigger = exc.value.trigger
+        assert isinstance(trigger, EksPodTrigger)
+        assert trigger.eks_cluster_name == CLUSTER_NAME
+        assert trigger._aws_conn_id == "aws_default"
+        assert trigger.pod_name == "test-pod-abc123"
+        assert trigger.pod_namespace == "default"
+
+    @mock.patch(
+        "airflow.providers.cncf.kubernetes.operators.pod.KubernetesPodOperator.convert_config_file_to_dict"
+    )
+    def test_invoke_defer_method_raises_when_pod_is_none(self, mock_convert_config):
+        """invoke_defer_method should raise RuntimeError when pod is None."""
+        op = EksPodOperator(
+            task_id="run_pod",
+            pod_name="run_pod",
+            cluster_name=CLUSTER_NAME,
+            image="amazon/aws-cli:latest",
+            cmds=["sh", "-c", "ls"],
+            labels={"demo": "hello_world"},
+            get_logs=True,
+            on_finish_action="delete_pod",
+        )
+
+        # pod is None by default
+        op.pod = None
+
+        with pytest.raises(RuntimeError, match="Pod must be created with metadata before deferring"):
+            op.invoke_defer_method()

@@ -16,53 +16,48 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useToken } from "@chakra-ui/react";
-import { ReactFlow, Controls, Background, MiniMap, type Node as ReactFlowNode } from "@xyflow/react";
+import { Box, Spinner, useToken } from "@chakra-ui/react";
+import { ReactFlow, Background, MiniMap, type Node as ReactFlowNode } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { useLocalStorage } from "usehooks-ts";
 
-import { useStructureServiceStructureData } from "openapi/queries";
+import { useDagRunServiceGetDagRun, useStructureServiceStructureData } from "openapi/queries";
+import type { Direction } from "src/components/Graph/DirectionDropdown";
 import { DownloadButton } from "src/components/Graph/DownloadButton";
 import { edgeTypes, nodeTypes } from "src/components/Graph/graphTypes";
-import type { CustomNodeProps } from "src/components/Graph/reactflowUtils";
-import { type Direction, useGraphLayout } from "src/components/Graph/useGraphLayout";
+import { getGatePathEdgeIdsForSelection, type CustomNodeProps } from "src/components/Graph/reactflowUtils";
+import { useGraphLayout } from "src/components/Graph/useGraphLayout";
+import { SHOW_ALL_DEPENDENCIES_KEY, directionKey } from "src/constants/localStorage";
 import { useColorMode } from "src/context/colorMode";
-import { useOpenGroups } from "src/context/openGroups";
+import { useGroups } from "src/context/groups";
 import useSelectedVersion from "src/hooks/useSelectedVersion";
+import { useDefaultGraphDirection } from "src/hooks/useUserSettings";
 import { flattenGraphNodes } from "src/layouts/Details/Grid/utils.ts";
 import { useDependencyGraph } from "src/queries/useDependencyGraph";
-import { useGridTiSummaries } from "src/queries/useGridTISummaries.ts";
+import { useGridTiSummariesStream } from "src/queries/useGridTISummaries.ts";
 import { getReactFlowThemeStyle } from "src/theme";
 
-const nodeColor = (
-  { data: { depth, height, isOpen, taskInstance, width }, type }: ReactFlowNode<CustomNodeProps>,
-  evenColor?: string,
-  oddColor?: string,
-) => {
-  if (height === undefined || width === undefined || type === "join") {
-    return "";
-  }
+import { FitViewOnLayout } from "./components/FitViewOnLayout";
+import { GraphControls } from "./components/GraphControls";
+import { useFilteredNodesAndEdges } from "./hooks/useFilteredNodesAndEdges";
+import { useGraphSearchParams } from "./hooks/useGraphSearchParams";
+import { useGraphFilteredNodes } from "./useGraphFilteredNodes";
+import { nodeColor } from "./utils/nodeColor";
 
-  if (taskInstance?.state !== undefined && !isOpen) {
-    return `var(--chakra-colors-${taskInstance.state}-solid)`;
-  }
-
-  if (isOpen && depth !== undefined && depth % 2 === 0) {
-    return evenColor ?? "";
-  } else if (isOpen) {
-    return oddColor ?? "";
-  }
-
-  return "";
-};
+// Hoisted to module scope so ReactFlow receives a stable reference and skips
+// its internal shallow-equality check on every render.
+const defaultEdgeOptions = { zIndex: 1 };
 
 export const Graph = () => {
   const { colorMode = "light" } = useColorMode();
-  const { dagId = "", runId = "", taskId } = useParams();
+  const { dagId = "", groupId, runId = "", taskId } = useParams();
 
   const selectedVersion = useSelectedVersion();
+
+  const { depth, filterRoot, graphFilters, hasActiveFilter, includeDownstream, includeUpstream } =
+    useGraphSearchParams();
 
   // corresponds to the "bg", "bg.emphasized", "border.inverted" semantic tokens
   const [oddLight, oddDark, evenLight, evenDark, selectedDarkColor, selectedLightColor] = useToken("colors", [
@@ -74,16 +69,20 @@ export const Graph = () => {
     "bg.emphasized",
   ]);
 
-  const { allGroupIds, openGroupIds, setAllGroupIds } = useOpenGroups();
+  const { allGroupIds, openGroupIds, setAllGroupIds } = useGroups();
 
-  const [dependencies] = useLocalStorage<"all" | "immediate" | "tasks">(`dependencies-${dagId}`, "tasks");
-  const [direction] = useLocalStorage<Direction>(`direction-${dagId}`, "RIGHT");
+  const [showAllDependencies] = useLocalStorage<boolean>(SHOW_ALL_DEPENDENCIES_KEY, false);
+  const [defaultDirection] = useDefaultGraphDirection();
+  const [direction] = useLocalStorage<Direction>(directionKey(dagId), defaultDirection);
 
   const selectedColor = colorMode === "dark" ? selectedDarkColor : selectedLightColor;
   const { data: graphData = { edges: [], nodes: [] } } = useStructureServiceStructureData(
     {
       dagId,
-      externalDependencies: dependencies === "immediate",
+      depth,
+      includeDownstream,
+      includeUpstream,
+      root: hasActiveFilter && filterRoot !== undefined ? filterRoot : undefined,
       versionNumber: selectedVersion,
     },
     undefined,
@@ -102,90 +101,140 @@ export const Graph = () => {
   }, [allGroupIds, graphData.nodes, setAllGroupIds]);
 
   const { data: dagDependencies = { edges: [], nodes: [] } } = useDependencyGraph(`dag:${dagId}`, {
-    enabled: dependencies === "all",
+    enabled: showAllDependencies,
   });
 
-  const dagDepEdges = dependencies === "all" ? dagDependencies.edges : [];
-  const dagDepNodes = dependencies === "all" ? dagDependencies.nodes : [];
+  const dagDepEdges = showAllDependencies ? dagDependencies.edges : [];
+  const dagDepNodes = showAllDependencies ? dagDependencies.nodes : [];
 
-  const { data } = useGraphLayout({
+  const layoutEdges = [...graphData.edges, ...dagDepEdges];
+  const layoutNodes = dagDepNodes.length
+    ? dagDepNodes.map((node) => (node.id === `dag:${dagId}` ? { ...node, children: graphData.nodes } : node))
+    : graphData.nodes;
+  const layoutOpenGroupIds = [...openGroupIds, ...(showAllDependencies ? [`dag:${dagId}`] : [])];
+
+  const { data, isPending } = useGraphLayout({
     direction,
-    edges: [...graphData.edges, ...dagDepEdges],
-    nodes: dagDepNodes.length
-      ? dagDepNodes.map((node) =>
-          node.id === `dag:${dagId}` ? { ...node, children: graphData.nodes } : node,
-        )
-      : graphData.nodes,
-    openGroupIds: [...openGroupIds, ...(dependencies === "all" ? [`dag:${dagId}`] : [])],
+    edges: layoutEdges,
+    nodes: layoutNodes,
+    openGroupIds: layoutOpenGroupIds,
     versionNumber: selectedVersion,
   });
 
-  const { data: gridTISummaries } = useGridTiSummaries({ dagId, runId });
+  const { data: dagRun } = useDagRunServiceGetDagRun({ dagId, dagRunId: runId }, undefined, {
+    enabled: Boolean(runId),
+  });
+
+  const { summariesByRunId } = useGridTiSummariesStream({
+    dagId,
+    runIds: runId ? [runId] : [],
+    states: dagRun ? [dagRun.state] : undefined,
+  });
+  const gridTISummaries = runId ? summariesByRunId.get(runId) : undefined;
+
+  const isNodeSelected = (nodeId: string) =>
+    nodeId === taskId || nodeId === groupId || nodeId === `dag:${dagId}`;
 
   // Add task instances to the node data but without having to recalculate how the graph is laid out
-  const nodes = data?.nodes.map((node) => {
+  const nodesWithTI = data?.nodes.map((node) => {
     const taskInstance = gridTISummaries?.task_instances.find((ti) => ti.task_id === node.id);
 
     return {
       ...node,
       data: {
         ...node.data,
-        isSelected: node.id === taskId || node.id === `dag:${dagId}`,
+        isSelected: isNodeSelected(node.id),
         taskInstance,
       },
     };
   });
 
-  const edges = (data?.edges ?? []).map((edge) => ({
-    ...edge,
-    data: {
-      ...edge.data,
-      rest: {
-        ...edge.data?.rest,
-        isSelected:
-          taskId === edge.source ||
-          taskId === edge.target ||
-          edge.source === `dag:${dagId}` ||
-          edge.target === `dag:${dagId}`,
-      },
-    },
-  }));
+  const baseFilteredNodes = useGraphFilteredNodes(nodesWithTI, graphFilters);
+
+  const { edges: filteredEdges, nodes } = useFilteredNodesAndEdges({
+    baseFilteredNodes,
+    dagId,
+    groupId,
+    layoutEdges: data?.edges ?? [],
+    taskId,
+  });
+
+  const gatePathEdgeIds = data
+    ? getGatePathEdgeIdsForSelection(data.nodes, data.edges, isNodeSelected)
+    : new Set<string>();
+  const edges =
+    gatePathEdgeIds.size > 0
+      ? filteredEdges.map((edge) =>
+          gatePathEdgeIds.has(edge.id)
+            ? { ...edge, data: { ...edge.data, rest: { ...edge.data?.rest, isSelected: true } } }
+            : edge,
+        )
+      : filteredEdges;
+
+  const selectedNodeId = taskId ?? groupId;
 
   return (
-    <ReactFlow
-      colorMode={colorMode}
-      defaultEdgeOptions={{ zIndex: 1 }}
-      edges={edges}
-      edgeTypes={edgeTypes}
-      // Fit view to selected task or the whole graph on render
-      fitView
-      maxZoom={1.5}
-      minZoom={0.25}
-      nodes={nodes}
-      nodesDraggable={false}
-      nodeTypes={nodeTypes}
-      onlyRenderVisibleElements
-      style={getReactFlowThemeStyle(colorMode)}
-    >
-      <Background />
-      <Controls showInteractive={false} />
-      <MiniMap
-        nodeColor={(node: ReactFlowNode<CustomNodeProps>) =>
-          nodeColor(
-            node,
-            colorMode === "dark" ? evenDark : evenLight,
-            colorMode === "dark" ? oddDark : oddLight,
-          )
-        }
-        nodeStrokeColor={(node: ReactFlowNode<CustomNodeProps>) =>
-          node.data.isSelected && selectedColor !== undefined ? selectedColor : ""
-        }
-        nodeStrokeWidth={15}
-        pannable
-        style={{ height: 150, width: 200 }}
-        zoomable
-      />
-      <DownloadButton name={dagId} />
-    </ReactFlow>
+    <Box height="100%" position="relative" width="100%">
+      {isPending ? (
+        <Box
+          alignItems="center"
+          display="flex"
+          height="100%"
+          justifyContent="center"
+          left={0}
+          position="absolute"
+          top={0}
+          width="100%"
+          zIndex={10}
+        >
+          <Spinner color="blue.500" size="xl" />
+        </Box>
+      ) : undefined}
+      <ReactFlow
+        colorMode={colorMode}
+        defaultEdgeOptions={defaultEdgeOptions}
+        edges={edges}
+        edgesFocusable={false}
+        edgeTypes={edgeTypes}
+        maxZoom={1.5}
+        minZoom={0.01}
+        nodes={nodes}
+        nodesConnectable={false}
+        nodesDraggable={false}
+        nodesFocusable={false}
+        nodeTypes={nodeTypes}
+        onlyRenderVisibleElements
+        style={getReactFlowThemeStyle(colorMode)}
+      >
+        <Background />
+        {/* Fit the viewport after each new ELK layout instead of using the
+            fitView prop, which re-fires on every re-mount even when nodes are
+            served from the React Query cache. */}
+        <FitViewOnLayout layoutData={data} />
+        <GraphControls selectedNodeId={selectedNodeId} />
+        {/* Hide the MiniMap for large graphs — it processes all nodes even when
+            onlyRenderVisibleElements is set, adding meaningful paint cost with
+            little benefit at 500+ nodes where the map is a near-solid blob. */}
+        {data !== undefined && data.nodes.length <= 500 ? (
+          <MiniMap
+            nodeColor={(node: ReactFlowNode<CustomNodeProps>) =>
+              nodeColor(
+                node,
+                colorMode === "dark" ? evenDark : evenLight,
+                colorMode === "dark" ? oddDark : oddLight,
+              )
+            }
+            nodeStrokeColor={(node: ReactFlowNode<CustomNodeProps>) =>
+              node.data.isSelected && selectedColor !== undefined ? selectedColor : ""
+            }
+            nodeStrokeWidth={15}
+            pannable
+            style={{ height: 150, width: 200 }}
+            zoomable
+          />
+        ) : undefined}
+        <DownloadButton name={dagId} />
+      </ReactFlow>
+    </Box>
   );
 };

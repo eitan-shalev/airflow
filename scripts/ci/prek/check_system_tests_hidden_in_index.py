@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.10,<3.11"
 # dependencies = [
 #   "pyyaml>=6.0.3",
 #   "rich>=13.6.0",
@@ -35,7 +35,6 @@ if __name__ not in ("__main__", "__mp_main__"):
     )
 
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))  # make sure common_prek_utils is imported
 from common_prek_utils import AIRFLOW_PROVIDERS_ROOT_PATH, console
 
 errors: list[Any] = []

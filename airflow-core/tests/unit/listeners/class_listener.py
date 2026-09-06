@@ -26,6 +26,10 @@ class ClassBasedListener:
         self.started_component = None
         self.stopped_component = None
         self.state = []
+        self.dag_run_msg: str | None = None
+        self.dag_run_has_dag_attr: bool | None = None
+        self.dag_run_note_at_listener: str | None = None
+        self.ti_note_at_listener: str | None = None
 
     @hookimpl
     def on_starting(self, component):
@@ -34,21 +38,28 @@ class ClassBasedListener:
 
     @hookimpl
     def before_stopping(self, component):
-        global stopped_component
-        stopped_component = component
+        self.stopped_component = component
         self.state.append(DagRunState.SUCCESS)
 
     @hookimpl
     def on_task_instance_running(self, previous_state, task_instance):
         self.state.append(TaskInstanceState.RUNNING)
+        self.ti_note_at_listener = task_instance.note
 
     @hookimpl
     def on_task_instance_success(self, previous_state, task_instance):
         self.state.append(TaskInstanceState.SUCCESS)
+        self.ti_note_at_listener = task_instance.note
 
     @hookimpl
     def on_task_instance_failed(self, previous_state, task_instance, error: None | str | BaseException):
         self.state.append(TaskInstanceState.FAILED)
+        self.ti_note_at_listener = task_instance.note
+
+    @hookimpl
+    def on_task_instance_skipped(self, previous_state, task_instance):
+        self.state.append(TaskInstanceState.SKIPPED)
+        self.ti_note_at_listener = task_instance.note
 
     @hookimpl
     def on_dag_run_running(self, dag_run, msg: str):
@@ -57,10 +68,16 @@ class ClassBasedListener:
     @hookimpl
     def on_dag_run_success(self, dag_run, msg: str):
         self.state.append(DagRunState.SUCCESS)
+        self.dag_run_msg = msg
+        self.dag_run_has_dag_attr = dag_run.dag is not None
+        self.dag_run_note_at_listener = dag_run.note
 
     @hookimpl
     def on_dag_run_failed(self, dag_run, msg: str):
         self.state.append(DagRunState.FAILED)
+        self.dag_run_msg = msg
+        self.dag_run_has_dag_attr = dag_run.dag is not None
+        self.dag_run_note_at_listener = dag_run.note
 
 
 def clear():

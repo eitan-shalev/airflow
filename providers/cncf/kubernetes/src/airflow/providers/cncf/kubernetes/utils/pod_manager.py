@@ -21,16 +21,17 @@ from __future__ import annotations
 import asyncio
 import enum
 import json
+import logging
 import math
+import re
 import time
 from collections.abc import Callable, Generator, Iterable
-from contextlib import closing, suppress
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import pendulum
-import tenacity
 from kubernetes import client, watch
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream as kubernetes_stream
@@ -38,21 +39,34 @@ from pendulum import DateTime
 from pendulum.parsing.exceptions import ParserError
 from urllib3.exceptions import HTTPError, TimeoutError
 
-from airflow.exceptions import AirflowException
 from airflow.providers.cncf.kubernetes.callbacks import ExecutionMode, KubernetesPodOperatorCallback
+from airflow.providers.cncf.kubernetes.kubernetes_helper_functions import (
+    KubernetesApiException,
+    PodLaunchFailedException,
+    generic_api_retry,
+)
+from airflow.providers.cncf.kubernetes.utils.container import (
+    container_is_completed,
+    container_is_running,
+    container_is_terminated,
+    container_is_wait,
+    get_container_status,
+)
 from airflow.providers.cncf.kubernetes.utils.xcom_sidecar import PodDefaults
+from airflow.providers.common.compat.sdk import AirflowException, timezone
 from airflow.utils.log.logging_mixin import LoggingMixin
-from airflow.utils.timezone import utcnow
 
 if TYPE_CHECKING:
+    from kubernetes.client.models.core_v1_event import CoreV1Event
     from kubernetes.client.models.core_v1_event_list import CoreV1EventList
     from kubernetes.client.models.v1_container_state import V1ContainerState
     from kubernetes.client.models.v1_container_state_waiting import V1ContainerStateWaiting
-    from kubernetes.client.models.v1_container_status import V1ContainerStatus
     from kubernetes.client.models.v1_object_reference import V1ObjectReference
     from kubernetes.client.models.v1_pod import V1Pod
     from kubernetes.client.models.v1_pod_condition import V1PodCondition
     from urllib3.response import HTTPResponse
+
+    from airflow.providers.cncf.kubernetes.hooks.kubernetes import AsyncKubernetesHook
 
 
 EMPTY_XCOM_RESULT = "__airflow_xcom_result_empty__"
@@ -62,16 +76,36 @@ Sentinel for no xcom result.
 :meta private:
 """
 
+_POD_LOG_LEVEL_PATTERN = re.compile(
+    r"^\s*(?:\[)?(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL|FATAL)(?:\])?\s*[:\-]?\s*",
+    re.IGNORECASE,
+)
+_POD_LOG_LEVEL_MAP: dict[str, int] = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "WARN": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+    "FATAL": logging.CRITICAL,
+}
 
-class PodLaunchFailedException(AirflowException):
-    """When pod launching fails in KubernetesPodOperator."""
+
+def _parse_log_level(message: str) -> int:
+    """
+    Detect the Python logging level from a pod log line's prefix.
+
+    Recognises common formats: ``ERROR:``, ``[ERROR]``, ``WARNING -``, etc.
+    Returns ``logging.INFO`` when no known prefix is found (backwards-compatible).
+    """
+    match = _POD_LOG_LEVEL_PATTERN.match(message)
+    if match:
+        return _POD_LOG_LEVEL_MAP.get(match.group(1).upper(), logging.INFO)
+    return logging.INFO
 
 
-def should_retry_start_pod(exception: BaseException) -> bool:
-    """Check if an Exception indicates a transient error and warrants retrying."""
-    if isinstance(exception, ApiException):
-        return str(exception.status) == "409"
-    return False
+class XComRetrievalError(AirflowException):
+    """When not possible to get xcom."""
 
 
 class PodPhase:
@@ -85,137 +119,167 @@ class PodPhase:
     RUNNING = "Running"
     FAILED = "Failed"
     SUCCEEDED = "Succeeded"
+    UNKNOWN = "Unknown"
 
     terminal_states = {FAILED, SUCCEEDED}
 
 
-class PodOperatorHookProtocol(Protocol):
-    """
-    Protocol to define methods relied upon by KubernetesPodOperator.
-
-    Subclasses of KubernetesPodOperator, such as GKEStartPodOperator, may use
-    hooks that don't extend KubernetesHook.  We use this protocol to document the
-    methods used by KPO and ensure that these methods exist on such other hooks.
-    """
-
-    @property
-    def core_v1_client(self) -> client.CoreV1Api:
-        """Get authenticated client object."""
-
-    @property
-    def is_in_cluster(self) -> bool:
-        """Expose whether the hook is configured with ``load_incluster_config`` or not."""
-
-    def get_pod(self, name: str, namespace: str) -> V1Pod:
-        """Read pod object from kubernetes API."""
-
-    def get_namespace(self) -> str | None:
-        """Return the namespace that defined in the connection."""
-
-    def get_xcom_sidecar_container_image(self) -> str | None:
-        """Return the xcom sidecar image that defined in the connection."""
-
-    def get_xcom_sidecar_container_resources(self) -> str | None:
-        """Return the xcom sidecar resources that defined in the connection."""
-
-
-def get_container_status(pod: V1Pod, container_name: str) -> V1ContainerStatus | None:
-    """Retrieve container status."""
-    if pod and pod.status:
-        container_statuses = []
-        if pod.status.container_statuses:
-            container_statuses.extend(pod.status.container_statuses)
-        if pod.status.init_container_statuses:
-            container_statuses.extend(pod.status.init_container_statuses)
-
-    else:
-        container_statuses = None
-
-    if container_statuses:
-        # In general the variable container_statuses can store multiple items matching different containers.
-        # The following generator expression yields all items that have name equal to the container_name.
-        # The function next() here calls the generator to get only the first value. If there's nothing found
-        # then None is returned.
-        return next((x for x in container_statuses if x.name == container_name), None)
-    return None
-
-
-def container_is_running(pod: V1Pod, container_name: str) -> bool:
-    """
-    Examine V1Pod ``pod`` to determine whether ``container_name`` is running.
-
-    If that container is present and running, returns True.  Returns False otherwise.
-    """
-    container_status = get_container_status(pod, container_name)
-    if not container_status:
-        return False
-    return container_status.state.running is not None
-
-
-def container_is_completed(pod: V1Pod, container_name: str) -> bool:
-    """
-    Examine V1Pod ``pod`` to determine whether ``container_name`` is completed.
-
-    If that container is present and completed, returns True.  Returns False otherwise.
-    """
-    container_status = get_container_status(pod, container_name)
-    if not container_status:
-        return False
-    return container_status.state.terminated is not None
-
-
-def container_is_succeeded(pod: V1Pod, container_name: str) -> bool:
-    """
-    Examine V1Pod ``pod`` to determine whether ``container_name`` is completed and succeeded.
-
-    If that container is present and completed and succeeded, returns True.  Returns False otherwise.
-    """
-    if not container_is_completed(pod, container_name):
-        return False
-
-    container_status = get_container_status(pod, container_name)
-    if not container_status:
-        return False
-    return container_status.state.terminated.exit_code == 0
-
-
-def container_is_wait(pod: V1Pod, container_name: str) -> bool:
-    """
-    Examine V1Pod ``pod`` to determine whether ``container_name`` is waiting.
-
-    If that container is present and waiting, returns True.  Returns False otherwise.
-    """
-    container_status = get_container_status(pod, container_name)
-    if not container_status:
-        return False
-
-    return container_status.state.waiting is not None
-
-
-def container_is_terminated(pod: V1Pod, container_name: str) -> bool:
-    """
-    Examine V1Pod ``pod`` to determine whether ``container_name`` is terminated.
-
-    If that container is present and terminated, returns True.  Returns False otherwise.
-    """
-    container_statuses = pod.status.container_statuses if pod and pod.status else None
-    if not container_statuses:
-        return False
-    container_status = next((x for x in container_statuses if x.name == container_name), None)
-    if not container_status:
-        return False
-    return container_status.state.terminated is not None
-
-
-def get_container_termination_message(pod: V1Pod, container_name: str):
-    with suppress(AttributeError, TypeError):
-        container_statuses = pod.status.container_statuses
-        container_status = next((x for x in container_statuses if x.name == container_name), None)
-        return container_status.state.terminated.message if container_status else None
-
-
 def check_exception_is_kubernetes_api_unauthorized(exc: BaseException):
     return isinstance(exc, ApiException) and exc.status and str(exc.status) == "401"
+
+
+def log_pod_event(
+    pod_manager: PodManager | AsyncPodManager, event: CoreV1Event, seen_events: set[str]
+) -> None:
+    """
+    Log a pod event if not already seen.
+
+    :param pod_manager: The pod manager instance for logging
+    :param event: Kubernetes event
+    :param seen_events: Set of event UIDs already logged to avoid duplicates
+    """
+    event_uid = event.metadata.uid
+    if event_uid not in seen_events:
+        seen_events.add(event_uid)
+        involved_object: V1ObjectReference = event.involved_object
+        pod_manager.log.info("The Pod has an Event: %s from %s", event.message, involved_object.field_path)
+
+
+async def await_pod_start(
+    pod_manager: PodManager | AsyncPodManager,
+    pod: V1Pod,
+    schedule_timeout: int = 120,
+    startup_timeout: int = 120,
+    check_interval: float = 1,
+):
+    """
+    Monitor the startup phase of a Kubernetes pod, waiting for it to leave the ``Pending`` state.
+
+    This function is shared by both PodManager and AsyncPodManager to provide consistent pod startup tracking.
+
+    :param pod_manager: The pod manager instance (PodManager or AsyncPodManager).
+    :param pod: The pod object to monitor.
+    :param schedule_timeout: Maximum time (in seconds) to wait for the pod to be scheduled.
+    :param startup_timeout: Maximum time (in seconds) to wait for the pod to start running after being scheduled.
+    :param check_interval: Interval (in seconds) between status checks.
+    :param is_async: Set to True if called in an async context; otherwise, False.
+    """
+    pod_manager.log.info("::group::Waiting up to %ss to get the POD scheduled...", schedule_timeout)
+    pod_was_scheduled = False
+    start_check_time = time.time()
+    is_async = isinstance(pod_manager, AsyncPodManager)
+    while True:
+        if is_async:
+            remote_pod = await pod_manager.read_pod(pod)
+        else:
+            remote_pod = pod_manager.read_pod(pod)
+        pod_status = remote_pod.status
+
+        if pod_status.phase == PodPhase.FAILED and pod_status.container_statuses is None:
+            pod_manager.stop_watching_events = True
+            pod_manager.log.info("::endgroup::")
+            raise PodLaunchFailedException("Pod failed before containers started")
+
+        if pod_status.phase not in (PodPhase.PENDING, PodPhase.UNKNOWN):
+            pod_manager.stop_watching_events = True
+            pod_manager.log.info("Pod has reached %s phase before launch timeout", pod_status.phase)
+            pod_manager.log.info("::endgroup::")
+            break
+
+        # Check for timeout
+        pod_conditions: list[V1PodCondition] = pod_status.conditions
+        if pod_conditions and any(
+            (condition.type == "PodScheduled" and condition.status == "True") for condition in pod_conditions
+        ):
+            if not pod_was_scheduled:
+                # POD was initially scheduled update timeout for getting POD launched
+                pod_was_scheduled = True
+                start_check_time = time.time()
+                pod_manager.log.info("Waiting %ss to get the POD running...", startup_timeout)
+
+            if time.time() - start_check_time >= startup_timeout:
+                pod_manager.stop_watching_events = True
+                pod_manager.log.info("::endgroup::")
+                raise PodLaunchTimeoutException(
+                    f"Pod took too long to start. More than {startup_timeout}s. Check the pod events in kubernetes."
+                )
+        else:
+            if time.time() - start_check_time >= schedule_timeout:
+                pod_manager.stop_watching_events = True
+                pod_manager.log.info("::endgroup::")
+                raise PodLaunchTimeoutException(
+                    f"Pod took too long to be scheduled on the cluster, giving up. More than {schedule_timeout}s. Check the pod events in kubernetes."
+                )
+
+        # Check for general problems to terminate early
+        error_message = detect_pod_terminate_early_issues(remote_pod)
+        if error_message:
+            pod_manager.log.info("::endgroup::")
+            raise PodLaunchFailedException(error_message)
+
+        await asyncio.sleep(check_interval)
+
+
+def detect_pod_terminate_early_issues(pod: V1Pod) -> str | None:
+    """
+    Identify issues that justify terminating the pod early.
+
+    This method distinguishes between permanent failures (e.g., invalid image names)
+    and transient errors (e.g., rate limits) that should be retried by Kubernetes.
+
+    :param pod: The pod object to check.
+    :return: An error message if an issue is detected; otherwise, None.
+    """
+    # Indicators in error messages that suggest transient issues
+    TRANSIENT_ERROR_PATTERNS = [
+        "pull qps exceeded",
+        "rate limit",
+        "too many requests",
+        "quota exceeded",
+        "temporarily unavailable",
+        "timeout",
+        "account limit",
+        # Upstream registry/auth outages (e.g. Docker Hub auth returning 5xx).
+        # kubelet will retry automatically; the caller's startup_timeout still
+        # bounds the total wait. These match both the underlying ErrImagePull
+        # message and the ImagePullBackOff message on kubelet >= 1.32, which
+        # appends the previous pull error to "Back-off pulling image ...".
+        # On older kubelets the bare ImagePullBackOff message carries no
+        # detail, so we fall back to the existing fail-fast path — matching
+        # "back-off pulling" unconditionally would cause a 120s wait for a
+        # genuinely missing image instead of failing fast.
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+    ]
+
+    FATAL_STATES = ["InvalidImageName", "ErrImageNeverPull"]
+    TRANSIENT_STATES = ["ErrImagePull", "ImagePullBackOff"]
+    ERROR_MESSAGE = "Image cannot be pulled, unable to start: {reason}\n{message}"
+
+    pod_status = pod.status
+    if not pod_status.container_statuses:
+        return None
+
+    for container_status in pod_status.container_statuses:
+        container_state: V1ContainerState = container_status.state
+        container_waiting: V1ContainerStateWaiting | None = container_state.waiting
+        if not container_waiting:
+            continue
+
+        if container_waiting.reason in FATAL_STATES:
+            return ERROR_MESSAGE.format(
+                reason=container_waiting.reason, message=container_waiting.message or ""
+            )
+
+        if container_waiting.reason in TRANSIENT_STATES:
+            message_lower = (container_waiting.message or "").lower()
+            is_transient = any(pattern in message_lower for pattern in TRANSIENT_ERROR_PATTERNS)
+            if not is_transient:
+                return ERROR_MESSAGE.format(
+                    reason=container_waiting.reason, message=container_waiting.message or ""
+                )
+    return None
 
 
 class PodLaunchTimeoutException(AirflowException):
@@ -224,6 +288,10 @@ class PodLaunchTimeoutException(AirflowException):
 
 class PodNotFoundException(AirflowException):
     """Expected pod does not exist in kube-api."""
+
+
+class PodCommandException(AirflowException):
+    """When a pod command execution fails."""
 
 
 class PodLogsConsumer:
@@ -298,11 +366,11 @@ class PodLogsConsumer:
         if terminated:
             termination_time = terminated.finished_at
             if termination_time:
-                return termination_time + timedelta(seconds=self.post_termination_timeout) > utcnow()
+                return termination_time + timedelta(seconds=self.post_termination_timeout) > timezone.utcnow()
         return False
 
     def read_pod(self):
-        _now = utcnow()
+        _now = timezone.utcnow()
         if (
             self.read_pod_cache is None
             or self.last_read_pod_at + timedelta(seconds=self.read_pod_cache_timeout) < _now
@@ -339,6 +407,7 @@ class PodManager(LoggingMixin):
         self._watch = watch.Watch()
         self._callbacks = callbacks or []
         self.stop_watching_events = False
+        self.container_log_times: dict[tuple[str, str, str], DateTime] = {}
 
     def run_pod_async(self, pod: V1Pod, **kwargs) -> V1Pod:
         """Run POD asynchronously."""
@@ -358,6 +427,7 @@ class PodManager(LoggingMixin):
             raise e
         return resp
 
+    @generic_api_retry
     def delete_pod(self, pod: V1Pod) -> None:
         """Delete POD."""
         try:
@@ -369,27 +439,22 @@ class PodManager(LoggingMixin):
             if str(e.status) != "404":
                 raise
 
-    @tenacity.retry(
-        stop=tenacity.stop_after_attempt(3),
-        wait=tenacity.wait_random_exponential(),
-        reraise=True,
-        retry=tenacity.retry_if_exception(should_retry_start_pod),
-    )
+    @generic_api_retry
     def create_pod(self, pod: V1Pod) -> V1Pod:
         """Launch the pod asynchronously."""
         return self.run_pod_async(pod)
 
-    async def watch_pod_events(self, pod: V1Pod, check_interval: int = 1) -> None:
-        """Read pod events and writes into log."""
-        num_events = 0
+    async def watch_pod_events(self, pod: V1Pod, check_interval: float = 10) -> None:
+        """Read pod events and write into log."""
+        resource_version = None
+        seen_events: set[str] = set()
         while not self.stop_watching_events:
-            events = self.read_pod_events(pod)
-            for new_event in events.items[num_events:]:
-                involved_object: V1ObjectReference = new_event.involved_object
-                self.log.info(
-                    "The Pod has an Event: %s from %s", new_event.message, involved_object.field_path
-                )
-            num_events = len(events.items)
+            events = self.read_pod_events(pod, resource_version)
+            if events.metadata and events.metadata.resource_version:
+                resource_version = events.metadata.resource_version
+            for event in events.items:
+                log_pod_event(self, event, seen_events)
+                resource_version = event.metadata.resource_version
             await asyncio.sleep(check_interval)
 
     async def await_pod_start(
@@ -406,55 +471,13 @@ class PodManager(LoggingMixin):
         :param check_interval: Interval (in seconds) between checks
         :return:
         """
-        self.log.info("::group::Waiting until %ss to get the POD scheduled...", schedule_timeout)
-        pod_was_scheduled = False
-        start_check_time = time.time()
-        while True:
-            remote_pod = self.read_pod(pod)
-            pod_status = remote_pod.status
-            if pod_status.phase != PodPhase.PENDING:
-                self.stop_watching_events = True
-                self.log.info("::endgroup::")
-                break
-
-            # Check for timeout
-            pod_conditions: list[V1PodCondition] = pod_status.conditions
-            if pod_conditions and any(
-                (condition.type == "PodScheduled" and condition.status == "True")
-                for condition in pod_conditions
-            ):
-                if not pod_was_scheduled:
-                    # POD was initially scheduled update timeout for getting POD launched
-                    pod_was_scheduled = True
-                    start_check_time = time.time()
-                    self.log.info("Waiting %ss to get the POD running...", startup_timeout)
-
-                if time.time() - start_check_time >= startup_timeout:
-                    self.log.info("::endgroup::")
-                    raise PodLaunchFailedException(
-                        f"Pod took too long to start. More than {startup_timeout}s. Check the pod events in kubernetes."
-                    )
-            else:
-                if time.time() - start_check_time >= schedule_timeout:
-                    self.log.info("::endgroup::")
-                    raise PodLaunchFailedException(
-                        f"Pod took too long to be scheduled on the cluster, giving up. More than {schedule_timeout}s. Check the pod events in kubernetes."
-                    )
-
-            # Check for general problems to terminate early - ErrImagePull
-            if pod_status.container_statuses:
-                for container_status in pod_status.container_statuses:
-                    container_state: V1ContainerState = container_status.state
-                    container_waiting: V1ContainerStateWaiting | None = container_state.waiting
-                    if container_waiting:
-                        if container_waiting.reason in ["ErrImagePull", "InvalidImageName"]:
-                            self.log.info("::endgroup::")
-                            raise PodLaunchFailedException(
-                                f"Pod docker image cannot be pulled, unable to start: {container_waiting.reason}"
-                                f"\n{container_waiting.message}"
-                            )
-
-            await asyncio.sleep(check_interval)
+        await await_pod_start(
+            pod_manager=self,
+            pod=pod,
+            schedule_timeout=schedule_timeout,
+            startup_timeout=startup_timeout,
+            check_interval=check_interval,
+        )
 
     def _log_message(
         self,
@@ -463,18 +486,18 @@ class PodManager(LoggingMixin):
         container_name_log_prefix_enabled: bool,
         log_formatter: Callable[[str, str], str] | None,
     ) -> None:
-        """Log a message with appropriate formatting."""
+        """Log a message at the level detected from its prefix, with appropriate formatting."""
         if is_log_group_marker(message):
             print(message)
         else:
+            level = _parse_log_level(message)
             if log_formatter:
                 formatted_message = log_formatter(container_name, message)
-                self.log.info("%s", formatted_message)
             else:
-                log_message = (
+                formatted_message = (
                     f"[{container_name}] {message}" if container_name_log_prefix_enabled else message
                 )
-                self.log.info("%s", log_message)
+            self.log.log(level, formatted_message)
 
     def fetch_container_logs(
         self,
@@ -524,8 +547,12 @@ class PodManager(LoggingMixin):
                 since_seconds = None
                 if since_time:
                     try:
+                        if isinstance(
+                            since_time, str
+                        ):  # against interface spec but accept string as safeguard
+                            since_time = pendulum.parse(since_time.replace("Z", "+00:00"))
                         since_seconds = math.ceil((pendulum.now() - since_time).total_seconds())
-                    except TypeError:
+                    except (TypeError, ValueError):
                         self.log.warning(
                             "Error calculating since_seconds with since_time %s. Using None instead.",
                             since_time,
@@ -541,48 +568,68 @@ class PodManager(LoggingMixin):
                 )
                 message_to_log = None
                 message_timestamp = None
-                progress_callback_lines = []
                 try:
                     for raw_line in logs:
                         line = raw_line.decode("utf-8", errors="backslashreplace")
-                        line_timestamp, message = self.parse_log_line(line)
+                        line_timestamp, message = parse_log_line(line)
                         if line_timestamp:  # detect new log line
+                            if not message:
+                                # Empty container write: advance the resume
+                                # marker but do not emit a noisy ``[base] ``
+                                # row or break the previous buffered message
+                                # with a stray continuation (#36571).
+                                self.container_log_times[
+                                    (pod.metadata.namespace, pod.metadata.name, container_name)
+                                ] = line_timestamp
+                                continue
                             if message_to_log is None:  # first line in the log
                                 message_to_log = message
                                 message_timestamp = line_timestamp
-                                progress_callback_lines.append(line)
                             else:  # previous log line is complete
-                                for line in progress_callback_lines:
-                                    for callback in self._callbacks:
-                                        callback.progress_callback(
-                                            line=line, client=self._client, mode=ExecutionMode.SYNC
-                                        )
-                                if message_to_log is not None:
-                                    self._log_message(
-                                        message_to_log,
-                                        container_name,
-                                        container_name_log_prefix_enabled,
-                                        log_formatter,
+                                for callback in self._callbacks:
+                                    callback.progress_callback(
+                                        line=message_to_log,
+                                        client=self._client,
+                                        mode=ExecutionMode.SYNC,
+                                        container_name=container_name,
+                                        timestamp=message_timestamp,
+                                        pod=pod,
                                     )
+                                self._log_message(
+                                    message_to_log,
+                                    container_name,
+                                    container_name_log_prefix_enabled,
+                                    log_formatter,
+                                )
                                 last_captured_timestamp = message_timestamp
+                                if last_captured_timestamp is not None:
+                                    self.container_log_times[
+                                        (pod.metadata.namespace, pod.metadata.name, container_name)
+                                    ] = last_captured_timestamp
                                 message_to_log = message
                                 message_timestamp = line_timestamp
-                                progress_callback_lines = [line]
                         else:  # continuation of the previous log line
                             message_to_log = f"{message_to_log}\n{message}"
-                            progress_callback_lines.append(line)
                 finally:
                     # log the last line and update the last_captured_timestamp
-                    for line in progress_callback_lines:
+                    if message_to_log is not None:
                         for callback in self._callbacks:
                             callback.progress_callback(
-                                line=line, client=self._client, mode=ExecutionMode.SYNC
+                                line=message_to_log,
+                                client=self._client,
+                                mode=ExecutionMode.SYNC,
+                                container_name=container_name,
+                                timestamp=message_timestamp,
+                                pod=pod,
                             )
-                    if message_to_log is not None:
                         self._log_message(
                             message_to_log, container_name, container_name_log_prefix_enabled, log_formatter
                         )
                     last_captured_timestamp = message_timestamp
+                    if last_captured_timestamp:
+                        self.container_log_times[
+                            (pod.metadata.namespace, pod.metadata.name, container_name)
+                        ] = last_captured_timestamp
             except TimeoutError as e:
                 # in case of timeout, increment return time by 2 seconds to avoid
                 # duplicate log entries
@@ -592,9 +639,9 @@ class PodManager(LoggingMixin):
                 exception = e
                 self._http_error_timestamps = getattr(self, "_http_error_timestamps", [])
                 self._http_error_timestamps = [
-                    t for t in self._http_error_timestamps if t > utcnow() - timedelta(seconds=60)
+                    t for t in self._http_error_timestamps if t > timezone.utcnow() - timedelta(seconds=60)
                 ]
-                self._http_error_timestamps.append(utcnow())
+                self._http_error_timestamps.append(timezone.utcnow())
                 # Log only if more than 2 errors occurred in the last 60 seconds
                 if len(self._http_error_timestamps) > 2:
                     self.log.exception(
@@ -692,10 +739,12 @@ class PodManager(LoggingMixin):
         containers_to_log = sorted(containers_to_log, key=lambda cn: all_containers.index(cn))
         for c in containers_to_log:
             self._await_init_container_start(pod=pod, container_name=c)
+            since_time = self.container_log_times.get((pod.metadata.namespace, pod.metadata.name, c))
             status = self.fetch_container_logs(
                 pod=pod,
                 container_name=c,
                 follow=follow_logs,
+                since_time=since_time,
                 container_name_log_prefix_enabled=container_name_log_prefix_enabled,
                 log_formatter=log_formatter,
             )
@@ -725,10 +774,12 @@ class PodManager(LoggingMixin):
             pod_name=pod.metadata.name,
         )
         for c in containers_to_log:
+            since_time = self.container_log_times.get((pod.metadata.namespace, pod.metadata.name, c))
             status = self.fetch_container_logs(
                 pod=pod,
                 container_name=c,
                 follow=follow_logs,
+                since_time=since_time,
                 container_name_log_prefix_enabled=container_name_log_prefix_enabled,
                 log_formatter=log_formatter,
             )
@@ -753,7 +804,11 @@ class PodManager(LoggingMixin):
             time.sleep(polling_time)
 
     def await_pod_completion(
-        self, pod: V1Pod, istio_enabled: bool = False, container_name: str = "base"
+        self,
+        pod: V1Pod,
+        istio_enabled: bool = False,
+        container_name: str = "base",
+        do_xcom_push: bool = False,
     ) -> V1Pod:
         """
         Monitor a pod and return the final state.
@@ -761,33 +816,28 @@ class PodManager(LoggingMixin):
         :param istio_enabled: whether istio is enabled in the namespace
         :param pod: pod spec that will be monitored
         :param container_name: name of the container within the pod
-        :return: tuple[State, str | None]
+        :param do_xcom_push: whether to push XComs
+        :return: V1Pod
         """
         while True:
             remote_pod = self.read_pod(pod)
             if remote_pod.status.phase in PodPhase.terminal_states:
                 break
-            if istio_enabled and container_is_completed(remote_pod, container_name):
+            if (istio_enabled or do_xcom_push) and container_is_completed(remote_pod, container_name):
+                self.log.info(
+                    "Container '%s' completed but pod %s still has phase %s "
+                    "(likely due to a sidecar container). Skipping waiting for pod completion.",
+                    container_name,
+                    pod.metadata.name,
+                    remote_pod.status.phase,
+                )
+                break
+            # abort waiting if defined issues are detected
+            if detect_pod_terminate_early_issues(remote_pod):
                 break
             self.log.info("Pod %s has phase %s", pod.metadata.name, remote_pod.status.phase)
             time.sleep(2)
         return remote_pod
-
-    def parse_log_line(self, line: str) -> tuple[DateTime | None, str]:
-        """
-        Parse K8s log line and returns the final state.
-
-        :param line: k8s log line
-        :return: timestamp and log message
-        """
-        timestamp, sep, message = line.strip().partition(" ")
-        if not sep:
-            return None, line
-        try:
-            last_log_time = cast("DateTime", pendulum.parse(timestamp))
-        except ParserError:
-            return None, line
-        return last_log_time, message
 
     def container_is_running(self, pod: V1Pod, container_name: str) -> bool:
         """Read pod and checks if container is running."""
@@ -799,7 +849,7 @@ class PodManager(LoggingMixin):
         remote_pod = self.read_pod(pod)
         return container_is_terminated(pod=remote_pod, container_name=container_name)
 
-    @tenacity.retry(stop=tenacity.stop_after_attempt(6), wait=tenacity.wait_exponential(max=15), reraise=True)
+    @generic_api_retry
     def read_pod_logs(
         self,
         pod: V1Pod,
@@ -842,7 +892,6 @@ class PodManager(LoggingMixin):
             post_termination_timeout=post_termination_timeout,
         )
 
-    @tenacity.retry(stop=tenacity.stop_after_attempt(3), wait=tenacity.wait_exponential(), reraise=True)
     def get_init_container_names(self, pod: V1Pod) -> list[str]:
         """
         Return container names from the POD except for the airflow-xcom-sidecar container.
@@ -851,7 +900,6 @@ class PodManager(LoggingMixin):
         """
         return [container_spec.name for container_spec in pod.spec.init_containers]
 
-    @tenacity.retry(stop=tenacity.stop_after_attempt(3), wait=tenacity.wait_exponential(), reraise=True)
     def get_container_names(self, pod: V1Pod) -> list[str]:
         """
         Return container names from the POD except for the airflow-xcom-sidecar container.
@@ -865,23 +913,38 @@ class PodManager(LoggingMixin):
             if container_spec.name != PodDefaults.SIDECAR_CONTAINER_NAME
         ]
 
-    @tenacity.retry(stop=tenacity.stop_after_attempt(3), wait=tenacity.wait_exponential(), reraise=True)
-    def read_pod_events(self, pod: V1Pod) -> CoreV1EventList:
-        """Read events from the POD."""
+    @generic_api_retry
+    def read_pod_events(self, pod: V1Pod, resource_version: str | None = None) -> CoreV1EventList:
+        """
+        Read events from the POD with optimization parameters to reduce API load.
+
+        :param pod: The pod to get events for
+        :param resource_version: Only return events newer than this resource version
+        :param limit: Maximum number of events to return
+        """
         try:
             return self._client.list_namespaced_event(
-                namespace=pod.metadata.namespace, field_selector=f"involvedObject.name={pod.metadata.name}"
+                namespace=pod.metadata.namespace,
+                field_selector=f"involvedObject.name={pod.metadata.name}",
+                resource_version=resource_version,
+                resource_version_match="NotOlderThan" if resource_version else None,
+            )
+        except TypeError:
+            return self._client.list_namespaced_event(
+                namespace=pod.metadata.namespace,
+                field_selector=f"involvedObject.name={pod.metadata.name}",
+                resource_version=resource_version,
             )
         except HTTPError as e:
-            raise AirflowException(f"There was an error reading the kubernetes API: {e}")
+            raise KubernetesApiException(f"There was an error reading the kubernetes API: {e}")
 
-    @tenacity.retry(stop=tenacity.stop_after_attempt(3), wait=tenacity.wait_exponential(), reraise=True)
+    @generic_api_retry
     def read_pod(self, pod: V1Pod) -> V1Pod:
         """Read POD information."""
         try:
             return self._client.read_namespaced_pod(pod.metadata.name, pod.metadata.namespace)
         except HTTPError as e:
-            raise AirflowException(f"There was an error reading the kubernetes API: {e}")
+            raise KubernetesApiException(f"There was an error reading the kubernetes API: {e}")
 
     def await_xcom_sidecar_container_start(
         self, pod: V1Pod, timeout: int = 900, log_interval: int = 30
@@ -914,17 +977,19 @@ class PodManager(LoggingMixin):
 
     def extract_xcom(self, pod: V1Pod) -> str:
         """Retrieve XCom value and kill xcom sidecar container."""
+        # make sure that xcom sidecar container is still running
+        if not self.container_is_running(pod, PodDefaults.SIDECAR_CONTAINER_NAME):
+            raise XComRetrievalError(
+                f"{PodDefaults.SIDECAR_CONTAINER_NAME} container is not running! Not possible to read xcom from pod: {pod.metadata.name}"
+            )
+
         try:
             result = self.extract_xcom_json(pod)
             return result
         finally:
             self.extract_xcom_kill(pod)
 
-    @tenacity.retry(
-        stop=tenacity.stop_after_attempt(5),
-        wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
-        reraise=True,
-    )
+    @generic_api_retry
     def extract_xcom_json(self, pod: V1Pod) -> str:
         """Retrieve XCom value and also check if xcom json is valid."""
         command = (
@@ -932,6 +997,7 @@ class PodManager(LoggingMixin):
             f"then cat {PodDefaults.XCOM_MOUNT_PATH}/return.json; "
             f"else echo {EMPTY_XCOM_RESULT}; fi"
         )
+        result = None
         with closing(
             kubernetes_stream(
                 self._client.connect_get_namespaced_pod_exec,
@@ -962,14 +1028,10 @@ class PodManager(LoggingMixin):
                 json.loads(result)
 
         if result is None:
-            raise AirflowException(f"Failed to extract xcom from pod: {pod.metadata.name}")
+            raise XComRetrievalError(f"Failed to extract xcom from pod: {pod.metadata.name}")
         return result
 
-    @tenacity.retry(
-        stop=tenacity.stop_after_attempt(5),
-        wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
-        reraise=True,
-    )
+    @generic_api_retry
     def extract_xcom_kill(self, pod: V1Pod):
         """Kill xcom sidecar container."""
         with closing(
@@ -986,7 +1048,18 @@ class PodManager(LoggingMixin):
                 _preload_content=False,
             )
         ) as resp:
-            self._exec_pod_command(resp, "kill -2 $(pgrep -u $(id -u) -f 'sh')")
+            xcom_kill_command = "kill -2 $(pgrep -u $(id -u) -f 'sh')"
+            # fallback command for containers that don't support pgrep -u
+            fallback_xcom_kill_command = (
+                "for f in /proc/[0-9]*/comm; do "
+                '[ -O $f ] && read c < $f && [ "$c" = "sh" ] && pid=${f%/comm} && kill -2 ${pid##*/}; '
+                "done"
+            )
+            try:
+                self._exec_pod_command(resp, xcom_kill_command)
+            except PodCommandException:
+                self.log.info("Primary kill command failed, trying fallback command")
+                self._exec_pod_command(resp, fallback_xcom_kill_command)
 
     def _exec_pod_command(self, resp, command: str) -> str | None:
         res = ""
@@ -1002,8 +1075,8 @@ class PodManager(LoggingMixin):
             while resp.peek_stderr():
                 error_res += resp.read_stderr()
             if error_res:
-                self.log.info("stderr from command: %s", error_res)
-                break
+                self.log.warning("stderr from command: %s", error_res)
+                raise PodCommandException(f"Command failed with stderr: {error_res}")
             if res:
                 return res
         return None
@@ -1028,9 +1101,173 @@ class OnFinishAction(str, enum.Enum):
 
     KEEP_POD = "keep_pod"
     DELETE_POD = "delete_pod"
+    DELETE_ACTIVE_POD = "delete_active_pod"
     DELETE_SUCCEEDED_POD = "delete_succeeded_pod"
+
+
+class OnKillAction(str, enum.Enum):
+    """Action to take when the task is killed by the user."""
+
+    DELETE_POD = "delete_pod"
+    KEEP_POD = "keep_pod"
 
 
 def is_log_group_marker(line: str) -> bool:
     """Check if the line is a log group marker like `::group::` or `::endgroup::`."""
     return line.startswith("::group::") or line.startswith("::endgroup::")
+
+
+def parse_log_line(line: str) -> tuple[DateTime | None, str]:
+    """
+    Parse K8s log line and returns the final state.
+
+    :param line: k8s log line
+    :return: timestamp and log message
+    """
+    # Strip only the trailing newline so an empty container write (which
+    # kubelet streams back as "<rfc3339-ts> \n" under ``timestamps=True``)
+    # keeps the separator space and is recognised as a real log line, not a
+    # continuation of the previous one (#36571). When kubelet emits "<ts>\n"
+    # with no trailing space, ``partition`` returns the whole line as
+    # ``timestamp`` and ``message`` as ``""`` -- the parse below handles both.
+    stripped = line.rstrip("\n")
+    timestamp, _, message = stripped.partition(" ")
+    try:
+        last_log_time = cast("DateTime", pendulum.parse(timestamp))
+    except (ParserError, ValueError):
+        return None, line
+    return last_log_time, message
+
+
+class AsyncPodManager(LoggingMixin):
+    """Create, monitor, and otherwise interact with Kubernetes pods for use with the KubernetesPodTriggerer."""
+
+    def __init__(
+        self,
+        async_hook: AsyncKubernetesHook,
+        callbacks: list[type[KubernetesPodOperatorCallback]] | None = None,
+    ):
+        """
+        Create the launcher.
+
+        :param kube_client: kubernetes client
+        :param callbacks:
+        """
+        super().__init__()
+        self._hook = async_hook
+        self._watch = watch.Watch()
+        self._callbacks = callbacks or []
+        self.stop_watching_events = False
+
+    async def read_pod(self, pod: V1Pod) -> V1Pod:
+        """Read POD information."""
+        return await self._hook.get_pod(
+            pod.metadata.name,
+            pod.metadata.namespace,
+        )
+
+    async def read_pod_events(self, pod: V1Pod, resource_version: str | None = None) -> CoreV1EventList:
+        """Get pod's events."""
+        return await self._hook.get_pod_events(
+            pod.metadata.name,
+            pod.metadata.namespace,
+            resource_version=resource_version,
+        )
+
+    async def watch_pod_events(self, pod: V1Pod, startup_check_interval: float = 30) -> None:
+        """Watch pod events and write to log."""
+        seen_events: set[str] = set()
+        resource_version = None
+        while not self.stop_watching_events:
+            async for event in self._hook.watch_pod_events(
+                name=pod.metadata.name,
+                namespace=pod.metadata.namespace,
+                resource_version=resource_version,
+                timeout_seconds=startup_check_interval,
+            ):
+                if event:
+                    log_pod_event(self, event, seen_events)
+                    resource_version = event.metadata.resource_version
+
+    async def await_pod_start(
+        self, pod: V1Pod, schedule_timeout: int = 120, startup_timeout: int = 120, check_interval: float = 1
+    ) -> None:
+        """
+        Wait for the pod to reach phase other than ``Pending``.
+
+        :param pod:
+        :param schedule_timeout: Timeout (in seconds) for pod stay in schedule state
+            (if pod is taking to long in schedule state, fails task)
+        :param startup_timeout: Timeout (in seconds) for startup of the pod
+            (if pod is pending for too long after being scheduled, fails task)
+        :param check_interval: Interval (in seconds) between checks
+        :return:
+        """
+        await await_pod_start(
+            pod_manager=self,
+            pod=pod,
+            schedule_timeout=schedule_timeout,
+            startup_timeout=startup_timeout,
+            check_interval=check_interval,
+        )
+
+    async def fetch_container_logs_before_current_sec(
+        self, pod: V1Pod, container_name: str, since_time: DateTime | None = None
+    ) -> DateTime | None:
+        """
+        Asynchronously read the log file of the specified pod.
+
+        This method streams logs from the base container, skipping log lines from the current second to prevent duplicate entries on subsequent reads. It is designed to handle long-running containers and gracefully suppresses transient interruptions.
+
+        :param pod: The pod specification to monitor.
+        :param container_name: The name of the container within the pod.
+        :param since_time: The timestamp from which to start reading logs.
+        :return: The timestamp to use for the next log read, representing the start of the current second. Returns None if an exception occurred.
+        """
+        now = pendulum.now()
+        logs = await self._hook.read_logs(
+            name=pod.metadata.name,
+            namespace=pod.metadata.namespace,
+            container_name=container_name,
+            since_seconds=(math.ceil((now - since_time).total_seconds()) if since_time else None),
+        )
+        # CPU-bound per-line parse/emit, offloaded so it can't block the triggerer event loop.
+        await asyncio.to_thread(self._emit_container_logs, logs, now, container_name)
+        return now  # Return the current time as the last log time to ensure logs from the current second are read in the next fetch.
+
+    def _emit_container_logs(self, logs: list[str], now: DateTime, container_name: str) -> None:
+        message_to_log = None
+        try:
+            now_seconds = now.replace(microsecond=0)
+            for line in logs:
+                line_timestamp, message = parse_log_line(line)
+                # Skip log lines from the current second to prevent duplicate entries on the next read.
+                # The API only allows specifying 'since_seconds', not an exact timestamp.
+                if line_timestamp and line_timestamp.replace(microsecond=0) == now_seconds:
+                    break
+                if line_timestamp:  # detect new log line
+                    if not message:
+                        # Empty container write -- drop it instead of letting
+                        # it overwrite the buffered message with "" or be
+                        # emitted as a noisy ``[base] `` row (#36571).
+                        continue
+                    if message_to_log is None:  # first line in the log
+                        message_to_log = message
+                    else:  # previous log line is complete
+                        if message_to_log is not None:
+                            if is_log_group_marker(message_to_log):
+                                print(message_to_log)
+                            else:
+                                level = _parse_log_level(message_to_log)
+                                self.log.log(level, "[%s] %s", container_name, message_to_log)
+                        message_to_log = message
+                elif message_to_log:  # continuation of the previous log line
+                    message_to_log = f"{message_to_log}\n{message}"
+        finally:
+            # log the last line and update the last_captured_timestamp
+            if message_to_log is not None:
+                if is_log_group_marker(message_to_log):
+                    print(message_to_log)
+                else:
+                    level = _parse_log_level(message_to_log)
+                    self.log.log(level, "[%s] %s", container_name, message_to_log)

@@ -24,10 +24,10 @@ from functools import cached_property
 
 from kubernetes.utils import FailToCreateError
 
-from airflow.exceptions import AirflowException
 from airflow.providers.cncf.kubernetes.hooks.kubernetes import KubernetesHook
 from airflow.providers.cncf.kubernetes.operators.job import KubernetesJobOperator
 from airflow.providers.cncf.kubernetes.version_compat import AIRFLOW_V_3_1_PLUS
+from airflow.providers.common.compat.sdk import AirflowException
 
 if AIRFLOW_V_3_1_PLUS:
     from airflow.sdk import BaseOperator
@@ -57,7 +57,10 @@ class KubernetesInstallKueueOperator(BaseOperator):
         super().__init__(*args, **kwargs)
         self.kubernetes_conn_id = kubernetes_conn_id
         self.kueue_version = kueue_version
-        self._kueue_yaml_url = (
+
+    @property
+    def _kueue_yaml_url(self) -> str:
+        return (
             f"https://github.com/kubernetes-sigs/kueue/releases/download/{self.kueue_version}/manifests.yaml"
         )
 

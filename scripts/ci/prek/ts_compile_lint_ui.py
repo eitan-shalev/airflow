@@ -17,11 +17,12 @@
 # under the License.
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))  # make sure common_prek_utils is imported
 from common_prek_utils import (
+    AIRFLOW_CORE_ROOT_PATH,
     AIRFLOW_CORE_SOURCES_PATH,
     AIRFLOW_ROOT_PATH,
     run_command,
@@ -38,7 +39,7 @@ if __name__ == "__main__":
     original_files = sys.argv[1:]
     print("Original files:", original_files)
     dir = AIRFLOW_CORE_SOURCES_PATH / "airflow" / "ui"
-    relative_dir = Path(dir).relative_to(AIRFLOW_ROOT_PATH)
+    relative_dir = Path(dir).relative_to(AIRFLOW_CORE_ROOT_PATH)
     files = [
         file[len(relative_dir.as_posix()) + 1 :]
         for file in original_files
@@ -51,8 +52,32 @@ if __name__ == "__main__":
         all_ts_files.append("src/vite-env.d.ts")
     print("All TypeScript files:", all_ts_files)
 
-    run_command(["pnpm", "config", "set", "store-dir", ".pnpm-store"], cwd=dir)
-    run_command(["pnpm", "install", "--frozen-lockfile", "--config.confirmModulesPurge=false"], cwd=dir)
+    hash_file = AIRFLOW_ROOT_PATH / ".build" / "ui" / "pnpm-install-hash.txt"
+    node_modules = dir / "node_modules"
+    hasher = hashlib.sha256()
+    for hashed_file_name in ("package.json", "pnpm-lock.yaml"):
+        file_bytes = (dir / hashed_file_name).read_bytes()
+        hasher.update(f"{hashed_file_name}:{len(file_bytes)}:".encode())
+        hasher.update(file_bytes)
+    current_hash = hasher.hexdigest()
+    stored_hash = hash_file.read_text().strip() if hash_file.exists() else ""
+
+    # A stored hash only proves node_modules matched the lockfile when it was written; guard
+    # against node_modules having been modified afterwards (e.g. a manual `pnpm install`).
+    cache_valid = (
+        node_modules.is_dir()
+        and current_hash == stored_hash
+        and hash_file.stat().st_mtime >= node_modules.stat().st_mtime
+    )
+    if cache_valid:
+        print("pnpm deps unchanged — skipping install.")
+    else:
+        run_command(["pnpm", "config", "set", "store-dir", ".pnpm-store"], cwd=dir)
+        run_command(["pnpm", "install", "--frozen-lockfile", "--config.confirmModulesPurge=false"], cwd=dir)
+        hash_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_hash_file = hash_file.with_suffix(".tmp")
+        tmp_hash_file.write_text(current_hash)
+        tmp_hash_file.replace(hash_file)
     if any("/openapi/" in file for file in original_files):
         run_command(["pnpm", "codegen"], cwd=dir)
     if all_non_yaml_files:

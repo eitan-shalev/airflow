@@ -17,13 +17,24 @@
 
 from __future__ import annotations
 
+import re
+from unittest import mock
+
 import pytest
+import time_machine
+from fastapi import Request
+from sqlalchemy import select, update
 
 from airflow._shared.timezones import timezone
+from airflow.api_fastapi.execution_api.datamodels.token import TIClaims, TIToken
+from airflow.api_fastapi.execution_api.security import require_auth
 from airflow.models import DagModel
 from airflow.models.dagrun import DagRun
 from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.serialization.definitions.dag import SerializedDAG
+from airflow.timetables.trigger import CronPartitionTimetable
 from airflow.utils.state import DagRunState, State
+from airflow.utils.types import DagRunType
 
 from tests_common.test_utils.db import clear_db_runs
 
@@ -54,9 +65,95 @@ class TestDagRunTrigger:
 
         assert response.status_code == 204
 
-        dag_run = session.query(DagRun).filter(DagRun.run_id == run_id).one()
+        dag_run = session.scalars(select(DagRun).where(DagRun.run_id == run_id)).one()
         assert dag_run.conf == {"key1": "value1"}
         assert dag_run.logical_date == logical_date
+        assert dag_run.run_type == DagRunType.OPERATOR_TRIGGERED
+
+    def test_trigger_dag_run_with_partition_key(self, client, session, dag_maker):
+        """partition_key accepted when Dag uses a partitioned timetable (happy-path guard)."""
+        dag_id = "test_trigger_dag_run_partition_key"
+        run_id = "test_run_id"
+        logical_date = timezone.datetime(2025, 2, 20)
+        partition_key = "2025-02-20T00:00:00"
+
+        with dag_maker(
+            dag_id=dag_id,
+            schedule=CronPartitionTimetable("0 * * * *", timezone="UTC"),
+            session=session,
+            serialized=True,
+        ):
+            EmptyOperator(task_id="test_task")
+
+        session.commit()
+
+        response = client.post(
+            f"/execution/dag-runs/{dag_id}/{run_id}",
+            json={
+                "logical_date": logical_date.isoformat(),
+                "conf": {"key1": "value1"},
+                "partition_key": partition_key,
+            },
+        )
+
+        assert response.status_code == 204
+
+        dag_run = session.scalars(select(DagRun).where(DagRun.run_id == run_id)).one()
+        assert dag_run.conf == {"key1": "value1"}
+        assert dag_run.logical_date == logical_date
+        assert dag_run.partition_key == partition_key
+
+    def test_trigger_dag_run_partition_key_for_non_partitioned_dag(self, client, session, dag_maker):
+        """partition_key on a non-partitioned Dag via Execution API must return 400."""
+        dag_id = "test_trigger_non_partitioned_partition_key"
+        run_id = "test_run_id_np"
+        logical_date = timezone.datetime(2025, 2, 20)
+
+        with dag_maker(dag_id=dag_id, session=session, serialized=True):
+            EmptyOperator(task_id="test_task")
+
+        session.commit()
+
+        response = client.post(
+            f"/execution/dag-runs/{dag_id}/{run_id}",
+            json={
+                "logical_date": logical_date.isoformat(),
+                "partition_key": "2025-02-20",
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "detail": {
+                "reason": "not_partitioned",
+                "message": f"Dag '{dag_id}' is not a partitioned Dag and does not accept a partition_key.",
+            }
+        }
+
+    def test_trigger_dag_run_invalid_partition_key(self, client, session, dag_maker):
+        """partition_key that the timetable cannot decode must return 400."""
+        dag_id = "test_trigger_dag_run_invalid_partition_key"
+        run_id = "test_run_id_invalid_pk"
+        logical_date = timezone.datetime(2025, 2, 20)
+
+        with dag_maker(
+            dag_id=dag_id,
+            schedule=CronPartitionTimetable("0 * * * *", timezone="UTC"),
+            session=session,
+            serialized=True,
+        ):
+            EmptyOperator(task_id="test_task")
+        session.commit()
+
+        response = client.post(
+            f"/execution/dag-runs/{dag_id}/{run_id}",
+            json={"logical_date": logical_date.isoformat(), "partition_key": "not-a-date"},
+        )
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["reason"] == "invalid_partition_key"
+        assert "does not match the timetable's key_format" in detail["message"]
 
     def test_trigger_dag_run_dag_not_found(self, client):
         """Test that a DAG that does not exist cannot be triggered."""
@@ -79,7 +176,7 @@ class TestDagRunTrigger:
         with dag_maker(dag_id=dag_id, session=session, serialized=True):
             EmptyOperator(task_id="test_task")
 
-        session.query(DagModel).filter(DagModel.dag_id == dag_id).update({"has_import_errors": True})
+        session.execute(update(DagModel).where(DagModel.dag_id == dag_id).values(has_import_errors=True))
 
         session.commit()
 
@@ -91,8 +188,65 @@ class TestDagRunTrigger:
         assert response.status_code == 400
         assert response.json() == {
             "detail": {
-                "message": "DAG with dag_id: 'test_trigger_dag_run_import_error' has import errors and cannot be triggered",
+                "message": (
+                    "Dag with dag_id 'test_trigger_dag_run_import_error' "
+                    "has import errors and cannot be triggered"
+                ),
                 "reason": "import_errors",
+            }
+        }
+
+    def test_trigger_dag_run_denied_run_type(self, client, session, dag_maker):
+        """Test that a Dag with denied operator run type cannot be triggered."""
+        dag_id = "test_trigger_dag_run_denied"
+        run_id = "test_run_id"
+        logical_date = timezone.datetime(2025, 2, 20)
+
+        with dag_maker(dag_id=dag_id, session=session, serialized=True):
+            EmptyOperator(task_id="test_task")
+
+        session.execute(
+            update(DagModel).where(DagModel.dag_id == dag_id).values(allowed_run_types=["scheduled"])
+        )
+        session.commit()
+
+        response = client.post(
+            f"/execution/dag-runs/{dag_id}/{run_id}",
+            json={"logical_date": logical_date.isoformat()},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "detail": {
+                "message": f"Dag with dag_id '{dag_id}' does not allow operator-triggered runs",
+                "reason": "denied_run_type",
+            }
+        }
+
+    def test_trigger_dag_run_manual_denied_for_operator(self, client, session, dag_maker):
+        """Test that MANUAL-only allowed_run_types rejects operator-triggered runs."""
+        dag_id = "test_trigger_dag_run_manual_allowed"
+        run_id = "test_run_id"
+        logical_date = timezone.datetime(2025, 2, 20)
+
+        with dag_maker(dag_id=dag_id, session=session, serialized=True):
+            EmptyOperator(task_id="test_task")
+
+        session.execute(
+            update(DagModel).where(DagModel.dag_id == dag_id).values(allowed_run_types=["manual"])
+        )
+        session.commit()
+
+        response = client.post(
+            f"/execution/dag-runs/{dag_id}/{run_id}",
+            json={"logical_date": logical_date.isoformat()},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "detail": {
+                "message": f"Dag with dag_id '{dag_id}' does not allow operator-triggered runs",
+                "reason": "denied_run_type",
             }
         }
 
@@ -123,10 +277,76 @@ class TestDagRunTrigger:
         assert response.status_code == 409
         assert response.json() == {
             "detail": {
-                "message": "A DAG Run already exists for DAG test_trigger_dag_run_already_exists with run id test_run_id",
+                "message": (
+                    "A run already exists for Dag 'test_trigger_dag_run_already_exists' "
+                    "with run_id 'test_run_id'"
+                ),
                 "reason": "already_exists",
             }
         }
+
+    @pytest.mark.parametrize("parent_triggering_user_name", ["alice", None])
+    def test_trigger_dag_run_inherits_triggering_user_name(
+        self, client, exec_app, session, dag_maker, parent_triggering_user_name
+    ):
+        """Child DAG run inherits triggering_user_name from the calling task's parent run."""
+        parent_dag_id = "parent_dag_inherits"
+        parent_run_id = "parent_run"
+        child_dag_id = "child_dag_inherits"
+        child_run_id = "child_run"
+        logical_date = timezone.datetime(2025, 2, 20)
+
+        with dag_maker(dag_id=parent_dag_id, session=session, serialized=True):
+            EmptyOperator(task_id="trigger_task")
+        parent_run = dag_maker.create_dagrun(
+            run_id=parent_run_id, triggering_user_name=parent_triggering_user_name
+        )
+        parent_ti = parent_run.task_instances[0]
+
+        with dag_maker(dag_id=child_dag_id, session=session, serialized=True):
+            EmptyOperator(task_id="child_task")
+        session.commit()
+
+        async def auth_as_parent_ti(request: Request) -> TIToken:
+            return TIToken(id=parent_ti.id, claims=TIClaims(scope="execution"))
+
+        exec_app.dependency_overrides[require_auth] = auth_as_parent_ti
+        try:
+            response = client.post(
+                f"/execution/dag-runs/{child_dag_id}/{child_run_id}",
+                json={"logical_date": logical_date.isoformat()},
+            )
+        finally:
+            exec_app.dependency_overrides.pop(require_auth, None)
+
+        assert response.status_code == 204
+        child_run = session.scalars(select(DagRun).where(DagRun.run_id == child_run_id)).one()
+        assert child_run.triggering_user_name == parent_triggering_user_name
+
+    def test_trigger_dag_run_value_error(self, client, session, dag_maker):
+        """Test that error is raised when a DAG Run has ValueError."""
+
+        dag_id = "test_trigger_dag_run_value_error"
+        run_id = "manual__{test_run_id}"
+        logical_date = timezone.datetime(2026, 5, 22)
+
+        with dag_maker(dag_id=dag_id, session=session, serialized=True):
+            EmptyOperator(task_id="test_task")
+
+        session.commit()
+
+        response = client.post(
+            f"/execution/dag-runs/{dag_id}/{run_id}",
+            json={"logical_date": logical_date.isoformat()},
+        )
+
+        detail_message = response.json()["detail"]["message"]
+        detail_reason = response.json()["detail"]["reason"]
+
+        pattern = r"The run_id provided '.*' does not match regex pattern '.*' or '.*'"
+        assert re.search(pattern, detail_message)
+        assert detail_reason == "value_error"
+        assert response.status_code == 400
 
 
 class TestDagRunClear:
@@ -152,7 +372,7 @@ class TestDagRunClear:
         assert response.status_code == 204
 
         session.expire_all()
-        dag_run = session.query(DagRun).filter(DagRun.run_id == run_id).one()
+        dag_run = session.scalars(select(DagRun).where(DagRun.run_id == run_id)).one()
         assert dag_run.state == DagRunState.QUEUED
 
     def test_dag_run_import_error(self, client, session, dag_maker):
@@ -164,7 +384,7 @@ class TestDagRunClear:
         with dag_maker(dag_id=dag_id, session=session, serialized=True):
             EmptyOperator(task_id="test_task")
 
-        session.query(DagModel).filter(DagModel.dag_id == dag_id).update({"has_import_errors": True})
+        session.execute(update(DagModel).where(DagModel.dag_id == dag_id).values(has_import_errors=True))
 
         session.commit()
 
@@ -173,7 +393,10 @@ class TestDagRunClear:
         assert response.status_code == 400
         assert response.json() == {
             "detail": {
-                "message": "DAG with dag_id: 'test_trigger_dag_run_import_error' has import errors and cannot be triggered",
+                "message": (
+                    "Dag with dag_id 'test_trigger_dag_run_import_error' "
+                    "has import errors and cannot be triggered"
+                ),
                 "reason": "import_errors",
             }
         }
@@ -187,6 +410,89 @@ class TestDagRunClear:
 
         assert response.status_code == 404
 
+    def test_dag_run_clear_invokes_resolver(self, client, session, dag_maker):
+        """Clearing resolves run_on_latest_version (no explicit override) and forwards it to dag.clear."""
+        dag_id = "test_clear_invokes_resolver"
+        run_id = "test_run_id"
+
+        with dag_maker(dag_id=dag_id, session=session, serialized=True):
+            EmptyOperator(task_id="test_task")
+        dag_maker.create_dagrun(run_id=run_id, state=DagRunState.SUCCESS)
+        session.commit()
+
+        with (
+            mock.patch(
+                "airflow.api_fastapi.execution_api.routes.dag_runs.resolve_run_on_latest_version",
+                return_value=mock.sentinel.resolved,
+            ) as mock_resolver,
+            mock.patch.object(SerializedDAG, "clear", autospec=True) as mock_clear,
+        ):
+            response = client.post(f"/execution/dag-runs/{dag_id}/{run_id}/clear")
+
+        assert response.status_code == 204
+        mock_resolver.assert_called_once()
+        # First positional arg is the explicit override; operator does not pass one.
+        assert mock_resolver.call_args.args[0] is None
+        # The resolved value must reach dag.clear, not be silently dropped.
+        mock_clear.assert_called_once()
+        assert mock_clear.call_args.kwargs["run_id"] == run_id
+        assert mock_clear.call_args.kwargs["run_on_latest_version"] is mock.sentinel.resolved
+
+
+class TestDagRunDetail:
+    def setup_method(self):
+        clear_db_runs()
+
+    def teardown_method(self):
+        clear_db_runs()
+
+    def test_get_state(self, client, session, dag_maker):
+        dag_id = "test_dag_id"
+        # Named deliberately to check if this routes correctly.
+        # See v2026_04_06.test_dag_runs::test_get_previous_dag_run_redirect
+        run_id = "previous"
+
+        with dag_maker(dag_id=dag_id, schedule=None, session=session, serialized=True):
+            EmptyOperator(task_id="test_task")
+
+        with time_machine.travel(timezone.datetime(2025, 12, 13), tick=False):
+            dag_maker.create_dagrun(
+                run_id=run_id,
+                logical_date=None,
+                run_type=DagRunType.MANUAL,
+                start_date=timezone.datetime(2023, 1, 2),
+                state=DagRunState.SUCCESS,
+            )
+        session.commit()
+
+        response = client.get(f"/execution/dag-runs/{dag_id}/{run_id}")
+        assert response.url == f"{client.base_url}/execution/dag-runs/test_dag_id/previous"
+        assert response.status_code == 200
+        assert response.json() == {
+            "clear_number": 0,
+            "conf": {},
+            "consumed_asset_events": [],
+            "dag_id": "test_dag_id",
+            "data_interval_end": None,
+            "data_interval_start": None,
+            "end_date": "2025-12-13T00:00:00Z",
+            "logical_date": None,
+            "partition_key": None,
+            "partition_date": None,
+            "run_after": "2025-12-13T00:00:00Z",
+            "run_id": "previous",
+            "run_type": "manual",
+            "start_date": "2023-01-02T00:00:00Z",
+            "state": "success",
+            "triggering_user_name": None,
+            "note": None,
+            "team_name": None,
+        }
+
+    def test_dag_run_not_found(self, client):
+        response = client.get("/execution/dag-runs/dag_not_found/test_run_id")
+        assert response.status_code == 404
+
 
 class TestDagRunState:
     def setup_method(self):
@@ -198,25 +504,17 @@ class TestDagRunState:
     def test_get_state(self, client, session, dag_maker):
         dag_id = "test_get_state"
         run_id = "test_run_id"
-
         with dag_maker(dag_id=dag_id, session=session, serialized=True):
             EmptyOperator(task_id="test_task")
-
         dag_maker.create_dagrun(run_id=run_id, state=DagRunState.SUCCESS)
-
         session.commit()
 
         response = client.get(f"/execution/dag-runs/{dag_id}/{run_id}/state")
-
         assert response.status_code == 200
         assert response.json() == {"state": "success"}
 
     def test_dag_run_not_found(self, client):
-        dag_id = "dag_not_found"
-        run_id = "test_run_id"
-
-        response = client.post(f"/execution/dag-runs/{dag_id}/{run_id}/clear")
-
+        response = client.get("/execution/dag-runs/dag_not_found/test_run_id/state")
         assert response.status_code == 404
 
 
@@ -344,10 +642,8 @@ class TestGetPreviousDagRun:
 
         # Query for previous DAG run before 2025-01-10
         response = client.get(
-            f"/execution/dag-runs/{dag_id}/previous",
-            params={
-                "logical_date": timezone.datetime(2025, 1, 10).isoformat(),
-            },
+            "/execution/dag-runs/previous",
+            params={"dag_id": dag_id, "logical_date": timezone.datetime(2025, 1, 10).isoformat()},
         )
 
         assert response.status_code == 200
@@ -377,8 +673,12 @@ class TestGetPreviousDagRun:
 
         # Query for previous successful DAG run before 2025-01-10
         response = client.get(
-            f"/execution/dag-runs/{dag_id}/previous",
-            params={"logical_date": timezone.datetime(2025, 1, 10).isoformat(), "state": "success"},
+            "/execution/dag-runs/previous",
+            params={
+                "dag_id": dag_id,
+                "logical_date": timezone.datetime(2025, 1, 10).isoformat(),
+                "state": "success",
+            },
         )
 
         assert response.status_code == 200
@@ -399,7 +699,9 @@ class TestGetPreviousDagRun:
             run_id="run1", logical_date=timezone.datetime(2025, 1, 1), state=DagRunState.SUCCESS
         )
 
-        response = client.get(f"/execution/dag-runs/{dag_id}/previous?logical_date=2025-01-01T00:00:00Z")
+        response = client.get(
+            "/execution/dag-runs/previous?dag_id=test_get_previous_none&logical_date=2025-01-01T00:00:00Z"
+        )
 
         assert response.status_code == 200
         assert response.json() is None  # Should return null
@@ -421,7 +723,8 @@ class TestGetPreviousDagRun:
 
         # Look for previous success but only failed runs exist
         response = client.get(
-            f"/execution/dag-runs/{dag_id}/previous?logical_date=2025-01-03T00:00:00Z&state=success"
+            "/execution/dag-runs/previous?"
+            "dag_id=test_get_previous_no_match&logical_date=2025-01-03T00:00:00Z&state=success"
         )
 
         assert response.status_code == 200
@@ -430,7 +733,7 @@ class TestGetPreviousDagRun:
     def test_get_previous_dag_run_dag_not_found(self, client, session):
         """Test getting previous DAG run for non-existent DAG returns 404."""
         response = client.get(
-            "/execution/dag-runs/nonexistent_dag/previous?logical_date=2025-01-01T00:00:00Z"
+            "/execution/dag-runs/previous?dag_id=nonexistent_dag&logical_date=2025-01-01T00:00:00Z"
         )
 
         assert response.status_code == 200
@@ -449,7 +752,8 @@ class TestGetPreviousDagRun:
         session.commit()
 
         response = client.get(
-            f"/execution/dag-runs/{dag_id}/previous?logical_date=2025-01-02T00:00:00Z&state=invalid_state"
+            "/execution/dag-runs/previous?"
+            "dag_id=test_get_previous_invalid_state&logical_date=2025-01-02T00:00:00Z&state=invalid_state"
         )
 
         assert response.status_code == 422

@@ -28,8 +28,10 @@ import time
 import warnings
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
+from datetime import datetime
 from functools import partial
 from io import BytesIO
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import IO, TYPE_CHECKING, Any, ParamSpec, TypeVar, cast, overload
 from urllib.parse import urlsplit
@@ -41,8 +43,9 @@ from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud.exceptions import GoogleCloudError
 from google.cloud.storage.retry import DEFAULT_RETRY
 
-from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
+from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.common.compat.lineage.hook import get_hook_lineage_collector
+from airflow.providers.common.compat.sdk import AirflowException, timezone
 from airflow.providers.google.cloud.utils.helpers import normalize_directory_path
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import (
@@ -50,12 +53,9 @@ from airflow.providers.google.common.hooks.base_google import (
     GoogleBaseAsyncHook,
     GoogleBaseHook,
 )
-from airflow.utils import timezone
 from airflow.version import version
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from aiohttp import ClientSession
     from google.api_core.retry import Retry
     from google.cloud.storage.blob import Blob
@@ -154,7 +154,10 @@ class GCSHook(GoogleBaseHook):
         """Return a Google Cloud Storage service object."""
         if not self._conn:
             self._conn = storage.Client(
-                credentials=self.get_credentials(), client_info=CLIENT_INFO, project=self.project_id
+                credentials=self.get_credentials(),
+                client_info=CLIENT_INFO,
+                project=self.project_id,
+                client_options=self.get_client_options(),
             )
 
         return self._conn
@@ -222,6 +225,8 @@ class GCSHook(GoogleBaseHook):
         source_object: str,
         destination_bucket: str,
         destination_object: str | None = None,
+        retain_until_time: datetime | None = None,
+        retention_mode: str | None = None,
     ) -> None:
         """
         Similar to copy; supports files over 5 TB, and copying between locations and/or storage classes.
@@ -233,6 +238,13 @@ class GCSHook(GoogleBaseHook):
         :param destination_bucket: The destination of the object to copied to.
         :param destination_object: The (renamed) path of the object if given.
             Can be omitted; then the same name is used.
+        :param retain_until_time: Optional datetime specifying until when the destination
+            object should be retained. Requires the destination bucket to have
+            object retention enabled. The value is passed to the GCS client as-is;
+            timezone handling follows the GCS client behavior.
+        :param retention_mode: Optional retention mode for the destination object.
+            Must be ``"Locked"`` or ``"Unlocked"``. Defaults to ``"Unlocked"`` when
+            ``retain_until_time`` is set. Cannot be provided without ``retain_until_time``.
         """
         destination_object = destination_object or source_object
         if source_bucket == destination_bucket and source_object == destination_object:
@@ -242,24 +254,40 @@ class GCSHook(GoogleBaseHook):
             )
         if not source_bucket or not source_object:
             raise ValueError("source_bucket and source_object cannot be empty.")
+        if retention_mode is not None and retain_until_time is None:
+            raise ValueError("retention_mode cannot be set without retain_until_time.")
+        if retention_mode is not None and retention_mode not in ("Locked", "Unlocked"):
+            raise ValueError(f"retention_mode must be 'Locked' or 'Unlocked', got {retention_mode!r}.")
 
         client = self.get_conn()
         source_bucket = client.bucket(source_bucket)
         source_object = source_bucket.blob(blob_name=source_object)  # type: ignore[attr-defined]
         destination_bucket = client.bucket(destination_bucket)
 
-        token, bytes_rewritten, total_bytes = destination_bucket.blob(  # type: ignore[attr-defined]
+        destination_blob = destination_bucket.blob(  # type: ignore[attr-defined]
             blob_name=destination_object
-        ).rewrite(source=source_object)
+        )
+
+        token, bytes_rewritten, total_bytes = destination_blob.rewrite(source=source_object)
 
         self.log.info("Total Bytes: %s | Bytes Written: %s", total_bytes, bytes_rewritten)
 
         while token is not None:
-            token, bytes_rewritten, total_bytes = destination_bucket.blob(  # type: ignore[attr-defined]
-                blob_name=destination_object
-            ).rewrite(source=source_object, token=token)
+            token, bytes_rewritten, total_bytes = destination_blob.rewrite(source=source_object, token=token)
 
             self.log.info("Total Bytes: %s | Bytes Written: %s", total_bytes, bytes_rewritten)
+
+        if retain_until_time is not None:
+            destination_blob.retention.mode = retention_mode or "Unlocked"
+            destination_blob.retention.retain_until_time = retain_until_time
+            destination_blob.patch()
+            self.log.info(
+                "Applied retention (mode=%s, retain_until_time=%s) to object %s in bucket %s",
+                destination_blob.retention.mode,
+                retain_until_time,
+                destination_object,
+                destination_bucket.name,  # type: ignore[attr-defined]
+            )
         get_hook_lineage_collector().add_input_asset(
             context=self,
             scheme="gs",
@@ -371,8 +399,7 @@ class GCSHook(GoogleBaseHook):
                         num_max_attempts,
                     )
                     raise
-        else:
-            raise NotImplementedError  # should not reach this, but makes mypy happy
+        raise NotImplementedError  # should not reach this, but makes mypy happy
 
     def download_as_byte_array(
         self,
@@ -706,22 +733,27 @@ class GCSHook(GoogleBaseHook):
                 return True
         return False
 
-    def delete(self, bucket_name: str, object_name: str) -> None:
+    def delete(self, bucket_name: str, object_name: str, ignore_error: bool = False) -> None:
         """
         Delete an object from the bucket.
 
         :param bucket_name: name of the bucket, where the object resides
         :param object_name: name of the object to delete
+        :param ignore_error: (Optional) whether to ignore NotFound exceptions. Default: False
         """
         client = self.get_conn()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name=object_name)
-        blob.delete()
-        get_hook_lineage_collector().add_input_asset(
-            context=self, scheme="gs", asset_kwargs={"bucket": bucket.name, "key": blob.name}
-        )
-
-        self.log.info("Blob %s deleted.", object_name)
+        try:
+            blob.delete()
+            get_hook_lineage_collector().add_input_asset(
+                context=self, scheme="gs", asset_kwargs={"bucket": bucket.name, "key": blob.name}
+            )
+            self.log.info("Blob %s deleted.", object_name)
+        except NotFound:
+            self.log.warning("Blob %s in bucket %s does not exist.", blob.name, bucket.name)
+            if not ignore_error:
+                raise
 
     def get_bucket(self, bucket_name: str) -> storage.Bucket:
         """
@@ -777,7 +809,7 @@ class GCSHook(GoogleBaseHook):
         """
         if delimiter and delimiter != "/":
             warnings.warn(
-                "Usage of 'delimiter' param is deprecated, please use 'match_glob' instead",
+                "Usage of 'delimiter' param is deprecated, please use 'match_glob' instead. Planned removal date: October 5, 2026.",
                 AirflowProviderDeprecationWarning,
                 stacklevel=2,
             )
@@ -1169,6 +1201,36 @@ class GCSHook(GoogleBaseHook):
 
         self.log.info("A new ACL entry created in bucket: %s", bucket_name)
 
+    def add_bucket_iam_binding(
+        self,
+        bucket_name: str,
+        role: str,
+        member: str,
+        user_project: str | None = None,
+    ) -> None:
+        """
+        Add a member to an IAM role binding on a bucket.
+
+        :param bucket_name: Name of a bucket.
+        :param role: The IAM role to grant.
+        :param member: The IAM member to grant the role to.
+        :param user_project: (Optional) The project to be billed for this request.
+            Required for Requester Pays buckets.
+        """
+        self.log.info("Adding %s to IAM role %s on bucket %s", member, role, bucket_name)
+        client = self.get_conn()
+        bucket = client.bucket(bucket_name=bucket_name, user_project=user_project)
+        policy = bucket.get_iam_policy(requested_policy_version=3)
+        for binding in policy.bindings:
+            if binding["role"] == role and binding.get("condition") is None:
+                binding["members"].add(member)
+                break
+        else:
+            policy.bindings.append({"role": role, "members": {member}})
+        bucket.set_iam_policy(policy)
+
+        self.log.info("Added %s to IAM role %s on bucket %s", member, role, bucket_name)
+
     def insert_object_acl(
         self,
         bucket_name: str,
@@ -1248,6 +1310,117 @@ class GCSHook(GoogleBaseHook):
             )
 
         self.log.info("Completed successfully.")
+
+    def _sync_to_local_dir_delete_stale_local_files(self, current_gcs_objects: List[Path], local_dir: Path):
+        current_gcs_keys = {key.resolve() for key in current_gcs_objects}
+
+        for item in local_dir.rglob("*"):
+            if item.is_file():
+                if item.resolve() not in current_gcs_keys:
+                    self.log.debug("Deleting stale local file: %s", item)
+                    item.unlink()
+        # Clean up empty directories
+        for root, dirs, _ in os.walk(local_dir, topdown=False):
+            for d in dirs:
+                dir_path = os.path.join(root, d)
+                if not os.listdir(dir_path):
+                    self.log.debug("Deleting stale empty directory: %s", dir_path)
+                    os.rmdir(dir_path)
+
+    def _sync_to_local_dir_if_changed(self, blob: Blob, local_target_path: Path):
+        should_download = False
+        download_msg = ""
+        if not local_target_path.exists():
+            should_download = True
+            download_msg = f"Local file {local_target_path} does not exist."
+        else:
+            local_stats = local_target_path.stat()
+            # Reload blob to get fresh metadata, including size and updated time
+            blob.reload()
+
+            if blob.size != local_stats.st_size:
+                should_download = True
+                download_msg = (
+                    f"GCS object size ({blob.size}) and local file size ({local_stats.st_size}) differ."
+                )
+
+            gcs_last_modified = blob.updated
+            if (
+                not should_download
+                and gcs_last_modified
+                and local_stats.st_mtime < gcs_last_modified.timestamp()
+            ):
+                should_download = True
+                download_msg = f"GCS object last modified ({gcs_last_modified}) is newer than local file last modified ({datetime.fromtimestamp(local_stats.st_mtime, tz=timezone.utc)})."
+
+        if should_download:
+            self.log.debug("%s Downloading %s to %s", download_msg, blob.name, local_target_path.as_posix())
+            self.download(
+                bucket_name=blob.bucket.name, object_name=blob.name, filename=str(local_target_path)
+            )
+        else:
+            self.log.debug(
+                "Local file %s is up-to-date with GCS object %s. Skipping download.",
+                local_target_path.as_posix(),
+                blob.name,
+            )
+
+    def sync_to_local_dir(
+        self,
+        bucket_name: str,
+        local_dir: str | Path,
+        prefix: str | None = None,
+        delete_stale: bool = False,
+    ) -> None:
+        """
+        Download files from a GCS bucket to a local directory.
+
+        It will download all files from the given ``prefix`` and create the corresponding
+        directory structure in the ``local_dir``.
+
+        If ``delete_stale`` is ``True``, it will delete all local files that do not exist in the GCS bucket.
+
+        :param bucket_name: The name of the GCS bucket.
+        :param local_dir: The local directory to which the files will be downloaded.
+        :param prefix: The prefix of the files to be downloaded.
+        :param delete_stale: If ``True``, deletes local files that don't exist in the bucket.
+        """
+        prefix = prefix or ""
+        local_dir_path = Path(local_dir)
+        self.log.debug("Downloading data from gs://%s/%s to %s", bucket_name, prefix, local_dir_path)
+
+        gcs_bucket = self.get_bucket(bucket_name)
+        local_gcs_objects = []
+
+        local_dir_resolved = local_dir_path.resolve()
+        for blob in gcs_bucket.list_blobs(prefix=prefix):
+            # GCS lists "directories" as objects ending with a slash. We should skip them.
+            if blob.name.endswith("/"):
+                continue
+
+            blob_path = Path(blob.name)
+            local_target_path = local_dir_path.joinpath(blob_path.relative_to(prefix))
+            # Containment check: ``blob.name`` originates outside the worker, and GCS allows
+            # object names containing ``..``. Resolve the target and assert it stays under
+            # ``local_dir`` so a hostile blob name cannot write outside the intended directory
+            # (CWE-22).
+            if not local_target_path.resolve().is_relative_to(local_dir_resolved):
+                raise ValueError(
+                    f"Refusing to write GCS blob {blob.name!r}: resolved path "
+                    f"{local_target_path} escapes the target directory {local_dir_path}."
+                )
+
+            if not local_target_path.parent.exists():
+                local_target_path.parent.mkdir(parents=True, exist_ok=True)
+                self.log.debug("Created local directory: %s", local_target_path.parent)
+
+            self._sync_to_local_dir_if_changed(blob=blob, local_target_path=local_target_path)
+            local_gcs_objects.append(local_target_path)
+
+        if delete_stale:
+            self._sync_to_local_dir_delete_stale_local_files(
+                current_gcs_objects=local_gcs_objects, local_dir=local_dir_path
+            )
 
     def sync(
         self,

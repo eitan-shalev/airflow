@@ -85,6 +85,14 @@ option_airflow_constraints_reference_build = click.option(
     help="Constraint reference to use when building the image.",
     envvar="AIRFLOW_CONSTRAINTS_REFERENCE",
 )
+option_airflow_fallback_no_constraints_installation = click.option(
+    "--airflow-fallback-no-constraints-installation/--no-airflow-fallback-no-constraints-installation",
+    is_flag=True,
+    default=True,
+    show_default=True,
+    help="Fallback to no constraints installation when constraints installation fails.",
+    envvar="AIRFLOW_FALLBACK_NO_CONSTRAINTS_INSTALLATION",
+)
 option_build_progress = click.option(
     "--build-progress",
     help="Build progress.",
@@ -92,6 +100,12 @@ option_build_progress = click.option(
     envvar="BUILD_PROGRESS",
     show_default=True,
     default=ALLOWED_BUILD_PROGRESS[0],
+)
+option_cache_from_image = click.option(
+    "--cache-from-image",
+    help="Additional image to read the build cache from - it has to be pullable from a registry, "
+    "an image only present in the local docker engine contributes no cache.",
+    envvar="CACHE_FROM_IMAGE",
 )
 option_debian_version = click.option(
     "--debian-version",
@@ -191,6 +205,11 @@ option_skip_image_file_deletion = click.option(
     help="Skip image deletion after loading.",
     is_flag=True,
     envvar="SKIP_IMAGE_FILE_DELETION",
+)
+option_tag_as = click.option(
+    "--tag-as",
+    help="Additionally tag the loaded image with this reference.",
+    envvar="TAG_AS",
 )
 option_from_run = click.option(
     "--from-run",

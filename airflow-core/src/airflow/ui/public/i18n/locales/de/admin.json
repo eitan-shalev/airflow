@@ -3,13 +3,15 @@
     "description": "Beschreibung",
     "key": "Name",
     "name": "Name",
+    "team": "Team",
     "value": "Wert"
   },
   "config": {
     "columns": {
       "section": "Abschnitt"
     },
-    "title": "Airflow Konfiguration"
+    "config_one": "Konfiguration",
+    "config_other": "Konfigurationen"
   },
   "connections": {
     "add": "Verbindung hinzufügen",
@@ -49,6 +51,12 @@
     "searchPlaceholder": "Verbindungen suchen",
     "test": "Verbindung testen",
     "testDisabled": "Das Testen von Verbindungen ist deaktiviert. Der Administrator kann via Konfiguration das Testen freischalten.",
+    "testError": {
+      "title": "Verbindungstest fehlgeschlagen"
+    },
+    "testSuccess": {
+      "title": "Verbindungstest erfolgreich"
+    },
     "typeMeta": {
       "error": "Fehler beim Abrufen der Liste der Verbindungstypen",
       "standardFields": {
@@ -74,12 +82,33 @@
   "formActions": {
     "save": "Speichern"
   },
+  "jobs": {
+    "columns": {
+      "executorClass": "Executor Klasse",
+      "hostname": "Hostname",
+      "id": "ID",
+      "jobType": "Job-Typ",
+      "latestHeartbeat": "Letztes Lebenszeichen",
+      "unixname": "Unix-Name"
+    },
+    "filters": {
+      "allStates": "Alle Zustände",
+      "allTypes": "Alle Job-Typen",
+      "dagProcessorJob": "Dag-Prozessor-Job",
+      "schedulerJob": "Scheduler-Job",
+      "triggererJob": "Triggerer-Job"
+    },
+    "job_one": "Job",
+    "job_other": "Jobs"
+  },
   "plugins": {
     "columns": {
       "source": "Quelle"
     },
     "importError_one": "Fehler beim Laden eines Plug-ins",
     "importError_other": "Fehler beim Laden von Plug-ins",
+    "plugin_one": "Plug-in",
+    "plugin_other": "Plug-ins",
     "searchPlaceholder": "Nach Datei suchen"
   },
   "pools": {
@@ -96,7 +125,8 @@
       "includeDeferred": "Delegierte Tasks",
       "nameMaxLength": "Der Name kann maximal 256 Zeichen lang sein",
       "nameRequired": "Ein Name ist erforderlich",
-      "slots": "Plätze im Pool"
+      "slots": "Plätze im Pool",
+      "slotsHelperText": "Auf -1 setzen für unbegrenzten Pool."
     },
     "noPoolsFound": "Keine Pools gefunden",
     "pool_one": "Pool",
@@ -112,7 +142,9 @@
     "columns": {
       "packageName": "Paketname",
       "version": "Version"
-    }
+    },
+    "provider_one": "Provider",
+    "provider_other": "Provider"
   },
   "variables": {
     "add": "Variable hinzufügen",
@@ -128,8 +160,6 @@
       "tooltip": "Ausgewählte Variablen löschen"
     },
     "edit": "Variable bearbeiten",
-    "export": "Exportieren",
-    "exportTooltip": "Ausgewählte Variablen exportieren",
     "form": {
       "invalidJson": "JSON ist ungültig",
       "keyMaxLength": "Der Name kann maximal 250 Zeichen lang sein",
@@ -154,6 +184,7 @@
           "title": "Überspringen"
         }
       },
+      "parsingFile": "Datei wird analysiert ...",
       "title": "Variablen importieren",
       "upload": "JSON-Datei hochladen",
       "uploadPlaceholder": "JSON-Datei mit Variablen auswählen (z.B., {\"name\": \"wert\", ...})"

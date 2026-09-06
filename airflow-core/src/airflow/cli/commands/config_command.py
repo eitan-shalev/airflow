@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from dataclasses import dataclass
 from io import StringIO
 from typing import Any, NamedTuple
@@ -27,6 +28,7 @@ import pygments
 from pygments.lexers.configs import IniLexer
 
 from airflow.cli.simple_table import AirflowConsole
+from airflow.cli.utils import deprecated_for_airflowctl
 from airflow.configuration import AIRFLOW_CONFIG, ConfigModifications, conf
 from airflow.exceptions import AirflowConfigException
 from airflow.utils.cli import should_use_colors
@@ -34,9 +36,15 @@ from airflow.utils.code_utils import get_terminal_formatter
 from airflow.utils.providers_configuration_loader import providers_configuration_loaded
 
 
+@deprecated_for_airflowctl("airflowctl config list")
 @providers_configuration_loaded
 def show_config(args):
     """Show current application configuration."""
+    if not args.show_values:
+        print(
+            "Values are hidden by default. Use `--show-values` to display them (may include sensitive data).",
+            file=sys.stderr,
+        )
     with StringIO() as output:
         conf.write(
             output,
@@ -48,6 +56,8 @@ def show_config(args):
             include_providers=not args.exclude_providers,
             comment_out_everything=args.comment_out_everything or args.defaults,
             only_defaults=args.defaults,
+            hide_sensitive=args.hide_sensitive,
+            show_values=args.show_values,
         )
         code = output.getvalue()
     if should_use_colors(args):
@@ -55,6 +65,7 @@ def show_config(args):
     print(code)
 
 
+@deprecated_for_airflowctl("airflowctl config get")
 @providers_configuration_loaded
 def get_value(args):
     """Get one value from configuration."""
@@ -128,12 +139,12 @@ class ConfigChange:
                 f"`{self.config.option}` configuration parameter renamed to `{self.renamed_to.option}` "
                 f"in the `{self.config.section}` section."
             )
-        if self.was_removed and not self.remove_if_equals:
-            return (
-                f"Removed{' deprecated' if self.was_deprecated else ''} `{self.config.option}` configuration parameter "
-                f"from `{self.config.section}` section. "
-                f"{self.suggestion}"
-            )
+        if self.was_removed:
+            if self.remove_if_equals is None:
+                return self._removed_message
+            # Only the exact value is dropped, so an unreadable option must never count as a match.
+            if conf.get(self.config.section, self.config.option, fallback=None) == str(self.remove_if_equals):
+                return self._removed_message
         if self.is_invalid_if is not None:
             value = conf.get(self.config.section, self.config.option)
             if value == self.is_invalid_if:
@@ -142,6 +153,14 @@ class ConfigChange:
                     f"in `{self.config.section}` section. {self.suggestion}"
                 )
         return None
+
+    @property
+    def _removed_message(self) -> str:
+        return (
+            f"Removed{' deprecated' if self.was_deprecated else ''} `{self.config.option}` configuration parameter "
+            f"from `{self.config.section}` section. "
+            f"{self.suggestion}"
+        )
 
 
 CONFIGS_CHANGES = [
@@ -633,6 +652,11 @@ CONFIGS_CHANGES = [
         config=ConfigParameter("webserver", "navbar_logo_text_color"),
         was_deprecated=False,
     ),
+    # api
+    ConfigChange(
+        config=ConfigParameter("api", "page_size"),
+        renamed_to=ConfigParameter("api", "fallback_page_limit"),
+    ),
     # scheduler
     ConfigChange(
         config=ConfigParameter("scheduler", "dependency_detector"),
@@ -917,8 +941,8 @@ def update_config(args) -> None:
     the breaking configuration changes by scanning the current configuration file for parameters that have
     been renamed, removed, or had their default values changed in Airflow 3.0. To see or fix all recommended
     changes, use the --all-recommendations argument. To automatically update your airflow.cfg file, use
-    the --fix argument. This command cleans up the existing comments in airflow.cfg but creates a backup of
-    the old airflow.cfg file.
+    the --fix argument. Applying --fix cleans up the existing comments in airflow.cfg, so a backup of the
+    old airflow.cfg file is written first. A dry-run leaves the filesystem untouched.
 
     CLI Arguments:
         --fix: flag (optional)
@@ -990,20 +1014,22 @@ def update_config(args) -> None:
         include_secret=True,
         display_sensitive=True,
     )
+    update_sections_lower = {s.lower() for s in update_sections} if update_sections is not None else None
+    update_options_lower = {opt.lower() for opt in update_options} if update_options is not None else None
+    ignore_sections_lower = {s.lower() for s in ignore_sections}
+    ignore_options_lower = {opt.lower() for opt in ignore_options}
+
     for change in CONFIGS_CHANGES:
         if not include_all and not change.breaking:
             continue
         conf_section = change.config.section.lower()
         conf_option = change.config.option.lower()
-        full_key = f"{conf_section}.{conf_option}"
 
-        if update_sections is not None and conf_section not in [s.lower() for s in update_sections]:
+        if update_sections_lower is not None and conf_section not in update_sections_lower:
             continue
-        if update_options is not None and full_key not in [opt.lower() for opt in update_options]:
+        if update_options_lower is not None and conf_option not in update_options_lower:
             continue
-        if conf_section in [s.lower() for s in ignore_sections] or full_key in [
-            opt.lower() for opt in ignore_options
-        ]:
+        if conf_section in ignore_sections_lower or conf_option in ignore_options_lower:
             continue
 
         if conf_section not in config_dict or conf_option not in config_dict[conf_section]:
@@ -1040,14 +1066,6 @@ def update_config(args) -> None:
                 modifications.add_remove(conf_section, conf_option)
                 changes_applied.append(f"{prefix} Removed '{conf_section}/{conf_option}' from configuration.")
 
-    backup_path = f"{AIRFLOW_CONFIG}.bak"
-    try:
-        shutil.copy2(AIRFLOW_CONFIG, backup_path)
-        console.print(f"Backup saved as '{backup_path}'.")
-    except Exception as e:
-        console.print(f"Failed to create backup: {e}")
-        raise AirflowConfigException("Backup creation failed. Aborting update_config operation.")
-
     if dry_run:
         console.print("[blue]Dry-run mode enabled. No changes will be written to airflow.cfg.[/blue]")
         with StringIO() as config_output:
@@ -1060,6 +1078,14 @@ def update_config(args) -> None:
             new_config = config_output.getvalue()
         console.print(new_config)
     else:
+        backup_path = f"{AIRFLOW_CONFIG}.bak"
+        try:
+            shutil.copy2(AIRFLOW_CONFIG, backup_path)
+            console.print(f"Backup saved as '{backup_path}'.")
+        except Exception as e:
+            console.print(f"Failed to create backup: {e}")
+            raise AirflowConfigException("Backup creation failed. Aborting update_config operation.")
+
         with open(AIRFLOW_CONFIG, "w") as config_file:
             conf.write_custom_config(
                 file=config_file,

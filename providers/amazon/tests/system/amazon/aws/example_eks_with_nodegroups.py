@@ -80,7 +80,6 @@ with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),
-    tags=["example"],
     catchup=False,
 ) as dag:
     test_context = sys_test_context_task()
@@ -135,8 +134,8 @@ with DAG(
 
     # [START howto_operator_eks_pod_operator]
     start_pod = EksPodOperator(
-        task_id="start_pod",
-        pod_name="test_pod",
+        task_id="run_pod",
+        pod_name="run_pod",
         cluster_name=cluster_name,
         image="amazon/aws-cli:latest",
         cmds=["sh", "-c", "echo Test Airflow; date"],
@@ -158,6 +157,15 @@ with DAG(
     # only describe the pod if the task above failed, to help diagnose
     describe_pod.trigger_rule = TriggerRule.ONE_FAILED
 
+    # Wait for nodegroup to be in stable state before deletion
+    await_nodegroup_stable = EksNodegroupStateSensor(
+        task_id="await_nodegroup_stable",
+        trigger_rule=TriggerRule.ALL_DONE,
+        cluster_name=cluster_name,
+        nodegroup_name=nodegroup_name,
+        target_state=NodegroupStates.ACTIVE,
+    )
+
     # [START howto_operator_eks_delete_nodegroup]
     delete_nodegroup = EksDeleteNodegroupOperator(
         task_id="delete_nodegroup",
@@ -173,6 +181,14 @@ with DAG(
         cluster_name=cluster_name,
         nodegroup_name=nodegroup_name,
         target_state=NodegroupStates.NONEXISTENT,
+    )
+
+    # Wait for cluster to be in stable state before deletion
+    await_cluster_stable = EksClusterStateSensor(
+        task_id="await_cluster_stable",
+        trigger_rule=TriggerRule.ALL_DONE,
+        cluster_name=cluster_name,
+        target_state=ClusterStates.ACTIVE,
     )
 
     # [START howto_operator_eks_delete_cluster]
@@ -203,8 +219,10 @@ with DAG(
         start_pod,
         # TEST TEARDOWN
         describe_pod,
+        await_nodegroup_stable,
         delete_nodegroup,  # part of the test AND teardown
         await_delete_nodegroup,
+        await_cluster_stable,
         delete_cluster,  # part of the test AND teardown
         await_delete_cluster,
         delete_launch_template(launch_template_name),
@@ -219,5 +237,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

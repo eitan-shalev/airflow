@@ -27,7 +27,7 @@ from airflow.providers.cncf.kubernetes.operators.resource import (
     KubernetesCreateResourceOperator,
     KubernetesDeleteResourceOperator,
 )
-from airflow.utils import timezone
+from airflow.providers.common.compat.sdk import AirflowException, timezone
 
 TEST_VALID_RESOURCE_YAML = """
 apiVersion: v1
@@ -92,6 +92,13 @@ class TestKubernetesXResourceOperator:
     def setup_method(self):
         args = {"owner": "airflow", "start_date": timezone.datetime(2020, 2, 1)}
         self.dag = DAG("test_dag_id", schedule=None, default_args=args)
+
+    def test_missing_yaml_conf_rejected_at_execute(self, context):
+        # yaml_conf/yaml_conf_file are template fields; the presence check runs at execute.
+        for operator_class in (KubernetesCreateResourceOperator, KubernetesDeleteResourceOperator):
+            op = operator_class(task_id="test_task_id")
+            with pytest.raises(AirflowException, match="One of `yaml_conf` or `yaml_conf_file`"):
+                op.execute(context={})
 
     @patch("kubernetes.config.load_kube_config")
     @patch("kubernetes.client.api.CoreV1Api.create_namespaced_persistent_volume_claim")
@@ -277,8 +284,9 @@ class TestKubernetesXResourceOperator:
 
     @patch("kubernetes.config.load_kube_config")
     @patch("airflow.providers.cncf.kubernetes.operators.resource.create_from_yaml")
-    def test_create_objects_retries_three_times(self, mock_create_from_yaml, mock_load_kube_config, context):
+    def test_create_objects_retries_five_times(self, mock_create_from_yaml, mock_load_kube_config, context):
         mock_create_from_yaml.side_effect = [
+            ApiException(status=500),
             ApiException(status=500),
             ApiException(status=500),
             ApiException(status=500),
@@ -295,4 +303,4 @@ class TestKubernetesXResourceOperator:
         with pytest.raises(ApiException):
             op.execute(context)
 
-        assert mock_create_from_yaml.call_count == 3
+        assert mock_create_from_yaml.call_count == 5

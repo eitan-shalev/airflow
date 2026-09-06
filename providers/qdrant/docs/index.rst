@@ -70,7 +70,7 @@ apache-airflow-providers-qdrant package
 `Qdrant <https://qdrant.tech/documentation>`__
 
 
-Release: 1.4.3
+Release: 1.5.6
 
 Provider package
 ----------------
@@ -88,11 +88,21 @@ For the minimum Airflow version supported, see ``Requirements`` below.
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.10.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.10.0``
-``qdrant_client``   ``>=1.15.1``
-==================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``qdrant_client``                           ``>=1.17.1``
+==========================================  ==================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-qdrant 1.5.6 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_qdrant-1.5.6.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_qdrant-1.5.6.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_qdrant-1.5.6.tar.gz.sha512>`__)
+* `The apache-airflow-providers-qdrant 1.5.6 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_qdrant-1.5.6-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_qdrant-1.5.6-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_qdrant-1.5.6-py3-none-any.whl.sha512>`__)

@@ -22,8 +22,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
-from airflow.providers.amazon.version_compat import BaseOperator
-from airflow.utils.types import NOTSET, ArgNotSet
+from airflow.providers.amazon.version_compat import NOTSET, ArgNotSet, is_arg_set
+from airflow.providers.common.compat.sdk import BaseOperator
 
 
 class AwsToAwsBaseOperator(BaseOperator):
@@ -54,8 +54,13 @@ class AwsToAwsBaseOperator(BaseOperator):
         super().__init__(**kwargs)
         self.source_aws_conn_id = source_aws_conn_id
         self.dest_aws_conn_id = dest_aws_conn_id
-        self.source_aws_conn_id = source_aws_conn_id
-        if isinstance(dest_aws_conn_id, ArgNotSet):
-            self.dest_aws_conn_id = self.source_aws_conn_id
-        else:
-            self.dest_aws_conn_id = dest_aws_conn_id
+
+    @property
+    def dest_aws_conn_id(self) -> str | None:
+        if is_arg_set(self._dest_aws_conn_id):
+            return self._dest_aws_conn_id
+        return self.source_aws_conn_id
+
+    @dest_aws_conn_id.setter
+    def dest_aws_conn_id(self, value: str | None | ArgNotSet) -> None:
+        self._dest_aws_conn_id = value

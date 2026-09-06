@@ -24,23 +24,17 @@ from collections.abc import Callable, Container, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
-from airflow.exceptions import AirflowException, AirflowSkipException
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowSkipException,
+    context_to_airflow_vars,
+)
 from airflow.providers.standard.hooks.subprocess import SubprocessHook, SubprocessResult, working_directory
-from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS, BaseOperator
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.sdk.execution_time.context import context_to_airflow_vars
-else:
-    from airflow.utils.operator_helpers import context_to_airflow_vars  # type: ignore[no-redef, attr-defined]
+from airflow.providers.standard.version_compat import BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.types import ArgNotSet
-
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
+    from airflow.providers.standard.version_compat import ArgNotSet
 
 
 class BashOperator(BaseOperator):
@@ -184,9 +178,7 @@ class BashOperator(BaseOperator):
         self.cwd = cwd
         self.append_env = append_env
         self.output_processor = output_processor
-        self._is_inline_cmd = None
-        if isinstance(bash_command, str):
-            self._is_inline_cmd = self._is_inline_command(bash_command=bash_command)
+        self._is_inline_cmd: bool | None = None
 
     @cached_property
     def subprocess_hook(self):
@@ -221,6 +213,7 @@ class BashOperator(BaseOperator):
                 raise AirflowException(f"The cwd {self.cwd} must be a directory")
         env = self.get_env(context)
 
+        self._is_inline_cmd = self._is_inline_command(bash_command=cast("str", self.bash_command))
         if self._is_inline_cmd:
             result = self._run_inline_command(bash_path=bash_path, env=env)
         else:

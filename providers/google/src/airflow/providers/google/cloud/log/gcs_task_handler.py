@@ -17,6 +17,7 @@
 # under the License.
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import shutil
@@ -30,8 +31,7 @@ import attrs
 # Make mypy happy by importing as aliases
 import google.cloud.storage as storage
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowNotFoundException
+from airflow.providers.common.compat.sdk import AirflowNotFoundException, conf
 from airflow.providers.google.cloud.hooks.gcs import GCSHook, _parse_gcs_url
 from airflow.providers.google.cloud.utils.credentials_provider import (
     get_credentials_and_project_id,
@@ -43,9 +43,11 @@ from airflow.utils.log.file_task_handler import FileTaskHandler
 from airflow.utils.log.logging_mixin import LoggingMixin
 
 if TYPE_CHECKING:
+    from io import TextIOWrapper
+
     from airflow.models.taskinstance import TaskInstance
     from airflow.sdk.types import RuntimeTaskInstanceProtocol as RuntimeTI
-    from airflow.utils.log.file_task_handler import LogMessages, LogSourceInfo
+    from airflow.utils.log.file_task_handler import LogResponse, RawLogStream, StreamingLogResponse
 
 _DEFAULT_SCOPESS = frozenset(
     [
@@ -69,7 +71,33 @@ class GCSRemoteLogIO(LoggingMixin):  # noqa: D101
 
     processors = ()
 
-    def upload(self, path: os.PathLike | str, ti: RuntimeTI):
+    @classmethod
+    def from_config(cls) -> GCSRemoteLogIO:
+        """Build the remote log IO from Airflow logging configuration."""
+        remote_task_handler_kwargs = conf.getjson("logging", "remote_task_handler_kwargs", fallback={})
+        if not isinstance(remote_task_handler_kwargs, dict):
+            raise ValueError(
+                "logging/remote_task_handler_kwargs must be a JSON object (a python dict), we got "
+                f"{type(remote_task_handler_kwargs)}"
+            )
+        # remote_task_handler_kwargs mixes FileTaskHandler kwargs with IO kwargs; only the
+        # latter belong to this class (same split as airflow_local_settings.py).
+        fth_params = frozenset(inspect.signature(FileTaskHandler.__init__).parameters) - {
+            "self",
+            "base_log_folder",
+        }
+        io_kwargs = {k: v for k, v in remote_task_handler_kwargs.items() if k not in fth_params}
+        return cls(
+            **{
+                "base_log_folder": os.path.expanduser(conf.get_mandatory_value("logging", "base_log_folder")),
+                "remote_base": conf.get_mandatory_value("logging", "remote_base_log_folder"),
+                "delete_local_copy": conf.getboolean("logging", "delete_local_logs"),
+                "gcp_key_path": conf.get_mandatory_value("logging", "google_key_path", fallback=None),
+            }
+            | io_kwargs,
+        )
+
+    def upload(self, path: os.PathLike | str, ti: RuntimeTI | None = None) -> None:
         """Upload the given log path to the remote storage."""
         path = Path(path)
         if path.is_absolute():
@@ -94,7 +122,16 @@ class GCSRemoteLogIO(LoggingMixin):  # noqa: D101
             try:
                 return GCSHook(gcp_conn_id=conn_id)
             except AirflowNotFoundException:
-                pass
+                # The operator configured a ``remote_log_conn_id`` that doesn't exist. We
+                # fall back to Application Default Credentials, but the operator almost
+                # certainly didn't mean that — a misconfigured remote-log connection is a
+                # security control failure (logs going through the wrong credentials) and
+                # must be visible in the worker log.
+                self.log.warning(
+                    "remote_log_conn_id %r is not configured; falling back to Application "
+                    "Default Credentials for GCS log handler.",
+                    conn_id,
+                )
         return None
 
     @cached_property
@@ -129,7 +166,19 @@ class GCSRemoteLogIO(LoggingMixin):  # noqa: D101
             log = f"{old_log}\n{log}" if old_log else log
         except Exception as e:
             if not self.no_log_found(e):
-                self.log.warning("Error checking for previous log: %s", e)
+                # Read failed for a reason other than "object does not exist" (e.g. transient
+                # GCS outage, IAM glitch, network blip). Fall through to the upload would
+                # overwrite the existing blob with only the new content and *truncate* the
+                # prior log history. Fail closed instead: keep local logs and let the next
+                # heartbeat retry. ``no_log_found`` covers the 404 case, where it is safe to
+                # write the new content as a fresh blob.
+                self.log.warning(
+                    "Refusing to overwrite remote log %s: could not read existing content (%s). "
+                    "Keeping local logs for later retry.",
+                    remote_log_location,
+                    e,
+                )
+                return False
         try:
             blob = storage.Blob.from_string(remote_log_location, self.client)
             blob.upload_from_string(log, content_type="text/plain")
@@ -149,11 +198,26 @@ class GCSRemoteLogIO(LoggingMixin):  # noqa: D101
             exc, "resp", {}
         ).get("status") == "404"
 
-    def read(self, relative_path: str, ti: RuntimeTI) -> tuple[LogSourceInfo, LogMessages | None]:
-        messages = []
-        logs = []
+    def read(self, relative_path: str, ti: RuntimeTI) -> LogResponse:
+        messages, log_streams = self.stream(relative_path, ti)
+        if not log_streams:
+            return messages, None
+
+        logs: list[str] = []
+        try:
+            # for each log_stream, exhaust the generator into a string
+            logs = ["".join(line for line in log_stream) for log_stream in log_streams]
+        except Exception as e:
+            if not AIRFLOW_V_3_0_PLUS:
+                messages.append(f"Unable to read remote log {e}")
+
+        return messages, logs
+
+    def stream(self, relative_path: str, ti: RuntimeTI) -> StreamingLogResponse:
+        messages: list[str] = []
+        log_streams: list[RawLogStream] = []
         remote_loc = os.path.join(self.remote_base, relative_path)
-        uris = []
+        uris: list[str] = []
         bucket, prefix = _parse_gcs_url(remote_loc)
         blobs = list(self.client.list_blobs(bucket_or_name=bucket, prefix=prefix))
 
@@ -164,18 +228,29 @@ class GCSRemoteLogIO(LoggingMixin):  # noqa: D101
             else:
                 messages.extend(["Found remote logs:", *[f"  * {x}" for x in sorted(uris)]])
         else:
-            return messages, None
+            return messages, []
 
         try:
             for key in sorted(uris):
                 blob = storage.Blob.from_string(key, self.client)
-                remote_log = blob.download_as_bytes().decode()
-                if remote_log:
-                    logs.append(remote_log)
+                stream = blob.open("r")
+                log_streams.append(self._get_log_stream(stream))
         except Exception as e:
             if not AIRFLOW_V_3_0_PLUS:
                 messages.append(f"Unable to read remote log {e}")
-        return messages, logs
+        return messages, log_streams
+
+    def _get_log_stream(self, stream: TextIOWrapper) -> RawLogStream:
+        """
+        Yield lines from the given stream.
+
+        :param stream: The opened stream to read from.
+        :yield: Lines of the log file.
+        """
+        try:
+            yield from stream
+        finally:
+            stream.close()
 
 
 class GCSTaskHandler(FileTaskHandler, LoggingMixin):
@@ -273,7 +348,7 @@ class GCSTaskHandler(FileTaskHandler, LoggingMixin):
         # Mark closed so we don't double write if close is called twice
         self.closed = True
 
-    def _read_remote_logs(self, ti, try_number, metadata=None) -> tuple[LogSourceInfo, LogMessages]:
+    def _read_remote_logs(self, ti, try_number, metadata=None) -> LogResponse:
         # Explicitly getting log relative path is necessary as the given
         # task instance might be different than task instance passed in
         # in set_context method.
@@ -283,7 +358,7 @@ class GCSTaskHandler(FileTaskHandler, LoggingMixin):
 
         if logs is None:
             logs = []
-            if not AIRFLOW_V_3_0_PLUS:
+            if not AIRFLOW_V_3_0_PLUS and not messages:
                 messages.append(f"No logs found in GCS; ti={ti}")
 
         return messages, logs

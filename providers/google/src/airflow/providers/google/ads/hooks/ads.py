@@ -27,15 +27,14 @@ from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
 from google.auth.exceptions import GoogleAuthError
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook
 from airflow.providers.google.common.hooks.base_google import get_field
-from airflow.providers.google.version_compat import BaseHook
 
 if TYPE_CHECKING:
-    from google.ads.googleads.v21.services.services.customer_service import CustomerServiceClient
-    from google.ads.googleads.v21.services.services.google_ads_service import GoogleAdsServiceClient
-    from google.ads.googleads.v21.services.services.google_ads_service.pagers import SearchPager
-    from google.ads.googleads.v21.services.types.google_ads_service import GoogleAdsRow
+    from collections.abc import Iterable
+
+    import proto
+    from google.protobuf.message import Message as ProtobufMessage
 
 
 class GoogleAdsHook(BaseHook):
@@ -74,7 +73,10 @@ class GoogleAdsHook(BaseHook):
     2. Developer token from API center flow (only requires google_ads_conn_id)
 
         - google_ads_conn_id - which contains developer token, refresh token, client_id and client_secret
-            in the ``extras``. Example of the ``extras``:
+            in the ``extras``. Flat format (from connection form) is the standard;
+            ``google_ads_client`` nested format is supported for backward compatibility.
+
+            Nested format (``google_ads_client``, legacy):
 
             .. code-block:: json
 
@@ -88,6 +90,17 @@ class GoogleAdsHook(BaseHook):
                     }
                 }
 
+            Flat format (matches connection form widgets):
+
+            .. code-block:: json
+
+                {
+                    "developer_token": "{{ INSERT_DEVELOPER_TOKEN }}",
+                    "refresh_token": "{{ INSERT_REFRESH_TOKEN }}",
+                    "client_id": "{{ INSERT_CLIENT_ID }}",
+                    "client_secret": "{{ INSERT_CLIENT_SECRET }}"
+                }
+
         .. seealso::
             For more information on how to obtain a developer token look at:
             https://developers.google.com/google-ads/api/docs/get-started/dev-token
@@ -98,7 +111,8 @@ class GoogleAdsHook(BaseHook):
 
     :param gcp_conn_id: The connection ID with the service account details.
     :param google_ads_conn_id: The connection ID with the details of Google Ads config.yaml file.
-    :param api_version: The Google Ads API version to use.
+    :param api_version: The Google Ads API version to use. If not set, the hook uses the default
+        version of the installed ``google-ads`` library.
     """
 
     conn_name_attr = "google_ads_conn_id"
@@ -149,7 +163,7 @@ class GoogleAdsHook(BaseHook):
         self.google_ads_config: dict[str, Any] = {}
         self.authentication_method: Literal["service_account", "developer_token"] = "service_account"
 
-    def search(self, client_ids: list[str], query: str, **kwargs) -> list[GoogleAdsRow]:
+    def search(self, client_ids: list[str], query: str, **kwargs) -> list[ProtobufMessage]:
         """
         Pull data from the Google Ads API.
 
@@ -172,7 +186,7 @@ class GoogleAdsHook(BaseHook):
 
         return data_native_pb
 
-    def search_proto_plus(self, client_ids: list[str], query: str, **kwargs) -> list[GoogleAdsRow]:
+    def search_proto_plus(self, client_ids: list[str], query: str, **kwargs) -> list[proto.Message]:
         """
         Pull data from the Google Ads API.
 
@@ -213,9 +227,11 @@ class GoogleAdsHook(BaseHook):
             raise
 
     @cached_property
-    def _get_service(self) -> GoogleAdsServiceClient:
+    def _get_service(self) -> Any:
         """Connect and authenticate with the Google Ads API using a service account."""
         client = self._get_client
+        if self.api_version is None:
+            return client.get_service("GoogleAdsService")
         return client.get_service("GoogleAdsService", version=self.api_version)
 
     @cached_property
@@ -234,7 +250,7 @@ class GoogleAdsHook(BaseHook):
                 raise
 
     @cached_property
-    def _get_customer_service(self) -> CustomerServiceClient:
+    def _get_customer_service(self) -> Any:
         """Connect and authenticate with the Google Ads API using a service account."""
         with NamedTemporaryFile("w", suffix=".json") as secrets_temp:
             self._get_config()
@@ -243,6 +259,8 @@ class GoogleAdsHook(BaseHook):
                 self._update_config_with_secret(secrets_temp)
             try:
                 client = GoogleAdsClient.load_from_dict(self.google_ads_config)
+                if self.api_version is None:
+                    return client.get_service("CustomerService")
                 return client.get_service("CustomerService", version=self.api_version)
             except GoogleAuthError as e:
                 self.log.error("Google Auth Error: %s", e)
@@ -253,13 +271,21 @@ class GoogleAdsHook(BaseHook):
         Set up Google Ads config from Connection.
 
         This pulls the connections from db, and uses it to set up
-        ``google_ads_config``.
+        ``google_ads_config``. Uses flat structure (developer_token, client_id,
+        etc. at top level) from connection form. For backward compatibility,
+        ``google_ads_client`` nested format is also supported.
         """
         conn = self.get_connection(self.google_ads_conn_id)
-        if "google_ads_client" not in conn.extra_dejson:
-            raise AirflowException("google_ads_client not found in extra field")
+        extra = conn.extra_dejson
 
-        self.google_ads_config = conn.extra_dejson["google_ads_client"]
+        # Kept for backward compatibility with legacy connections using nested format
+        if "google_ads_client" in extra:
+            self.google_ads_config = dict(extra["google_ads_client"] or {})
+        else:
+            self.google_ads_config = {
+                **extra,
+                "use_proto_plus": extra.get("use_proto_plus", True),
+            }
 
     def _determine_authentication_method(self) -> None:
         """Determine authentication method based on google_ads_config."""
@@ -294,7 +320,7 @@ class GoogleAdsHook(BaseHook):
 
         self.google_ads_config["json_key_file_path"] = secrets_temp.name
 
-    def _search(self, client_ids: list[str], query: str, **kwargs) -> list[GoogleAdsRow]:
+    def _search(self, client_ids: list[str], query: str, **kwargs) -> list[proto.Message]:
         """
         Pull data from the Google Ads API.
 
@@ -314,7 +340,7 @@ class GoogleAdsHook(BaseHook):
 
         return self._extract_rows(iterators)
 
-    def _extract_rows(self, iterators: list[SearchPager]) -> list[GoogleAdsRow]:
+    def _extract_rows(self, iterators: list[Iterable[proto.Message]]) -> list[proto.Message]:
         """
         Convert Google Page Iterator (SearchPager) objects to Google Ads Rows.
 

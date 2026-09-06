@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from airflow.providers.amazon.aws.operators.redshift_cluster import (
     RedshiftCreateClusterOperator,
@@ -31,19 +30,8 @@ from airflow.providers.amazon.aws.operators.redshift_cluster import (
 )
 from airflow.providers.amazon.aws.operators.redshift_data import RedshiftDataOperator
 from airflow.providers.amazon.aws.sensors.redshift_cluster import RedshiftClusterSensor
+from airflow.providers.common.compat.sdk import DAG, chain
 
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
-
-if TYPE_CHECKING:
-    from airflow.models.baseoperator import chain
-    from airflow.models.dag import DAG
-else:
-    if AIRFLOW_V_3_0_PLUS:
-        from airflow.sdk import DAG, chain
-    else:
-        # Airflow 2.10 compat
-        from airflow.models.baseoperator import chain
-        from airflow.models.dag import DAG
 try:
     from airflow.sdk import TriggerRule
 except ImportError:
@@ -72,7 +60,6 @@ with DAG(
     start_date=datetime(2021, 1, 1),
     schedule="@once",
     catchup=False,
-    tags=["example"],
 ) as dag:
     test_context = sys_test_context_task()
     env_id = test_context[ENV_ID_KEY]
@@ -233,6 +220,7 @@ with DAG(
     )
     # [END howto_operator_redshift_delete_cluster]
     delete_cluster.trigger_rule = TriggerRule.ALL_DONE
+    delete_cluster.max_attempts = 50
 
     # [START howto_operator_redshift_delete_cluster_snapshot]
     delete_cluster_snapshot = RedshiftDeleteClusterSnapshotOperator(
@@ -276,5 +264,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

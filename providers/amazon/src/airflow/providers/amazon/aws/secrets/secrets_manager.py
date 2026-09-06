@@ -25,8 +25,12 @@ from functools import cached_property
 from typing import Any
 
 from airflow.providers.amazon.aws.utils import trim_none_values
+from airflow.providers.common.compat.sdk import conf
 from airflow.secrets import BaseSecretsBackend
 from airflow.utils.log.logging_mixin import LoggingMixin
+
+# Separator between the team name and the secret id in a team scoped secret name.
+TEAM_SEP = "--"
 
 
 class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
@@ -187,10 +191,9 @@ class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
         }
 
         for conn_field, extra_words in self.extra_conn_words.items():
-            if conn_field == "user":
-                # Support `user` for backwards compatibility.
-                conn_field = "login"
-            possible_words_for_conn_fields[conn_field].extend(extra_words)
+            # Support `user` for backwards compatibility.
+            conn_field_backcompat = "login" if conn_field == "user" else conn_field
+            possible_words_for_conn_fields[conn_field_backcompat].extend(extra_words)
 
         conn_d: dict[str, Any] = {}
         for conn_field, possible_words in possible_words_for_conn_fields.items():
@@ -198,16 +201,23 @@ class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
 
         return conn_d
 
-    def get_conn_value(self, conn_id: str) -> str | None:
+    def get_conn_value(self, conn_id: str, team_name: str | None = None) -> str | None:
         """
         Get serialized representation of Connection.
 
         :param conn_id: connection id
+        :param team_name: Team name associated to the task trying to access the connection (if any)
         """
         if self.connections_prefix is None:
             return None
 
-        secret = self._get_secret(self.connections_prefix, conn_id, self.connections_lookup_pattern)
+        if self._names_a_team_namespace(conn_id):
+            self._log_refusal("connection", conn_id)
+            return None
+
+        secret = self._get_secret(
+            self.connections_prefix, conn_id, self.connections_lookup_pattern, team_name
+        )
 
         if secret is not None and secret.strip().startswith("{"):
             # Before Airflow 2.3, the AWS SecretsManagerBackend added support for JSON secrets.
@@ -226,17 +236,22 @@ class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
             return standardized_secret
         return secret
 
-    def get_variable(self, key: str) -> str | None:
+    def get_variable(self, key: str, team_name: str | None = None) -> str | None:
         """
         Get Airflow Variable.
 
         :param key: Variable Key
+        :param team_name: Team name associated to the task trying to access the variable (if any)
         :return: Variable Value
         """
         if self.variables_prefix is None:
             return None
 
-        return self._get_secret(self.variables_prefix, key, self.variables_lookup_pattern)
+        if self._names_a_team_namespace(key):
+            self._log_refusal("variable", key)
+            return None
+
+        return self._get_secret(self.variables_prefix, key, self.variables_lookup_pattern, team_name)
 
     def get_config(self, key: str) -> str | None:
         """
@@ -248,26 +263,21 @@ class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
         if self.config_prefix is None:
             return None
 
-        return self._get_secret(self.config_prefix, key, self.config_lookup_pattern)
-
-    def _get_secret(self, path_prefix, secret_id: str, lookup_pattern: str | None) -> str | None:
-        """
-        Get secret value from Secrets Manager.
-
-        :param path_prefix: Prefix for the Path to get Secret
-        :param secret_id: Secret Key
-        :param lookup_pattern: If provided, `secret_id` must match this pattern to look up the secret in
-            Secrets Manager
-        """
-        if lookup_pattern and not re.match(lookup_pattern, secret_id, re.IGNORECASE):
+        if self._names_a_team_namespace(key):
+            self._log_refusal("configuration option", key)
             return None
 
-        error_msg = "An error occurred when calling the get_secret_value operation"
-        if path_prefix:
-            secrets_path = self.build_path(path_prefix, secret_id, self.sep)
-        else:
-            secrets_path = secret_id
+        return self._get_secret(self.config_prefix, key, self.config_lookup_pattern)
 
+    def _get_secret_value(self, secret_id: str, secrets_path: str) -> str | None:
+        """
+        Fetch a secret value from Secrets Manager.
+
+        :param secret_id: Secret Key, used for logging on not-found.
+        :param secrets_path: Full path to look up in Secrets Manager.
+        :return: The secret value, or None if not found or on error.
+        """
+        error_msg = "An error occurred when calling the get_secret_value operation"
         try:
             response = self.client.get_secret_value(
                 SecretId=secrets_path,
@@ -308,3 +318,71 @@ class SecretsManagerBackend(BaseSecretsBackend, LoggingMixin):
                 exc_info=True,
             )
             return None
+
+    @staticmethod
+    def _names_a_team_namespace(secret_id: str) -> bool:
+        """
+        Whether ``secret_id`` spells out a team scoped secret name.
+
+        A team scoped secret is named ``<team><TEAM_SEP><secret id>``, so an id that itself
+        contains the team separator makes the built name ambiguous: team ``a`` with id ``b--c``
+        and team ``a--b`` with id ``c`` produce the same string. Such an id is refused by every
+        getter -- connections, variables and configuration options, team scoped as well as team
+        agnostic -- because the ambiguity exists in both directions and the caller's own
+        namespace is not a safe harbour for it.
+
+        The id is never parsed to work out *which* team it names, because it cannot be: nothing
+        in the string distinguishes the two readings above. Comparing the id against the prefix
+        the caller's own team builds looks equivalent and is not -- a caller in team ``a`` would
+        match ``a--b``'s namespace on the prefix and read its secrets. Only the caller's own
+        namespace is ever constructed, never parsed.
+
+        Only checked in multi-team mode: ``team_name`` is never non-``None`` otherwise, so no
+        team scoped secret can exist to collide with.
+        """
+        if not conf.getboolean("core", "multi_team", fallback=False):
+            return False
+        return TEAM_SEP in secret_id
+
+    def _log_refusal(self, kind: str, secret_id: str) -> None:
+        self.log.warning(
+            "%s id %r contains %r, which separates the team name from the secret id in a team "
+            "scoped secret name. Such an id is ambiguous and is not looked up. Returning None.",
+            kind.capitalize(),
+            secret_id,
+            TEAM_SEP,
+        )
+
+    def _get_secret(
+        self, path_prefix, secret_id: str, lookup_pattern: str | None, team_name: str | None = None
+    ) -> str | None:
+        """
+        Get secret value from Secrets Manager.
+
+        :param path_prefix: Prefix for the Path to get Secret
+        :param secret_id: Secret Key
+        :param lookup_pattern: If provided, `secret_id` must match this pattern to look up the secret in
+            Secrets Manager
+        :param team_name: Team name associated to the task trying to access the variable (if any)
+        """
+        if lookup_pattern and not re.match(lookup_pattern, secret_id, re.IGNORECASE):
+            self.log.debug(
+                "Skipping lookup of %r: does not match configured lookup_pattern %r.",
+                secret_id,
+                lookup_pattern,
+            )
+            return None
+        # The team scoped name is tried first. Ids that would make it name a namespace other
+        # than the caller's own are refused by the callers before reaching here.
+        if path_prefix and team_name:
+            secrets_path = self.build_path(path_prefix, f"{team_name}{TEAM_SEP}{secret_id}", self.sep)
+            value = self._get_secret_value(secret_id, secrets_path)
+            if value is not None:
+                return value
+
+        if path_prefix:
+            secrets_path = self.build_path(path_prefix, secret_id, self.sep)
+        else:
+            secrets_path = secret_id
+
+        return self._get_secret_value(secret_id, secrets_path)

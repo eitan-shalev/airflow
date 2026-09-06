@@ -84,9 +84,10 @@ class TestGoogleCloudSecretManagerHook:
         )
         assert expected_value == parent
 
+    @patch(f"{SECRETS_HOOK_PACKAGE}GoogleCloudSecretManagerHook.get_client_options")
     @patch(f"{SECRETS_HOOK_PACKAGE}GoogleCloudSecretManagerHook.get_credentials")
     @patch(f"{SECRETS_HOOK_PACKAGE}SecretManagerServiceClient")
-    def test_client(self, mock_client, mock_get_credentials):
+    def test_client(self, mock_client, mock_get_credentials, mock_get_client_options):
         mock_client_result = mock_client.return_value
         mock_credentials = self.hook.get_credentials.return_value
 
@@ -95,7 +96,11 @@ class TestGoogleCloudSecretManagerHook:
 
         assert client_1 == mock_client_result
         assert client_1 == client_2
-        mock_client.assert_called_once_with(credentials=mock_credentials, client_info=CLIENT_INFO)
+        mock_client.assert_called_once_with(
+            credentials=mock_credentials,
+            client_info=CLIENT_INFO,
+            client_options=mock_get_client_options.return_value,
+        )
         mock_get_credentials.assert_called_once()
 
     @patch(f"{SECRETS_HOOK_PACKAGE}GoogleCloudSecretManagerHook.client", new_callable=PropertyMock)
@@ -108,7 +113,7 @@ class TestGoogleCloudSecretManagerHook:
         mock_client.assert_called_once()
 
     @pytest.mark.parametrize(
-        "input_secret, expected_secret",
+        ("input_secret", "expected_secret"),
         [
             (None, {"replication": {"automatic": {}}}),
             (mock_secret := MagicMock(), mock_secret),  # type: ignore[name-defined]
@@ -207,7 +212,7 @@ class TestGoogleCloudSecretManagerHook:
         )
 
     @pytest.mark.parametrize(
-        "secret_names, secret_id, secret_exists_expected",
+        ("secret_names", "secret_id", "secret_exists_expected"),
         [
             ([], SECRET_ID, False),
             (["secret/name"], SECRET_ID, False),

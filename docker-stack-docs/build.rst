@@ -181,7 +181,7 @@ Why customizing the image ?
 ---------------------------
 
 The Apache Airflow community, releases Docker Images which are ``reference images`` for Apache Airflow.
-However, Airflow has more than 60 community managed providers (installable via extras) and some of the
+However, Airflow has more than 90 community managed providers (installable via extras) and some of the
 default extras/providers installed are not used by everyone, sometimes others extras/providers
 are needed, sometimes (very often actually) you need to add your own custom dependencies,
 packages or even custom providers.
@@ -313,17 +313,17 @@ There are two types of images you can extend your image from:
 
 Naming conventions for the images:
 
-+----------------+---------------------+---------------------------------+--------------------------------------+
-| Image          | Python              | Standard image                  | Slim image                           |
-+================+=====================+=================================+======================================+
-| Latest default | 3.12                | apache/airflow:latest           | apache/airflow:slim-latest           |
-+----------------+---------------------+---------------------------------+--------------------------------------+
-| Default        | 3.12                | apache/airflow:X.Y.Z            | apache/airflow:slim-X.Y.Z            |
-+----------------+---------------------+---------------------------------+--------------------------------------+
-| Latest         | 3.10,3.11,3.12,3.13 | apache/airflow:latest-pythonN.M | apache/airflow:slim-latest-pythonN.M |
-+----------------+---------------------+---------------------------------+--------------------------------------+
-| Specific       | 3.10,3.11,3.12,3.13 | apache/airflow:X.Y.Z-pythonN.M  | apache/airflow:slim-X.Y.Z-pythonN.M  |
-+----------------+---------------------+---------------------------------+--------------------------------------+
++----------------+--------------------------+---------------------------------+--------------------------------------+
+| Image          | Python                   | Standard image                  | Slim image                           |
++================+==========================+=================================+======================================+
+| Latest default | 3.13                     | apache/airflow:latest           | apache/airflow:slim-latest           |
++----------------+--------------------------+---------------------------------+--------------------------------------+
+| Default        | 3.13                     | apache/airflow:X.Y.Z            | apache/airflow:slim-X.Y.Z            |
++----------------+--------------------------+---------------------------------+--------------------------------------+
+| Latest         | 3.10,3.11,3.12,3.13,3.14 | apache/airflow:latest-pythonN.M | apache/airflow:slim-latest-pythonN.M |
++----------------+--------------------------+---------------------------------+--------------------------------------+
+| Specific       | 3.10,3.11,3.12,3.13,3.14 | apache/airflow:X.Y.Z-pythonN.M  | apache/airflow:slim-X.Y.Z-pythonN.M  |
++----------------+--------------------------+---------------------------------+--------------------------------------+
 
 * The "latest" image is always the latest released stable version available.
 
@@ -476,6 +476,28 @@ Note that similarly when adding individual packages, you need to use the ``airfl
 .. exampleinclude:: docker-examples/extending/add-requirement-packages/requirements.txt
     :language: text
 
+
+Example of adding a Python venv for ``ExternalPythonOperator``
+..............................................................
+
+The following example creates a separate Python virtualenv inside the image and installs packages
+from ``requirements.txt`` into it, leaving Airflow's own Python environment untouched. This is the
+typical setup for the
+:ref:`ExternalPythonOperator <apache-airflow-providers-standard:howto/operator:externalpythonoperator>`
+(or the ``@task.external_python`` decorator), which executes tasks in a pre-existing, immutable
+Python environment. Use ``/opt/airflow/venv/bin/python`` as the operator's ``python`` argument
+to run tasks in this venv.
+
+The venv is created without ``--system-site-packages``, so the packages installed inside it
+are isolated from Airflow's own dependencies.
+
+.. exampleinclude:: docker-examples/extending/add-python-venv/Dockerfile
+    :language: Dockerfile
+    :start-after: [START Dockerfile]
+    :end-before: [END Dockerfile]
+
+.. exampleinclude:: docker-examples/extending/add-python-venv/requirements.txt
+    :language: text
 
 Example when writable directory is needed
 .........................................
@@ -792,15 +814,13 @@ Building images with MySQL client
 
 .. warning::
 
-  By default Airflow images as of Airflow 2.8.0 use "MariaDB" client by default on both "X86_64" and "ARM64"
-  platforms. However, you can also build images with MySQL client. The following example builds the
-  production image in default Python version with "MySQL" client.
-
-.. exampleinclude:: docker-examples/customizing/mysql-client.sh
-    :language: bash
-    :start-after: [START build]
-    :end-before: [END build]
-
+   As of Airflow 3.2.0 - our images only support installation of "MariaDB" client from default Debian
+   repositories. If you need to use "MySQL" client from Oracle, you need to extend the images and add
+   your own ways of installing the client. The main reason for that is that Oracle's
+   ``MySQL`` client installation is broken due to expiring GPG keys and every 2 years the old
+   packages stop installing unless you manually update the keys (but there is a period of time when the
+   packages are not installable at all). MariaDB client is a drop-in replacement for MySQL client
+   and it works perfectly well with MySQL server.
 
 .. _image-build-custom:
 
@@ -863,6 +883,30 @@ wheel files. This is often useful in Enterprise environments where the binary fi
 vetted by the security teams. It is also the most complex way of building the image. You should be an
 expert of building and using Dockerfiles in order to use it and have to have specific needs of security if
 you want to follow that route.
+
+.. _image-build-fips:
+
+Build images in FIPS-compliant environments
+...........................................
+
+If you are building images in a FIPS-compliant environment, you might encounter issues with the default
+build process. For example, the default build process uses ``--with-lto`` (Link Time Optimization) when
+building Python, which might fail in FIPS mode because LTO uses MD5 checksums to verify object files
+during compilation, and MD5 is blocked in FIPS mode.
+
+In order to build the image in FIPS-compliant environment, you can use ``PYTHON_LTO`` build argument
+and set it to ``false``.
+
+.. code-block:: bash
+
+    docker build . --build-arg PYTHON_LTO="false" --tag my-image:my-tag
+
+.. note::
+
+   While disabling LTO is necessary for FIPS compliance during the build process, it is not sufficient
+   to make the image fully FIPS compliant. There might be other reasons for FIPS incompatibility
+   (for example usage of non-FIPS compliant algorithms in the software installed in the image).
+   You should verify the compliance of the image yourself.
 
 This builds below builds the production image  with packages and constraints used from the local
 ``docker-context-files`` rather than installed from PyPI or GitHub. It also disables MySQL client

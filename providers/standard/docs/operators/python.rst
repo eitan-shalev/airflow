@@ -72,6 +72,37 @@ Pass extra arguments to the ``@task`` decorated function as you would with a nor
             :start-after: [START howto_operator_python_kwargs]
             :end-before: [END howto_operator_python_kwargs]
 
+Async Python functions
+^^^^^^^^^^^^^^^^^^^^^^
+
+.. versionadded:: 3.2
+
+Async Python callables are now also supported out of the box. This means we don't need to cope with the event loop
+and allows us to easily invoke async Python code and async Airflow hooks which are not always available through
+deferred operators.
+
+As opposed to deferred operators which are executed on the triggerer, async operators are executed on the workers.
+
+.. tab-set::
+
+    .. tab-item:: @task
+        :sync: taskflow
+
+        .. exampleinclude:: /../src/airflow/providers/standard/example_dags/example_python_decorator.py
+            :language: python
+            :dedent: 4
+            :start-after: [START howto_async_operator_python_kwargs]
+            :end-before: [END howto_async_operator_python_kwargs]
+
+    .. tab-item:: PythonOperator
+        :sync: operator
+
+        .. exampleinclude:: /../src/airflow/providers/standard/example_dags/example_python_operator.py
+            :language: python
+            :dedent: 4
+            :start-after: [START howto_async_operator_python_kwargs]
+            :end-before: [END howto_async_operator_python_kwargs]
+
 Templating
 ^^^^^^^^^^
 
@@ -157,16 +188,19 @@ Passing in arguments
 
 Pass extra arguments to the ``@task.virtualenv`` decorated function as you would with a normal Python function.
 Unfortunately, Airflow does not support serializing ``var``, ``ti`` and ``task_instance`` due to incompatibilities
-with the underlying library. For Airflow context variables make sure that you either have access to Airflow through
-setting ``system_site_packages`` to ``True`` or add ``apache-airflow`` to the ``requirements`` argument.
-Otherwise you won't have access to the most context variables of Airflow in ``op_kwargs``.
-If you want the context related to datetime objects like ``data_interval_start`` you can add ``pendulum`` and
+with the underlying library. For Airflow context variables, make sure that you have access to Airflow by
+setting ``system_site_packages`` to ``True`` or you won't have access to most context variables in ``op_kwargs``.
+If you want the context related to datetime objects like ``data_interval_start``, you can add ``pendulum`` and
 ``lazy_object_proxy``.
 
+.. important::
+
+    When Airflow or provider packages are required, you must specify the Airflow :ref:`apache-airflow:installation:constraints`
+    using ``pip_install_options`` to avoid dependency conflicts.
 
 .. important::
     The Python function body defined to be executed is cut out of the Dag into a temporary file w/o surrounding code.
-    As in the examples you need to add all imports again and you can not rely on variables from the global Python context.
+    As in the examples you need to add all imports again and you cannot rely on variables from the global Python context.
 
     If you want to pass variables into the classic :class:`~airflow.providers.standard.operators.python.PythonVirtualenvOperator` use
     ``op_args`` and ``op_kwargs``.
@@ -223,7 +257,7 @@ different workers, it might happen that virtual environment are created on multi
 of the worker will drop the cache (assuming ``venv_cache_path`` is not on a persistent volume).
 
 In case you have problems during runtime with broken cached virtual environments, you can influence the cache directory hash by setting the Airflow variable
-``PythonVirtualenvOperator.cache_key`` to any text. The content of this variable is uses in the vector to calculate the cache directory key.
+``python_virtualenv_operator_cache_key`` to any text. The content of this variable is used in the vector to calculate the cache directory key.
 
 Note that any modification of a cached virtual environment (like temp files in binary path, post-installing further requirements) might pollute a cached virtual environment and the
 operator is not maintaining or cleaning the cache path.

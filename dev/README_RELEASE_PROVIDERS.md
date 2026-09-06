@@ -20,33 +20,37 @@
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 **Table of contents**
 
-- [What the provider distributions are](#what-the-provider-distributions-are)
-- [Provider distributions](#provider-distributions)
-- [Bump min Airflow version for providers](#bump-min-airflow-version-for-providers)
-- [Decide when to release](#decide-when-to-release)
-- [Provider distributions versioning](#provider-distributions-versioning)
-- [Possible states of Provider distributions](#possible-states-of-provider-distributions)
-- [Prepare Regular Provider distributions (RC)](#prepare-regular-provider-distributions-rc)
+- [Intro](#intro)
+  - [What the provider distributions are](#what-the-provider-distributions-are)
+  - [Decide when to release](#decide-when-to-release)
+  - [Delegating release duties to a non-PMC committer](#delegating-release-duties-to-a-non-pmc-committer)
+- [Collect ambiguities during the release (for a follow-up doc PR)](#collect-ambiguities-during-the-release-for-a-follow-up-doc-pr)
+- [Special procedures (done very infrequently)](#special-procedures-done-very-infrequently)
+  - [Bump min Airflow version for providers](#bump-min-airflow-version-for-providers)
   - [Move provider into remove state](#move-provider-into-remove-state)
-  - [Increasing version number](#increasing-version-number)
-  - [Generate release notes](#generate-release-notes)
+- [Prepare Regular Provider distributions (RC)](#prepare-regular-provider-distributions-rc)
+  - [Perform review of security issues that are marked for the release](#perform-review-of-security-issues-that-are-marked-for-the-release)
+  - [Convert commits to changelog entries and bump provider versions](#convert-commits-to-changelog-entries-and-bump-provider-versions)
+  - [Update versions of dependent providers to the next version](#update-versions-of-dependent-providers-to-the-next-version)
+  - [Create a PR with the changes](#create-a-pr-with-the-changes)
+  - [Apply incremental changes and merge the PR](#apply-incremental-changes-and-merge-the-pr)
   - [(Optional) Apply template updates](#optional-apply-template-updates)
-  - [Open PR with suggested version releases](#open-pr-with-suggested-version-releases)
   - [Build Provider distributions for SVN apache upload](#build-provider-distributions-for-svn-apache-upload)
   - [Build and sign the source and convenience packages](#build-and-sign-the-source-and-convenience-packages)
   - [Commit the source packages to Apache SVN repo](#commit-the-source-packages-to-apache-svn-repo)
   - [Publish the Regular distributions to PyPI (release candidates)](#publish-the-regular-distributions-to-pypi-release-candidates)
-  - [Add tags in git](#add-tags-in-git)
+  - [Push the RC tags](#push-the-rc-tags)
   - [Prepare documentation in Staging](#prepare-documentation-in-staging)
   - [Prepare issue in GitHub to keep status of testing](#prepare-issue-in-github-to-keep-status-of-testing)
   - [Prepare voting email for Providers release candidate](#prepare-voting-email-for-providers-release-candidate)
+- [Release verification](#release-verification)
   - [Verify the release candidate by PMC members](#verify-the-release-candidate-by-pmc-members)
   - [Verify the release candidate by Contributors](#verify-the-release-candidate-by-contributors)
 - [Publish release](#publish-release)
   - [Summarize the voting for the Apache Airflow release](#summarize-the-voting-for-the-apache-airflow-release)
   - [Publish release to SVN](#publish-release-to-svn)
   - [Publish the packages to PyPI](#publish-the-packages-to-pypi)
-  - [Add tags in git](#add-tags-in-git-1)
+  - [Add the final release tag in git](#add-the-final-release-tag-in-git)
   - [Publish documentation](#publish-documentation)
   - [Update providers metadata](#update-providers-metadata)
   - [Notify developers of release](#notify-developers-of-release)
@@ -55,13 +59,16 @@
   - [Add release data to Apache Committee Report Helper](#add-release-data-to-apache-committee-report-helper)
   - [Close the testing status issue](#close-the-testing-status-issue)
   - [Remove Provider distributions scheduled for removal](#remove-provider-distributions-scheduled-for-removal)
-  - [Misc / Post Release Helpers](#misc--post-release-helpers)
+- [Misc / Post release Helpers](#misc--post-release-helpers)
+  - [Fixing released documentation](#fixing-released-documentation)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
 ------------------------------------------------------------------------------------------------------------
 
-# What the provider distributions are
+# Intro
+
+## What the provider distributions are
 
 The Provider distributions are separate packages (one package per provider) that implement
 integrations with external services for Airflow in the form of installable Python packages.
@@ -74,29 +81,96 @@ NOTE!! When you have problems with any of those commands that run inside `breeze
 can run the command with `--debug` flag that will drop you in the shell inside the image and will
 print the command that you should run.
 
-# Provider distributions
+## Decide when to release
 
-The prerequisites to release Apache Airflow are described in [README.md](README.md).
+You can release Provider distributions separately from the main Airflow on an ad-hoc basis, whenever we find that
+a given provider needs to be released due to new features or due to bug fixes.  You can release each provider
+package separately, but due to voting and release overhead we try to group releases of Provider
+distributions together.
 
-You can read more about the command line tools used to generate the packages in the
-[Provider details](PROVIDER_DISTRIBUTIONS_DETAILS.md).
+## Delegating release duties to a non-PMC committer
 
-# Bump min Airflow version for providers
+Per the [ASF release policy](http://www.apache.org/legal/release-policy.html), the Release Manager
+does not need to be a PMC member, and there is no requirement that only a PMC member may call a
+release vote. The policy's own wording: *"If the Release Manager is not a member of the PMC, they
+will need to ask a PMC member to do the actual release publication"* — i.e. the one hard boundary
+is write access to the `dist/release` SVN area and the binding vote itself; everything else can be
+run by any committer.
+
+This means a non-PMC committer (the **Delegate** below) can run most of the provider release
+process end to end, with a PMC member only stepping in for the parts ASF policy reserves to the
+PMC. Split of duties:
+
+| Step | Owner | Notes |
+|---|---|---|
+| [Convert commits to changelog entries and bump provider versions](#convert-commits-to-changelog-entries-and-bump-provider-versions) | Delegate | Normal PR review/merge process, no PMC involvement needed. |
+| [Build](#build-provider-distributions-for-svn-apache-upload) + [sign](#build-and-sign-the-source-and-convenience-packages) + [commit to `dist/dev`](#commit-the-source-packages-to-apache-svn-repo) + [publish RC to PyPI](#publish-the-regular-distributions-to-pypi-release-candidates) | PMC | Kept as **one contiguous PMC block**: per [ASF release policy](https://www.apache.org/legal/release-policy.html#owned-controlled-hardware), a PMC member signing a release should build it themselves from source rather than sign artifacts someone else built, so they know what they're actually signing. The PMC member builds, signs with their own key (already in the project's `KEYS` file), commits packages + signatures to `dist/dev`, and uploads the RC to the `apache-airflow-providers-*` PyPI namespace under the PMC's trusted publishing identity. The PMC then hands `files/packages.txt` (the PyPI URLs) back to the Delegate for the vote email. |
+| [Push the RC tags](#push-the-rc-tags) | Delegate | Plain git tag push, no elevated access needed. |
+| [Prepare documentation in Staging](#prepare-documentation-in-staging) | Delegate | |
+| [Prepare issue in GitHub to keep status of testing](#prepare-issue-in-github-to-keep-status-of-testing) | Delegate | Delegate also tracks the issue, the vote thread, and related PRs throughout the release. |
+| [Prepare voting email for Providers release candidate](#prepare-voting-email-for-providers-release-candidate) | Delegate | Delegate may send the `[VOTE]` email, but must **not** claim a personal binding `+1` (see note in that section) — only PMC votes are binding. |
+| Casting the deciding vote(s) | PMC | At least 3 binding `+1` votes from PMC members are required for the release to pass; this cannot be delegated. |
+| [Summarize the voting for the Apache Airflow release](#summarize-the-voting-for-the-apache-airflow-release) (`[RESULT][VOTE]`) | Delegate | Only after at least 3 binding PMC `+1` votes are already visible in the thread — the Delegate is reporting a result the PMC already reached, not deciding it. |
+| [Publish release to SVN](#publish-release-to-svn) (`dist/release`) | PMC | Per [ASF Infra policy](https://infra.apache.org/release-publishing), `dist/release` write access is PMC-only by default (a project can request Infra to open it to all committers, but Airflow has not done so). |
+| [Publish the packages to PyPI](#publish-the-packages-to-pypi) (final) | PMC | |
+| [Add the final release tag in git](#add-the-final-release-tag-in-git) | Either | Not privileged; whoever is running that phase of the process does it. |
+| [Publish documentation](#publish-documentation) (live) | Delegate | |
+| [Update providers metadata](#update-providers-metadata) | Delegate | |
+| [Notify developers of release](#notify-developers-of-release), security announcements, social media, committee report | PMC | Official project communications made under the PMC's authority. |
+| [Close the testing status issue](#close-the-testing-status-issue) | Delegate | |
+
+The PMC continues to oversee the overall process regardless of how many steps are delegated, and
+remains the party accountable for the release under ASF policy.
+
+> [!NOTE]
+> Delegation is also a runway toward PMC membership. The first time a committer takes on the
+> Delegate role, the overseeing PMC member is encouraged to walk them through the reserved block
+> live — sharing their screen (or pairing) through the build → sign → `dist/dev` → PyPI-RC steps so the
+> Delegate sees exactly how it is done. The aim is simply that these steps are familiar rather than
+> a surprise if and when the Delegate later becomes a PMC member and runs them for real.
+
+# Collect ambiguities during the release (for a follow-up doc PR)
+
+These instructions are imperfect. Every release uncovers at least one command
+that has drifted, one step that is under-documented, or one automation that
+silently did the wrong thing. As you run through this document, jot down any
+such observations in a scratch file kept **outside** the repo (anywhere that
+is not tracked by git — a note in your home directory, a scratchpad, a
+gist). Once the release has landed, turn those notes into a follow-up PR
+against this document.
+
+Keeping the scratch file out of the repo avoids accidentally committing
+release-manager notes along with the release-prep PR, and makes it obvious
+that the notes are input to the next doc PR rather than something to keep
+around long-term.
+
+# Special procedures (done very infrequently)
+
+> [!NOTE]
+> Those processes are done very infrequently, when there is time to bump minimum versions of providers
+> or when you remove a provider. Usually you should just skip this section and go straight to
+> Prepare Regular providers RC.
+
+## Bump min Airflow version for providers
+
+> [!NOTE]
+> This should only happen when it is time to bump the minimum version of providers as agreed in
+> [related provider policy](../PROVIDERS.rst#upgrading-minimum-supported-version-of-airflow)
 
 1. Update `PROVIDERS_COMPATIBILITY_TESTS_MATRIX` in `src/airflow_breeze/global_constants.py` to remove
 the versions of Airflow that are not applicable anymore.
 
 2. Check if Breeze unit tests in `dev/breeze/tests/test_packages.py` need adjustments. This is done by simply
-searching and replacing old version occurrences with newer one. For example 2.8.0 to 2.9.0
+searching and replacing old version occurrences with newer one. For example 2.10.0 to 2.11.0
 
 3. Update minimum airflow version for all packages, you should modify `MIN_AIRFLOW_VERSION`
 in `src/airflow_breeze/utils/packages.py` and run the `breeze release-management prepare-provider-documentation --only-min-version-update`
 This will only update the min version in  the `__init__.py` files and package documentation without bumping the provider versions.
 
-4. Remove `AIRFLOW_V_2_X_PLUS` in all tests (review and update skipif and other conditional
-   behaviour and test_compat.py, where X is the TARGET version we change to. For example
-   when we update min Airflow version to 2.10.0, we should remove all references to AIRFLOW_V_2_10_PLUS
-   simply because "everything" in our tests is already 2.10.0+ and there is no need to exclude or
+4. Remove `AIRFLOW_V_X_Y_PLUS` in all tests (review and update skipif and other conditional
+   behavior and test_compat.py, where X is the TARGET version we change to. For example
+   when we update min Airflow version to 3.0.0, we should remove all references to AIRFLOW_V_3_0_PLUS
+   simply because "everything" in our tests is already 3.0.0+ and there is no need to exclude or
    modify tests for earlier versions of Airflow.
 
 Note: Sometimes we are releasing a subset of providers and would not want to add the
@@ -107,7 +181,7 @@ command involved in the release process. The value can also be passed as the `--
 Follow the steps below to set the environment variable:
 
 ```shell script
- export DISTRIBUTIONS_LIST=PACKAGE1,PACKAGE2
+ export DISTRIBUTIONS_LIST="PACKAGE1 PACKAGE2"
 ```
 
 ```shell script
@@ -115,7 +189,7 @@ branch="update-min-airflow-version"
 git checkout -b "${branch}"
 breeze release-management prepare-provider-documentation --only-min-version-update
 git add .
-git commit -m "Bump minimum Airflow version in providers to Airflow 2.9.0"
+git commit -m "Bump minimum Airflow version in providers to Airflow 3.0.0"
 git push --set-upstream origin "${branch}"
 ```
 
@@ -126,77 +200,13 @@ handle everything automatically.
 Note: this step is **not** part of the release cycle. It should be done independently
 when the time to update min airflow version has come.
 
-# Decide when to release
-
-You can release Provider distributions separately from the main Airflow on an ad-hoc basis, whenever we find that
-a given provider needs to be released - due to new features or due to bug fixes.
-You can release each provider package separately, but due to voting and release overhead we try to group
-releases of Provider distributions together.
-
-# Provider distributions versioning
-
-We are using the [SEMVER](https://semver.org/) versioning scheme for the Provider distributions. This is in order
-to give the users confidence about maintaining backwards compatibility in the new releases of those
-packages.
-
-Details about maintaining the SEMVER version are going to be discussed and implemented in
-[the related issue](https://github.com/apache/airflow/issues/11425)
-
-# Possible states of Provider distributions
-
-The Provider distributions can be in one of several states.
-
-* The `not-ready` state is used when the provider has some in-progress changes (usually API changes) that
-  we do not  want to release yet as part of the regular release cycle. Providers in this state are excluded
-  from being  released as part of the regular release cycle (including documentation building). You can build
-  and prepare  such provider when you explicitly specify it as argument of a release command or by passing
-  `--include-not-ready-providers` flag in corresponding command. The `not-ready` providers are treated as
-  regular providers when it comes to running tests and preparing and releasing packages in `CI` - as we want
-  to make sure they are properly releasable any time and we want them to contribute to dependencies and we
-  want to test them. Also in case of preinstalled providers, the `not-ready` providers are contributing
-  their dependencies rather than the provider package to requirements of Airflow.
-* The `ready` state is the usual state of the provider that is released in the regular release cycle
-  (including the documentation, package building and publishing). This is the state most providers are in.
-* The `suspended` state is used when we have a good reason to suspend such provider, following the devlist
-  discussion and vote or "lazy consensus". The process of suspension is described in [Provider's docs](../PROVIDERS.rst).
-  The `suspended` providers are excluded from being released as part of the regular release cycle (including
-  documentation building) but also they do not contribute dependencies to the CI image and their tests are
-  not run in CI process. You can build and prepare such provider when you explicitly specify it as argument
-  of a release command or by passing `--include-suspended-providers` flag in corresponding command (but it
-  might or might not work at any time as the provider release commands are not regularly run on CI for the
-  suspended providers). The `suspended` providers are not released as part of the regular release cycle.
-* The `removed` state is a temporary state after the provider has been voted (or agreed in "lazy consensus")
-  to be removed and it is only used for exactly one release cycle - in order to produce the final version of
-  the package - identical to the previous version with the exception of the removal notice. The process
-  of removal is described in [Provider's docs](../PROVIDERS.rst).  The `removed` providers are included in
-  the regular release cycle (including documentation building) because the `--include-removed-providers`
-  flag is passed to commands that release manager runs (see below). The difference between `suspended`
-  and `removed` providers is that additional information is added to their documentation about the provider
-  not being maintained any more by the community.
-
-This graph shows the possible transitions between the states:
-
-```mermaid
-graph TD;
-    new[/new/]
-    new -- Add to the code -->ready;
-    ready
-    ready-- Mark as not ready -->not-ready;
-    not-ready-- Mark as ready -->ready;
-    ready-- Suspend -->suspended;
-    suspended-- Resume -->ready;
-    ready-- Mark as removed -->removed;
-    suspended-- Mark as removed -->removed;
-    gone[\gone\]
-    removed -- Remove from the code --> gone;
-```
-
-# Prepare Regular Provider distributions (RC)
-
 ## Move provider into remove state
 
+> [!NOTE]
+> This is only needed in case some providers have been removed since last release wave.
+
 The removed state needs to be in a release wave before you actually plan to remove the source code for the provider.
-Set provider with removed state -> release provider -> remove source code of the provider.
+Set provider with ``removed state`` -> ``release provider`` -> ``remove source code of the provider``.
 When setting the provider in removed state you need also to clarify in the change log that there will be
 no more releases for this provider.
 
@@ -206,93 +216,264 @@ To set provider as removed do the following:
 2. Place entry in changelog.txt that notify users about provider being removed.
 3. Update test_get_removed_providers in `/dev/breeze/tests/test_packages.py` by adding the provider to the list
 
-## Increasing version number
+# Prepare Regular Provider distributions (RC)
 
-First thing that release manager has to do is to change version of the provider to a target
-version. Each provider has a `provider.yaml` file that, among others, stores information
-about provider versions. When you attempt to release a provider you should update that
-information based on the changes for the provider, and its `CHANGELOG.rst` (or `changelog.rst` in the
-new provider's structure). It might be that
-`CHANGELOG.rst` already contains the right target version. This will be especially true if some
-changes in the provider add new features (then minor version is increased) or when the changes
-introduce backwards-incompatible, breaking change in the provider (then major version is
-incremented). Committers, when approving and merging changes to the providers, should pay attention
-that the `CHANGELOG.rst` is updated whenever anything other than bugfix is added.
+This is the process that happens regularly (every 2 weeks).
 
-If there are no new features or breaking changes, the release manager should simply increase the
-patch-level version for the provider.
+## Perform review of security issues that are marked for the release
 
-The new version should be first on the list.
+We are keeping track of security issues in the [Security Issues](https://github.com/airflow-s/airflow-s/issues)
+repository currently. As a release manager, you should have access to the repository.
+Please review and ensure that all security issues marked for the release have been
+addressed and resolved. Ping security team (comment in the issues) if anything missing or
+the issue does not seem to be addressed.
 
-## Generate release notes
+Additionally, the [dependabot alerts](https://github.com/apache/airflow/security/dependabot) and
+code [scanning alerts](https://github.com/apache/airflow/security/code-scanning) should be reviewed
+and security team should be pinged to review and resolve them.
 
-Each of the Provider distributions contains Release notes in the form of the `CHANGELOG.rst` file that is
-automatically generated from history of the changes and code of the provider.
-They are stored in the documentation directory. The `README.md` file generated during package
-preparation is not stored anywhere in the repository - it contains however link to the Changelog
-generated.
+## Convert commits to changelog entries and bump provider versions
 
-When the provider package version has not been updated since the latest version, the release notes
-are not generated. Release notes are only generated, when the latest version of the package does not
-yet have a corresponding TAG.
+First thing that release manager has to do is to convert commits for each provider into changelog entries
+and update version of the provider to a target version - depending on type of changes implemented in the
+providers.
 
-The tags for providers is of the form ``providers-<PROVIDER_ID>/<VERSION>`` for example
-``providers-amazon/1.0.0``. During releasing, the `rc*` tags are created (for example
-``providers-amazon/1.0.0rc1``).
+One option for doing this is the **`prepare-providers-documentation` skill** loaded by an
+agentic coding framework (e.g. Claude Code or OpenAI Codex CLI), which replaces the manual
+commit-by-commit classification step of `breeze release-management
+prepare-provider-documentation` with AI-driven classification. The skill inspects every PR (using
+sub-agents per PR for thorough analysis), pays special attention to potentially breaking changes by
+reading the actual diff (not just the commit message or PR labels), scopes multi-provider PRs to the
+slice that touched the current provider, and asks the release manager only when genuinely uncertain.
 
-Details about maintaining the SEMVER version are going to be discussed and implemented in
-[the related issue](https://github.com/apache/airflow/issues/11425)
+> [!WARNING]
+> The skill is an **optional** aid, not a required or default part of the release process. The
+> interactive `breeze release-management prepare-provider-documentation` command (see
+> [Falling back to interactive breeze](#falling-back-to-interactive-breeze)) remains the baseline,
+> and release managers who do not use AI tooling should use that command directly — this skill is
+> not for them. If you do use the skill, keep the following in mind:
+>
+> * **You must verify its output.** The version bumps and changelog entries it produces are
+>   generated by an LLM and are **not authoritative** — the release manager is responsible for
+>   reviewing every generated entry (especially breaking-change classification and version bumps)
+>   before merging the release PR. Treat the skill's output as a first draft to be checked, not a
+>   final answer.
+> * **It runs for a long time and consumes a lot of tokens.** Classifying a full release wave with
+>   per-PR sub-agents can take a while and burn through a large amount of model tokens. Because of
+>   that, it is hard to recommend without a high-capacity plan (e.g. Claude Max, or an equivalent
+>   GitHub Copilot / OpenAI tier). On a metered or low-quota plan the cost may be significant and
+>   the run may not complete.
+
+**Prerequisites:** running this skill requires an agentic coding environment with the
+[GitHub MCP server](https://github.com/github/github-mcp-server) configured — the skill reads PR
+diffs, lists commits, and (with maintainer confirmation) edits files via these tools. Two well-known
+options:
+
+* [Claude Code](https://docs.claude.com/en/docs/claude-code) — install via npm
+  (`npm install -g @anthropic-ai/claude-code`) or follow the
+  [setup guide](https://docs.claude.com/en/docs/claude-code/setup) for authentication and IDE
+  integration. Configure GitHub MCP per the [MCP docs](https://docs.claude.com/en/docs/claude-code/mcp).
+* [OpenAI Codex CLI](https://github.com/openai/codex) — install via npm
+  (`npm install -g @openai/codex`), authenticate with your OpenAI key, and add the GitHub MCP server
+  to its config (see the OpenAI Codex CLI README for MCP wiring).
+
+Other MCP-compatible agentic clients should work as long as the GitHub MCP server is wired up and
+the framework loads `SKILL.md` files from the `.claude/skills/` discovery path.
+
+The skill source of truth lives in [`.agents/skills/prepare-providers-documentation/SKILL.md`](../.agents/skills/prepare-providers-documentation/SKILL.md).
+Both Claude Code and OpenAI Codex CLI discover project-local skills via a symlink at
+`.claude/skills/prepare-providers-documentation`. If your local checkout doesn't have that symlink
+(the `.claude/` directory is gitignored), set it up once:
 
 ```shell script
-breeze release-management prepare-provider-documentation  --include-removed-providers
+mkdir -p .claude/skills
+ln -s ../../.agents/skills/prepare-providers-documentation .claude/skills/prepare-providers-documentation
 ```
 
-In case you prepare provider documentation for just a few selected providers, you can run:
+Before invoking the skill, set the environment variable ``RELEASE_DATE`` to the date of the release,
+usually current or next day - depending on when you plan to start the release. This can be updated
+later, when you rebase the PR with the latest main before merging it.
+
+```shell script
+export RELEASE_DATE=$(date "+%Y-%m-%d")
+```
+
+The RELEASE_DATE can also optionally have `_01`, `_02` suffixes appended to it to indicate that the release
+is the first, second or third release candidate for the provider that day. It's unlikely to happen that
+we have several release candidates for the same provider in a single day, but this makes it possible to
+release multiple providers in a single day.
+
+Note that versions of the provider will be updated in two places (the skill does it automatically):
+
+* **provider.yaml** - where there is a list of all versions of providers (the first one is the latest)
+* **changelog.rst** - where changelogs are sorted according to provider version and group changes in
+  the right sections
+
+In your agent session (Claude Code, OpenAI Codex CLI, etc.), invoke the skill:
+
+```text
+/prepare-providers-documentation
+```
+
+The skill will ask for `RELEASE_DATE`, base branch, optional provider subset, and include-flags
+(`--include-not-ready-providers`, `--include-removed-providers`), then walk through five phases:
+discovery, per-provider commit listing, classification with sub-agents, confirmation of any
+uncertain or major-bump cases with you, and application via direct edits to `provider.yaml` plus
+`changelog.rst`. Auto-generated build files (`__init__.py`, `README.rst`, `pyproject.toml`,
+`conf.py`, `get_provider_info.py`, `index.rst`) are still regenerated by breeze under the hood
+(`breeze release-management prepare-provider-documentation --reapply-templates-only`) so the skill
+stays consistent with the existing tooling.
+
+The skill also runs the [Update versions of dependent providers to the next
+version](#update-versions-of-dependent-providers-to-the-next-version) step for you, so you do not
+need to run that command separately when using the skill.
+
+If you set ``DISTRIBUTIONS_LIST``, the skill scopes itself to that subset automatically.
+
+The skill (and the underlying breeze tooling) determines the new version of provider as follows:
+
+* increased patch-level for bugfix-only and doc-only changes
+* increased minor version if new features are added or the minimum Airflow version is bumped
+* increased major version if breaking changes are added
+
+### Falling back to interactive breeze
+
+If the skill is unavailable (e.g. you're not running an agentic coding framework), or if the per-provider commit
+count is very large and the AI confidence is low across the board, you can still run the original
+interactive breeze command and classify each change by hand:
+
+```shell script
+breeze release-management prepare-provider-documentation
+```
+
+Or for a subset:
 
 ```shell script
 breeze release-management prepare-provider-documentation [packages]
 ```
 
 In case you want to also release a pre-installed provider that is in ``not-ready`` state (i.e. when
-you want to release it before you switch their state to ``ready``), you need to pass
-``--include-not-ready-providers`` flag to the command above.
+you want to release it before you switch their state to ``ready``), pass
+``--include-not-ready-providers``.
 
-This command will not only prepare documentation but will also help the release manager to review
-changes implemented in all providers, and determine which of the providers should be released. For each
-provider details will be printed on what changes were implemented since the last release including
-links to particular commits.
+## Update versions of dependent providers to the next version
 
-This should help to determine which version of provider should be released:
-
-* increased patch-level for bugfix-only change
-* increased minor version if new features are added
-* increased major version if breaking changes are added
-
-It also helps the release manager to update CHANGELOG.rst where high-level overview of the changes should be documented for the providers released.
-You should iterate and re-generate the same content after any change as many times as you want.
-The generated files should be added and committed to the repository.
-
-When you want to regenerate the changes before the release and make sure all changelogs
-are updated, run it in non-interactive mode:
+Sometimes when contributors want to use next version of a dependent provider, instead of
+doing it immediately in the code they can add a comment ``# use next version``
+to the line of ``pyproject.toml`` file of the provider that refers to the provider, which next version
+should be used. This comment will be picked up by the``update-providers-next-version`` command and the
+version of the dependent provider will be updated to the next version and comment will be
+removed.
 
 ```shell script
-  breeze release-management prepare-provider-documentation --include-removed-providers --answer yes
+breeze release-management update-providers-next-version
+```
+
+> [!NOTE]
+> The `prepare-providers-documentation` skill runs this command automatically as part of its
+> flow, so you only need to run it by hand when you prepared the documentation with the
+> interactive breeze command instead of the skill. Run it regardless of whether you think any
+> provider uses the `# use next version` comment — the command is a no-op when none do.
+
+## Create a PR with the changes
+
+Make sure to set labels: `allow provider dependency bump` and `skip common compat check` to the PR,
+so that the PR is not blocked by selective checks.
+
+You can do it for example this way:
+
+```shell script
+gh pr create \
+  --title "Prepare providers release ${RELEASE_DATE}" \
+  --label "allow provider dependency bump" \
+  --label "skip common compat check" \
+  --body "Prepare providers release ${RELEASE_DATE}" \
+  --web
+```
+
+## Apply incremental changes and merge the PR
+
+When those changes are generated, you should commit the changes, create a PR and get it reviewed.
+This usually takes some time, so before merging you need to rebase it to latest main and see if there
+are no new, incremental updates (one or two merged commits in the meantime). If there are - you still
+have a chance to incorporate them via the **incremental update** flow.
+
+> [!IMPORTANT]
+> Whenever an incremental update bumps a provider's version, the [Update versions of dependent
+> providers to the next version](#update-versions-of-dependent-providers-to-the-next-version) step
+> must be applied **again** on the rebased branch — regardless of whether you prepared the docs with
+> the skill or the interactive breeze command. The skill re-runs it automatically; with the
+> interactive `--incremental-update` flow you must run the command yourself.
+
+The recommended way is to invoke the same `prepare-providers-documentation` skill — it has a dedicated
+**Incremental Update** section that detects which commits on the rebased branch are not yet referenced
+in the existing `changelog.rst`, classifies only those new commits with the same per-PR sub-agent
+analysis used in the initial run, and escalates the version bump in `provider.yaml` if (and only if) a
+new commit changes the most-impactful classification:
+
+```text
+/prepare-providers-documentation
+```
+
+When invoked on a release-PR branch that already has classified entries in the changelogs, the skill
+recognizes the incremental scenario and walks through:
+
+1. Refreshing the apache remote and regenerating templates.
+2. Detecting new commits per provider by comparing PR numbers to the existing changelog.
+3. Classifying only the new commits (with breaking-change scrutiny on the diff).
+4. Confirming any version-bump escalation with you explicitly before applying.
+5. Inserting the new entries under the correct sections of the existing latest-version block.
+6. Validating that no leftover `Please review` markers remain.
+7. Re-running [Update versions of dependent providers to the next
+   version](#update-versions-of-dependent-providers-to-the-next-version) when an incremental
+   bump raised a provider's version.
+
+If you set ``DISTRIBUTIONS_LIST`` the incremental flow honors that scope automatically.
+
+Once the new entries are applied, commit the changes and update the PR. You need to apply the
+following labels to the PR (if they aren't already set from the original PR):
+
+* `skip common compat check`
+* `allow provider dependency bump`
+
+Once approved, merge it - be careful to do it quickly so that no new PRs are merged for
+providers in the meantime; if they are, you'd miss them in the changelog.
+
+### Falling back to interactive breeze (incremental)
+
+If the skill is unavailable, the original incremental breeze command is still supported:
+
+```shell script
+breeze release-management prepare-provider-documentation --incremental-update
 ```
 
 In case you prepare provider documentation for just a few selected providers, you can run:
 
 ```shell script
-breeze release-management prepare-provider-documentation --answer yes [packages]
+breeze release-management prepare-provider-documentation --incremental-update [packages]
 ```
+
+Once you do it, the diff will be generated so you will see if there are any new changes added to
+changelogs. If there are, you need to add them to PR and classify the changes manually:
+
+* move the changes to the right sections in changelog
+* remove the "Please review" comments generated by the incremental update process
+* if needed adjust version of provider - in changelog and provider.yaml, in case the new
+  change changes classification of the upgrade (patchlevel/minor/major)
+* if a version was bumped, re-run [Update versions of dependent providers to the next
+  version](#update-versions-of-dependent-providers-to-the-next-version) (the interactive
+  `--incremental-update` command does not do it for you)
 
 In case you want to also release a pre-installed provider that is in ``not-ready`` state (i.e. when
 you want to release it before you switch their state to ``ready``), you need to pass
 ``--include-not-ready-providers`` flag to the command above.
 
-NOTE!! In case you prepare provider's documentation in a branch different than main, you need to manually
-specify the base branch via `--base-branch` parameter.
-For example if you try to build a `cncf.kubernetes` provider that is build from `provider-cncf-kubernetes/v4-4`
-branch should be prepared like this:
+> [!NOTE]
+> In case you prepare provider's documentation in a branch different than main, you need to manually
+> specify the base branch via `--base-branch` parameter.
+> For example if you try to build a `cncf.kubernetes` provider that is build from `provider-cncf-kubernetes/v4-4`
+> branch should be prepared like this:
+
 
 ```shell script
 breeze release-management prepare-provider-documentation --include-removed-providers \
@@ -301,7 +482,7 @@ breeze release-management prepare-provider-documentation --include-removed-provi
 
 ## (Optional) Apply template updates
 
-This step should only be executed if we want to change template files for the providers - i.e. change
+This step should only be executed if we want to change template files for the providers, i.e. change
 security information, commit/index/README content that is automatically generated.
 
 Regenerate the documentation templates by running the command with
@@ -316,16 +497,15 @@ Regenerate the documentation templates by running the command with
 breeze release-management prepare-provider-documentation --include-removed-providers --reapply-templates-only
 ```
 
-## Open PR with suggested version releases
-
-At this point you should have providers yaml files and changelog updated.
-You should go over the change log and place changes in their relevant section (breaking change, feature, bugs, etc...)
-Once finished you should raise a PR : Prepare docs for MM YYYY wave of Providers
-In the PR we will verify if we want to release a specific package or if the versions chosen are right.
-Only after PR is merged you should proceed to next steps.
-
-
 ## Build Provider distributions for SVN apache upload
+
+> [!NOTE]
+> Under the [delegated process](#delegating-release-duties-to-a-non-pmc-committer) this build step
+> begins the **PMC block**, together with signing, the `dist/dev` commit, and the PyPI RC upload.
+> Per [ASF release policy](https://www.apache.org/legal/release-policy.html#owned-controlled-hardware),
+> a PMC member should build the release themselves before signing it, rather than sign artifacts
+> built by someone else — otherwise they don't actually know what they're signing. So the PMC member
+> who signs also runs the build below, instead of the Delegate handing over pre-built artifacts.
 
 Those packages might get promoted  to "final" packages by just renaming the files, so internally they
 should keep the final version number without the rc suffix, even if they are rc1/rc2/... candidates.
@@ -335,37 +515,111 @@ the "dev/sign.sh" script (assuming you have the right PGP key set-up for signing
 generates corresponding .asc and .sha512 files for each file to sign.
 note: sign script uses `libassuan` and `gnupg` if you don't have them installed run:
 
+MacOS:
+
 ```shell script
 brew install libassuan
 brew install gnupg
 ```
 
+Linux (Debian/Ubuntu):
+
+```shell script
+sudo apt-get install libassuan-dev gnupg
+```
+
+### Verify your GPG signing key is ready
+
+Before you spend 10+ minutes building artifacts only to discover that signing
+fails, run these checks once:
+
+```shell script
+# 1. The apache.org key has a secret signing subkey available locally.
+gpg --list-secret-keys apache.org
+
+# 2. Signing actually works (exits 0, writes a .asc, verifies cleanly).
+echo test > /tmp/sign-check && \
+    gpg --yes --armor --local-user apache.org \
+        --output /tmp/sign-check.asc --detach-sig /tmp/sign-check && \
+    gpg --verify /tmp/sign-check.asc /tmp/sign-check && \
+    rm -f /tmp/sign-check /tmp/sign-check.asc && \
+    echo "GPG signing OK"
+
+# 3. The fingerprint of your signing (sub)key appears in the Airflow KEYS file.
+#    Without this, PMC verifiers cannot validate the release.
+FINGERPRINT=$(gpg --list-keys --with-colons apache.org | awk -F: '/^fpr:/ {print $10; exit}')
+curl -fsS https://dist.apache.org/repos/dist/release/airflow/KEYS | \
+    grep -q "${FINGERPRINT}" && echo "Key ${FINGERPRINT} is in KEYS" || \
+    echo "MISSING: add your key to KEYS before releasing"
+```
+
+If any of these fail, fix them before the build step. For first-time release
+managers, adding your key to the `KEYS` file is a separate PR against
+`https://dist.apache.org/repos/dist/release/airflow/` (SVN).
+
+`sign.sh` defaults to `SIGN_WITH=apache.org`. If your `apache.org` uid resolves
+to multiple keys (rare), set `SIGN_WITH` explicitly to the fingerprint of the
+key you want to use.
+
 ## Build and sign the source and convenience packages
+
+> [!NOTE]
+> Under the [delegated process](#delegating-release-duties-to-a-non-pmc-committer) this step
+> continues the **PMC block** started at [Build Provider distributions](#build-provider-distributions-for-svn-apache-upload)
+> — the same PMC member builds and signs with their own key (already in the project's `KEYS`
+> file), then stays on through the `dist/dev` commit and the PyPI RC upload without handing control
+> back.
 
 * Cleanup dist folder:
 
 ```shell script
+export RELEASE_DATE=$(date "+%Y-%m-%d%n")
 export AIRFLOW_REPO_ROOT=$(pwd -P)
 rm -rf ${AIRFLOW_REPO_ROOT}/dist/*
 ```
 
 * Release candidate packages:
 
+These instructions assume the standard remote naming convention
+(`upstream` → `apache/airflow`, `origin` → your fork — see
+[`contributing-docs/10_working_with_git.rst`](../contributing-docs/10_working_with_git.rst#git-remote-naming-conventions)).
+Set tags for the providers in the repo.
+
+
 ```shell script
-breeze release-management prepare-provider-distributions  --include-removed-providers --distribution-format both
+echo "Tagging with providers/${RELEASE_DATE}"
+git tag -s providers/${RELEASE_DATE} -m "Tag providers for ${RELEASE_DATE}" --force
+git push upstream providers/${RELEASE_DATE}
+breeze release-management prepare-provider-distributions  --include-removed-providers --distribution-format both --version-suffix ""
+breeze release-management prepare-tarball --tarball-type apache_airflow_providers --version "${RELEASE_DATE}"
 ```
+
+The `prepare-*-distributions` commands should produce the reproducible `.whl`, `.tar.gz` packages in the dist folder.
+The `prepare-tarball` command should produce reproducible `-source.tar.gz` tarball of sources.
+
+> [!IMPORTANT]
+> `--version-suffix ""` is passed deliberately, and the empty value is the point: the packages
+> committed to SVN carry the **final** version in their filename (`...-6.0.1-py3-none-any.whl`), with
+> no `rcN`. That is what lets a passing vote promote them with a plain `svn mv` instead of a rebuild.
+> The [PyPI upload below](#publish-the-regular-distributions-to-pypi-release-candidates) is the
+> opposite case - it builds a *separate* set of packages from the same sources with
+> `--version-suffix rcN`, so those filenames do carry the candidate number. Mixing the two up
+> produces an SVN wave that cannot be promoted.
 
 if you only build few packages, run:
 
 ```shell script
-breeze release-management prepare-provider-distributions  --include-removed-providers \
---distribution-format both PACKAGE PACKAGE ....
+echo "Tagging with providers/${RELEASE_DATE}"
+git tag -s providers/${RELEASE_DATE} -m "Tag providers for ${RELEASE_DATE}" --force
+git push upstream providers/${RELEASE_DATE}
+breeze release-management prepare-provider-distributions --include-removed-providers --distribution-format both --version-suffix "" PACKAGE PACKAGE ....
+breeze release-management prepare-tarball --tarball-type apache_airflow_providers --version "${RELEASE_DATE}"
+
 ```
 
 In case you want to also release a pre-installed provider that is in ``not-ready`` state (i.e. when
 you want to release it before you switch their state to ``ready``), you need to pass
 ``--include-not-ready-providers`` flag to the command above.
-
 
 * Sign all your packages
 
@@ -380,6 +634,13 @@ check above steps to install them.
 
 ## Commit the source packages to Apache SVN repo
 
+> [!NOTE]
+> Under the [delegated process](#delegating-release-duties-to-a-non-pmc-committer) this is the middle
+> of the **PMC block** — the same PMC member who signed commits the packages and signatures here and
+> continues to the PyPI RC upload. (`dist/dev` is committer-writable per [ASF Infra
+> policy](https://infra.apache.org/release-publishing), so a Delegate *could* do this step, but it is
+> kept with the PMC to avoid bouncing control mid-way.)
+
 * Push the artifacts to ASF dev dist repo
 
 ```shell script
@@ -388,35 +649,45 @@ cd ..
 [ -d asf-dist ] || svn checkout --depth=immediates https://dist.apache.org/repos/dist asf-dist
 svn update --set-depth=infinity asf-dist/dev/airflow
 
-# Create a new folder for the release.
+# Go to provider's folder in asf-dist
 cd asf-dist/dev/airflow/providers
 
-# Remove previously released providers
-svn rm *
+# Create a new folder for the release.
+mkdir -p ${RELEASE_DATE}
 
 # Move the artifacts to svn folder
-mv ${AIRFLOW_REPO_ROOT}/dist/* .
+mv ${AIRFLOW_REPO_ROOT}/dist/* "${RELEASE_DATE}"
 
 # Add and commit
-svn add *
-svn commit -m "Add artifacts for Airflow Providers $(date "+%Y-%m-%d%n")"
+svn add ${RELEASE_DATE}
+svn commit -m "Add artifacts for Airflow Providers ${RELEASE_DATE}"
 
-cd ${AIRFLOW_REPO_ROOT}
+cd "$AIRFLOW_REPO_ROOT"
 ```
 
-Verify that the files are available at
+Verify that the files are available in the ${RELEASE_DATE} folder under
 [providers](https://dist.apache.org/repos/dist/dev/airflow/providers/)
 
-You should see only providers that you are about to release.
-If you are seeing others there is an issue.
+You should see only providers that you are about to release.  If you are seeing others there is an issue.
 You can remove the redundant provider files manually with:
 
 ```shell script
+cd asf-dist/dev/airflow/providers
+cd ${RELEASE_DATE}
 svn rm file_name  // repeat that for every file
 svn commit -m "delete old providers"
+cd "$AIRFLOW_REPO_ROOT"
 ```
 
 ## Publish the Regular distributions to PyPI (release candidates)
+
+> [!NOTE]
+> Under the [delegated process](#delegating-release-duties-to-a-non-pmc-committer) this is the end of
+> the **PMC block** (build → sign → `dist/dev` → PyPI RC) — all uploads to the `apache-airflow-providers-*`
+> PyPI namespace, RC and final alike, go through the PMC's trusted publishing identity. When done,
+> the PMC member hands the generated `files/packages.txt` (the PyPI URLs) back to the Delegate, who
+> needs it for the vote email's completeness gate and body, and the Delegate resumes at [Push the RC
+> tags](#push-the-rc-tags).
 
 In order to publish release candidate to PyPI you just need to build and release packages.
 The packages should however contain the rcN suffix in the version file name but not internally in the package,
@@ -428,6 +699,7 @@ though they should be generated from the same sources.
 you should clean up dist folder before generating the packages, so you will only have the right packages there.
 
 ```shell script
+cd "$AIRFLOW_REPO_ROOT"
 rm -rf ${AIRFLOW_REPO_ROOT}/dist/*
 
 breeze release-management prepare-provider-distributions  --include-removed-providers \
@@ -444,13 +716,13 @@ breeze release-management prepare-provider-distributions \
 Alternatively, if you have set the environment variable: `DISTRIBUTIONS_LIST` above, just run the command:
 
 ```shell script
-breeze release-management prepare-provider-distributions
+breeze release-management prepare-provider-distributions --version-suffix rc1
 ```
 
 Or using `--distributions-list` argument:
 
 ```shell script
-breeze release-management prepare-provider-distributions --distributions-list PACKAGE1,PACKAGE2
+breeze release-management prepare-provider-distributions --distributions-list "PACKAGE1 PACKAGE2" --version-suffix rc1
 ```
 
 In case some packages already had rc1 suffix prepared and released, and they still need to be released, they
@@ -464,27 +736,80 @@ increased until the tag is not found.
 twine check ${AIRFLOW_REPO_ROOT}/dist/*
 ```
 
-* Upload the package to PyPi:
+* Configure a short-lived PyPI token for this upload only. **Until Trusted
+  Publishing is deployed for the Airflow provider distributions on PyPI**,
+  the recommended practice is:
+
+  1. Log in to https://pypi.org and create an API token right before the
+     upload step. **Scope caveat:** you would ideally create a
+     project-scoped token, but PyPI only allows project-scoped tokens for
+     projects you already own/maintain on that account. Most Airflow
+     release managers do not have per-project owner rights on every
+     provider being released, so in practice you will need to create an
+     account-wide ("all projects") token. That is acceptable **only if**
+     you treat it as single-use and delete it immediately after the upload
+     (step 4 below). Never keep an all-projects token on disk longer than
+     the upload itself.
+  2. Put it in `~/.pypirc` (or export as `TWINE_USERNAME=__token__`
+     `TWINE_PASSWORD=pypi-...`).
+  3. Run the upload (below).
+  4. **Immediately delete the token** from the PyPI web UI after the upload
+     completes. Do not keep long-lived release-manager tokens on disk.
+
+  This is a defence-in-depth practice: the RM machine becomes a one-time
+  release vehicle, not a persistent point of compromise.
+
+* Upload the packages to PyPI. Only the provider wheels and sdists are uploaded — the ASF
+  `-source.tar.gz` tarball and the `.asc`/`.sha512` files are SVN-only and must not go to PyPI.
+  The output is teed to a log and the PyPI URLs twine prints are extracted (sorted, de-duplicated)
+  into `files/packages.txt`. That file is what you paste into the vote email, and what the
+  completeness gate ("Prepare voting email" section below) and the PMC verifiers consume. Both files
+  land in `files/` (git-ignored), so they are never accidentally committed:
 
 ```shell script
-twine upload -r pypi ${AIRFLOW_REPO_ROOT}/dist/*
+mkdir -p "${AIRFLOW_REPO_ROOT}/files"
+# COLUMNS=200 stops rich (twine's printer) from wrapping long URLs when stdout is a pipe.
+COLUMNS=200 twine upload -r pypi ${AIRFLOW_REPO_ROOT}/dist/*.whl \
+  $(ls ${AIRFLOW_REPO_ROOT}/dist/*.tar.gz | grep -v -- '-source.tar.gz') 2>&1 \
+  | tee "${AIRFLOW_REPO_ROOT}/files/twine-upload.log"
+# Only trust packages.txt if the upload above succeeded (PIPESTATUS[0] == 0):
+grep -oE 'https://pypi\.org/project/[^[:space:]]+' "${AIRFLOW_REPO_ROOT}/files/twine-upload.log" \
+  | sort -u > "${AIRFLOW_REPO_ROOT}/files/packages.txt"
 ```
 
-* Confirm that the packages are available under the links printed and look good.
+* Confirm that the packages are available under the links printed and look good. The same links are
+  now saved, sorted, in `files/packages.txt` — you'll paste them into the vote email you send to
+  dev@airflow.apache.org.
 
 
-## Add tags in git
+## Push the RC tags
 
-Assume that your remote for apache repository is called `apache` you should now
-set tags for the providers in the repo.
+Earlier, we pushed the date tag, now that the RC(s) are ready we can push the tags for them.
 
-Sometimes in cases when there is a connectivity issue to GitHub, it might be possible that local tags get created
-and lead to annoying errors. The default behaviour would be to clean such local tags up.
-
-If you want to disable this behaviour, set the env **CLEAN_LOCAL_TAGS** to false.
+> [!IMPORTANT]
+> `tag-providers` tags whatever `HEAD` currently points at — it does not derive the commit from
+> `--release-date`. **Always check out the wave tag `providers/${RELEASE_DATE}` first**, so the
+> per-provider tags land on the exact commit the artifacts were built from. Anything that moved
+> `HEAD` between the build and this step — a `git pull`, a branch switch, a rebase, or concurrent
+> work by another terminal or agent sharing the same checkout — is otherwise tagged silently and
+> without any error. This has gone wrong in a real wave: all 44 tags were pushed at an unrelated
+> commit and had to be force-recreated afterwards. For the same reason, prefer running release
+> steps from a dedicated worktree rather than a checkout you are also working in.
 
 ```shell script
-breeze release-management tag-providers
+git checkout providers/${RELEASE_DATE}
+# Both SHAs printed here must be identical before you tag
+git rev-parse HEAD "providers/${RELEASE_DATE}^{commit}"
+breeze release-management tag-providers --release-date ${RELEASE_DATE}
+```
+
+You will see `You are in 'detached HEAD' state.` — that is expected, the wave tag is behind `main`.
+
+Verify the pushed tags point where you think they do. Plain `git ls-remote` prints the *tag object*
+SHA for annotated tags, which never matches the commit and looks alarming; dereference it with `^{}`:
+
+```shell script
+git ls-remote upstream "refs/tags/providers-<PROVIDER>/<VERSION>^{}"
 ```
 
 ## Prepare documentation in Staging
@@ -497,187 +822,170 @@ you need to run several workflows to publish the documentation. More details abo
 [Docs README](../docs/README.md) showing the architecture and workflows including manual workflows for
 emergency cases.
 
-We have two options publishing the documentation 1. Using breeze commands 2. Manually using GitHub Actions.:
-
-### Using breeze commands
-
-You can use the `breeze` command to publish the documentation.
-The command does the following:
+You usually use the `breeze` command to publish the documentation. The command does the following:
 
 1. Triggers [Publish Docs to S3](https://github.com/apache/airflow/actions/workflows/publish-docs-to-s3.yml).
 2. Triggers workflow in apache/airflow-site to refresh
 3. Triggers S3 to GitHub Sync
 
 ```shell script
-  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto> all-providers
+  breeze workflow-run publish-docs --ref providers/${RELEASE_DATE} --site-env staging all-providers
 ```
 
 Or if you just want to publish a few selected providers, you can run:
 
 ```shell script
-  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto> PACKAGE1 PACKAGE2 ..
+  breeze workflow-run publish-docs --ref providers/${RELEASE_DATE} --site-env staging PACKAGE1 PACKAGE2 ..
 ```
 
-The `--ref` parameter should be the tag of the release candidate you are publishing.
+> [!WARNING]
+> Make sure to NOT close the terminal while the command is running and to keep your computer from
+> sleep. This command will run several (3!) workflows from your terminal and this is important to keep
+> it running until completion.
 
-The `--site-env` parameter should be set to `staging` for pre-release versions or `live` for final releases. the default option is `auto`
-if the tag is rc it publishes to `staging` bucket, otherwise it publishes to `live` bucket.
+<!-- -->
 
-One of the interesting features of publishing this way is that you can also rebuild historical version of
-the documentation with patches applied to the documentation (if they can be applied cleanly).
+> [!NOTE]
+> If the workflow fails because a file it references or executes is missing or has incompatible
+> logic in the release tag (e.g. it was added or changed in `main` after the tag was cut), see
+> [Fixing released documentation](#fixing-released-documentation) in the Misc section below for
+> the `-docs` branch workaround.
 
-Yoy should specify the `--apply-commits` parameter with the list of commits you want to apply
-separated by commas and the workflow will apply those commits to the documentation before
-building it (don't forget to add --skip-write-to-stable-folder if you are publishing
-previous version of the distribution). Example:
-
-```shell script
-breeze workflow-run publish-docs --ref providers-apache-hive/9.0.0 --site-env live \
-  --apply-commits 4ae273cbedec66c87dc40218c7a94863390a380d --skip-write-to-stable-folder \
-  apache.hive
-```
-
-Other available parameters can be found with:
-
-```shell
-breeze workflow-run publish-docs --help
-```
-
-### Manually using GitHub Actions
-
-There are two steps to publish the documentation:
-
-1. Publish the documentation to the staging S3 bucket.
-
-The release manager publishes the documentation using GitHub Actions workflow
-[Publish Docs to S3](https://github.com/apache/airflow/actions/workflows/publish-docs-to-s3.yml).
-
-You should specify the final tag to use to build the docs and list of providers to publish
-(separated by spaces) or ``all-providers`` in case you want to publish all providers
-(optionally you can exclude some of those providers). You should use `staging` bucket to publish the release
-candidate documentation.
-
-After that step, the provider documentation should be available under the http://airflow.staged.apache.org URL
-(also present in the PyPI packages) but stable links and drop-down boxes should not be yet updated.
-
-2. Invalidate Fastly cache, update version drop-down and stable links with the new versions of the documentation.
-
-Before doing it - review the state of removed, suspended, new packages in
-[the docs index](https://github.com/apache/airflow-site/blob/master/landing-pages/site/content/en/docs/_index.md):
-Make sure to use `staging` branch to run the workflow.
-
-There are few special considerations when the list of provider is updated.
-
-- If you publish a new package, you must add it to the list of packages in the index.
-- If there are changes to suspension or removal status of a package, you must move it appropriate section.
-
-- In case you need to make any changes - create the commit and push changes and merge it to `staging` branch.
-  in [airflow-site](https://github.com/apache/airflow-site) repository.
-
-```shell script
-cd "${AIRFLOW_SITE_DIRECTORY}"
-branch="add-documentation-$(date "+%Y-%m-%d%n")"
-git checkout -b "${branch}"
-git add .
-git commit -m "Add documentation for packages - $(date "+%Y-%m-%d%n")"
-git push --set-upstream origin "${branch}"
-```
-
-Merging the PR with the index changes to `staging` will trigger site publishing.
-
-If you do not need to merge a PR, you should manually run the
-[Build docs](https://github.com/apache/airflow-site/actions/workflows/build.yml)
-workflow in `airflow-site` repository to refresh indexes and drop-downs.
-
-After that build from PR or workflow completes, the new version should be available in the drop-down
-list and stable links should be updated, also Fastly cache will be invalidated.
+There is also a manual way of running the workflows (see at the end of the document, this should normally
+not be needed unless there is some problem with workflow automation above)
 
 ## Prepare issue in GitHub to keep status of testing
 
-Create a GitHub issue with the content generated via manual execution of the command below. You will use
-link to that issue in the next step.
+To avoid GitHub's URL length limitations when creating massive issues, and to allow local modifications (such as carrying over completed checkmarks from previous waves), the recommended workflow is to **first generate the issue body locally into a file**, edit/update it as needed, and then publish it using the GitHub CLI.
+
+### 1. Generate the issue content locally to `files/provider_issue.md`
+
+Run the following command to fetch all relevant PRs and write the issue body to a local file:
 
 ```shell script
 cd "${AIRFLOW_REPO_ROOT}"
 
-breeze release-management generate-issue-content-providers --only-available-in-dist
+breeze release-management generate-issue-content-providers --only-available-in-dist \
+    --output-file files/provider_issue.md --answer no
 ```
 
-GitHub API uses rate limiting that is based on the public IP address of client if you do not authenticate
-with GitHub, so when you retrieve bigger number of PRs or when you are behind NAT and share your public
-IP address with many other Anonymous GitHub API users, issue retrieval will be halted and your API calls
-might slow down to a crawl, you will need then a GITHUB_TOKEN set as your
-environment variable or pass  the token as `--github-token` option in the script.
+By default, the command attempts to retrieve the GitHub token used to authenticate with `gh`. If you ran into GitHub rate limits, or do not have `gh` installed globally, you can generate a token in the GitHub web interface and pass it manually:
 
 ```shell script
-cd "${AIRFLOW_REPO_ROOT}"
-
-breeze release-management generate-issue-content-providers --only-available-in-dist --github-token TOKEN
+breeze release-management generate-issue-content-providers --only-available-in-dist \
+    --output-file files/provider_issue.md --answer no --github-token TOKEN
 ```
 
-or
+#### Filtering out noisy PRs (Optional)
+
+Sometimes, large PRs that took place across many providers (like preparation mechanisms or boilerplate changes) create redundant noise. You can specify a comma-separated list of PRs to exclude:
 
 ```shell script
-cd "${AIRFLOW_REPO_ROOT}"
-export GITHUB_TOKEN=TOKEN
-breeze release-management generate-issue-content-providers --only-available-in-dist
-```
-
-You can generate the token by following
-[this link](https://github.com/settings/tokens/new?description=Read%20issues&scopes=repo:status). Since it is easy to generate such token, by following the link, it is recommended to
-generate a new token for each release and delete it once you've generated the issue.
-
-If you see in the output that some of the PRs are just "noise" (i.e. there is no need to verify them
-as they are misc/documentation kind of changes that have no impact on the actual installation of
-the provider or the code of the provider, can optionally pass list of PR to be excluded from
-the issue with `--excluded-pr-list`. This might limit the scope of verification. Some providers
-might disappear from the list and list of authors that will be pinged in the generated issue.
-
-You can repeat that and regenerate the issue content until you are happy with the generated issue.
-
-```shell script
-cd "${AIRFLOW_REPO_ROOT}"
-
-breeze release-management generate-issue-content-providers --only-available-in-dist --github-token TOKEN \
+breeze release-management generate-issue-content-providers --only-available-in-dist \
+    --output-file files/provider_issue.md --answer no --github-token TOKEN \
     --excluded-pr-list PR_NUMBER1,PR_NUMBER2
 ```
 
-It's also OK to manually modify the content of such generated issue before actually creating the
-issue. There is a comment generated with NOTE TO RELEASE MANAGER about this in the issue content.
-Hit Preview button on "create issue" screen before creating it to verify how it will look like
-for the contributors.
+This local file (`files/provider_issue.md`) is now your working source of truth. You can preview or edit it directly before posting.
 
-By default, the command will output a clickable link to create the issue from terminal if you don't want this option use --no-include-browser-link flag
+### 2. Always carry over checkmarks from the previous wave's testing issue
+
+Whenever a provider in this wave is a **re-cut** of one that already appeared in
+an earlier wave's testing issue — providers held back from the previous wave and
+released again at `rc2`/`rc3`, or any provider whose previous RC was cancelled —
+the PRs that were already ticked `[x]` (verified) in that earlier issue must stay
+ticked in the new one. Testers should not be asked to re-verify unchanged code;
+only the genuinely new commits in the re-cut are left unchecked. **Do this every
+time** before creating the issue.
+
+> [!IMPORTANT]
+> **Prerequisite**: You must have generated the local `files/provider_issue.md` file using the command in Step 1 before running the `sed` commands below.
+
+Extract the checked PRs from the previous issue and carry them over to the
+generated body. Note that the `sed` command behaves differently on macOS and GNU/Linux:
 
 ```shell script
-cd "${AIRFLOW_REPO_ROOT}"
+# PREV_ISSUE = the previous wave's testing-status issue number
+gh issue view PREV_ISSUE --repo apache/airflow --json body -q .body > /tmp/prev_issue.md
+checked=$(grep -E '^\s*- \[x\]' /tmp/prev_issue.md | grep -oE '#[0-9]+' | tr -d '#' | sort -u | paste -sd '|' -)
 
-breeze release-management generate-issue-content-providers --only-available-in-dist --no-include-browser-link --github-token TOKEN \
-    --excluded-pr-list PR_NUMBER1,PR_NUMBER2
+# On macOS:
+sed -i '' -E "s/- \[ \] (.*\(#(${checked})\))/- [x] \1/" files/provider_issue.md
+
+# On GNU/Linux:
+sed -i -E "s/- \[ \] (.*\(#(${checked})\))/- [x] \1/" files/provider_issue.md
 ```
 
+Review the resulting `[x]` lines in `files/provider_issue.md` (PRs only present in the new wave stay
+unchecked). If the issue was already created, apply the same local edit and then edit the online issue as described in Step 3.
+
+### 3. Create the issue on GitHub
+
+Once you are satisfied with `files/provider_issue.md` (and any checkmarks have been carried over), create the issue from the file:
+
+```shell script
+gh issue create --repo apache/airflow \
+    --title "Status of testing Providers that were prepared on <MONTH DD, YYYY>" \
+    --body-file files/provider_issue.md --label "testing status,kind:meta"
+```
+
+If the issue has already been created on GitHub and you only need to update its description with the carried-over checkmarks:
+
+```shell script
+gh issue edit <ISSUE_NUMBER> --repo apache/airflow --body-file files/provider_issue.md
+```
 
 ## Prepare voting email for Providers release candidate
 
 Make sure the packages are in https://dist.apache.org/repos/dist/dev/airflow/providers/
 
+* Before sending the vote email, gate on the same completeness check the PMC verifiers run, so a
+  missing artifact (e.g. the `-source.tar.gz` tarball) fails here instead of in the vote thread.
+  `files/packages.txt` was already generated by the PyPI upload step ("Publish the Regular
+  distributions to PyPI" above); run the check against it:
+
+```shell script
+cd "$AIRFLOW_REPO_ROOT"
+breeze release-management check-release-files providers --release-date "${RELEASE_DATE}" \
+  --packages-file ./files/packages.txt \
+  --path-to-airflow-svn "$(cd ../asf-dist/dev/airflow && pwd -P)"
+```
+
+  It exits non-zero and lists every missing file (including `.asc`/`.sha512` variants) if anything is
+  absent. Only proceed to the vote once it prints `All expected files are present!`.
+
 Send out a vote to the dev@airflow.apache.org mailing list. Here you can prepare text of the
 email.
+
+> [!NOTE]
+> If you are a non-PMC Delegate running this step under the [delegated
+> process](#delegating-release-duties-to-a-non-pmc-committer), set `IS_RM_VOTE_BINDING=false` below
+> — your vote is not binding under ASF policy. Ask a PMC member to reply to the vote thread with
+> their own explicit `+1 (binding)` as soon as they've verified the release; the vote is not valid
+> until at least 3 such binding replies are posted, regardless of who sent the `[VOTE]` email.
 
 ```shell script
 export VOTE_DURATION_IN_HOURS=72
 export IS_SHORTEN_VOTE=$([ $VOTE_DURATION_IN_HOURS -ge 72 ] && echo "false" || echo "true")
 export SHORTEN_VOTE_TEXT="This is a shortened ($VOTE_DURATION_IN_HOURS hours vote) as agreed by policy set it https://lists.apache.org/thread/cv194w1fqqykrhswhmm54zy9gnnv6kgm"
-export VOTE_END_TIME=$(LANG=en_US.UTF-8 TZ=UTC date -v+"${VOTE_DURATION_IN_HOURS}"H "+%B %d, %Y %H:%M %p")
-export RELEASE_MANAGER_NAME="Elad Kalif"
-export GITHUB_ISSUE_LINK="LINK_TO_GITHUB_ISSUE"
+if [[ "${OSTYPE}" == *darwin* ]]; then
+  export VOTE_END_TIME=$(date -u -v "+${VOTE_DURATION_IN_HOURS}H" -v "+10M" +'%Y-%m-%d %H:%M')
+else  # Linux
+  export VOTE_END_TIME=$(date --utc -d "now + $VOTE_DURATION_IN_HOURS hours + 10 minutes" +'%Y-%m-%d %H:%M')
+fi
+export RELEASE_MANAGER_NAME="TODO:RELEASE_MANAGER_NAME"
+export GITHUB_ISSUE_LINK="TODO:ISSUE_LINK"
+# true if the PMC itself is running the vote, false for a non-PMC Delegate (see note above)
+export IS_RM_VOTE_BINDING=true
+export RM_VOTE_BINDING_TEXT=$([ "$IS_RM_VOTE_BINDING" = "true" ] && echo "binding" || echo "non-binding")
+export NON_PMC_RM_TEXT=$([ "$IS_RM_VOTE_BINDING" = "true" ] && echo "" || echo "I am a non-PMC committer running this release under Airflow's delegated release process; a PMC member will cast the binding votes needed to pass it.")
 ```
 
 subject:
 
 ```shell script
 cat <<EOF
-[VOTE] Airflow Providers prepared on $(LANG=en_US.UTF-8 TZ=UTC date "+%B %d, %Y")
+$([ $VOTE_DURATION_IN_HOURS -ge 72 ] && echo "[VOTE]" || echo "[ACCELERATED VOTE]") Airflow Providers, release preparation date ${RELEASE_DATE}
 EOF
 ```
 
@@ -685,22 +993,23 @@ EOF
 cat <<EOF
 Hey all,
 
-I have just cut the new wave Airflow Providers packages. This email is calling a vote on the release,
+I have just cut the new wave Airflow Providers packages with release preparation date ${RELEASE_DATE}. This email is calling a vote on the release,
 which will last for $VOTE_DURATION_IN_HOURS hours - which means that it will end on $VOTE_END_TIME UTC and until 3 binding +1 votes have been received.
 $([ "$IS_SHORTEN_VOTE" = "true" ] && echo "${SHORTEN_VOTE_TEXT}" || echo "")
 
-Consider this my (binding) +1.
+Consider this my ($RM_VOTE_BINDING_TEXT) +1.
+$([ -n "$NON_PMC_RM_TEXT" ] && echo "$NON_PMC_RM_TEXT" || echo "")
 
 <ADD ANY HIGH-LEVEL DESCRIPTION OF THE CHANGES HERE!>
 
 Airflow Providers are available at:
-https://dist.apache.org/repos/dist/dev/airflow/providers/
+https://dist.apache.org/repos/dist/dev/airflow/providers/${RELEASE_DATE}
 
-*apache-airflow-providers-<PROVIDER>-*.tar.gz* are the binary
- Python "sdist" release - they are also official "sources" for the Provider distributions.
+*apache-airflow-providers-${RELEASE_DATE}-source.tar.gz* is the full source tarball of airflow repo - snapshot taken at the moment of provider's release.
 
-*apache_airflow_providers_<PROVIDER>-*.whl are the binary
- Python "wheel" release.
+*apache-airflow-providers-<PROVIDER>-*.tar.gz* are the convenience python "sdist" distributions that we publish in PyPI
+
+*apache_airflow_providers_<PROVIDER>-*.whl are the convenience Python "wheel" distributions that we publish in PyPI.
 
 The test procedure for PMC members is described in
 https://github.com/apache/airflow/blob/main/dev/README_RELEASE_PROVIDERS.md#verify-the-release-candidate-by-pmc-members
@@ -723,7 +1032,7 @@ encouraged to test the release and vote with "(non-binding)".
 
 Please note that the version number excludes the 'rcX' string.
 This will allow us to rename the artifact without modifying
-the artifact checksums when we actually release.
+the artifact checksums when we actually release it.
 
 The status of testing the providers by the community is kept here:
 $GITHUB_ISSUE_LINK
@@ -751,7 +1060,21 @@ Please modify the message above accordingly to clearly exclude those packages.
 
 Note, For RC2/3 you may refer to shorten vote period as agreed in mailing list [thread](https://lists.apache.org/thread/cv194w1fqqykrhswhmm54zy9gnnv6kgm).
 
+# Release verification
+
 ## Verify the release candidate by PMC members
+
+Set expected release tag (the same as announced in the vote email):
+
+```shell script
+export RELEASE_DATE=2025-11-03
+````
+
+Go to the directory where you have airflow checked out and set AIRFLOW_REPO_ROOT variable
+
+```shell
+export AIRFLOW_REPO_ROOT=$(pwd -P)
+```
 
 ### SVN check
 
@@ -774,29 +1097,36 @@ svn update --set-depth=infinity asf-dist/dev/airflow
 Or update it if you already checked it out:
 
 ```shell script
-cd asf-dist/dev/airflow
-svn update .
+svn update --set-depth=infinity asf-dist/dev/airflow
 ```
 
-Set an environment variable: PATH_TO_SVN to the root of folder where you have providers
 
-``` shell
-cd asf-dist/dev/airflow
-export PATH_TO_SVN=${pwd -P)
-```
-
-Optionally you can use the [`check_files.py`](https://github.com/apache/airflow/blob/main/dev/check_files.py)
-script to verify that all expected files are present in SVN. This script will produce a `Dockerfile.pmc` which
-may help with verifying installation of the packages.
-
-Once you have cloned/updated the SVN repository, copy the pypi URLs shared in the email to a file called `packages.txt` in the $AIRFLOW_REPO_ROOT/dev
-directory and cd into it.
+Set environment variables: PATH_TO_AIRFLOW_SVN to the root of folder where you have providers and RELEASE_DATE to
+the release date you are verifying.
 
 ```shell script
-uv run check_files.py providers -p ${PATH_TO_SVN}
+cd asf-dist/dev/airflow
+export PATH_TO_AIRFLOW_SVN=$(pwd -P)
 ```
 
-After the above script completes you can build `Dockerfile.pmc` to trigger an installation of each provider
+Verify that all expected files are present in SVN. You can do this manually by inspecting the
+directory listing against the file counts described above, but the recommended way is to run the
+`breeze release-management check-release-files` command below, which checks completeness for you
+(it is the same gate the release manager runs before sending the vote email). As a bonus it produces
+a `Dockerfile.pmc` which helps with verifying installation of the packages.
+
+Once you have cloned/updated the SVN repository, copy the PyPi URLs shared
+in the email to a file called `packages.txt` in the `$AIRFLOW_REPO_ROOT/files`
+directory (git-ignored, so it won't be accidentally committed).
+
+```shell script
+cd "$AIRFLOW_REPO_ROOT"
+mkdir -p files
+# Copy packages.txt extracted from the mail sent by the release manager here
+breeze release-management check-release-files providers --release-date "${RELEASE_DATE}" --packages-file ./files/packages.txt --path-to-airflow-svn "${PATH_TO_AIRFLOW_SVN}"
+```
+
+After the above command completes you can build `Dockerfile.pmc` to trigger an installation of each provider
 package and verify the correct versions are installed:
 
 ```shell script
@@ -817,19 +1147,17 @@ it means that the build has a verified provenance.
 
 How to verify it:
 
-1) Change directory where your airflow sources are checked out
+1) Change directory to where your airflow sources are checked out:
 
 ```shell
-cd "${AIRFLOW_REPO_ROOT}"
+cd "$AIRFLOW_REPO_ROOT"
 ```
 
-2) Check out one of the tags for the release. Pick one of the provider-specific tags that are part
-   of the release wave. Assume your remote to apache repo is `apache` - then the right set of
-   commands are:
+2) Check out the ``providers/YYYY-MM-DD`` tag:
 
 ```shell
-git fetch apache --tags
-git checkout providers-amazon/9.1.0rc1
+git fetch upstream --tags
+git checkout providers/${RELEASE_DATE}
 ```
 
 3) Remove all the packages you have in dist folder
@@ -841,14 +1169,14 @@ rm -rf dist/*
 4) Build the packages using checked out sources
 
 ```shell
-breeze release-management prepare-provider-distributions --include-removed-providers --distribution-format both
+breeze release-management prepare-provider-distributions --include-removed-providers --distribution-format both --version-suffix ""
+breeze release-management prepare-tarball --tarball-type apache_airflow_providers --version "${RELEASE_DATE}"
 ```
 
 5) Switch to the folder where you checked out the SVN dev files
 
 ```shell
-cd ${PATH_TO_SVN}
-cd providers
+cd ${PATH_TO_AIRFLOW_SVN}/providers/${RELEASE_DATE}
 ```
 
 6) Compare the packages in SVN to the ones you just built
@@ -856,7 +1184,7 @@ cd providers
 ```shell
 for i in *.tar.gz *.whl
 do
-   echo -n "$i:"; diff $i ${AIRFLOW_REPO_ROOT}/dist/$i && echo "No diff found"
+  echo -n "$i:"; diff $i ${AIRFLOW_REPO_ROOT}/dist/$i && echo "No diff found"
 done
 ```
 
@@ -903,49 +1231,65 @@ apache_airflow_providers_snowflake-5.1.2-py3-none-any.whl:No diff found
 apache_airflow_providers_trino-5.4.1-py3-none-any.whl:No diff found
 ```
 
-### Licences check
+### Licence check
 
 This can be done with the Apache RAT tool.
 
-* Download the latest jar from https://creadur.apache.org/rat/download_rat.cgi (unpack the binary,
-  the jar is inside)
-* Unpack the release source archive (the `<package + version>.tar.gz` file) to a folder
-* Enter the sources folder run the check
+Download the latest jar from https://creadur.apache.org/rat/download_rat.cgi (unpack the binary, the jar is inside)
+
+You can run this command to do it for you (including checksum verification for your own security):
 
 ```shell script
-# Get rat if you do not have it
-if command -v wget >/dev/null 2>&1; then
-    echo "Using wget to download Apache RAT..."
-    wget -qO- https://dlcdn.apache.org//creadur/apache-rat-0.16.1/apache-rat-0.16.1-bin.tar.gz | gunzip | tar -C /tmp -xvf -
-else
-    echo "ERROR: wget not found. Install with: brew install wget (macOS) or apt-get install wget (Linux)"
-    exit 1
-fi
-# Cleanup old folders (if needed)
-find . -type d -maxdepth 1 | grep -v "^.$"> /tmp/files.txt
-cat /tmp/files.txt | xargs rm -rf
-# Unpack all providers
-for i in *.tar.gz
-do
-   tar -xvzf $i
-done
-# Generate list of unpacked providers
-find . -type d -maxdepth 1 | grep -v "^.$"> /tmp/files.txt
-# Check licences
-for d in $(cat /tmp/files.txt)
-do
-  pushd $d
-  java -jar /tmp/apache-rat-0.16.1/apache-rat-0.16.1.jar -E ${AIRFLOW_REPO_ROOT}/.rat-excludes -d .  2>/dev/null | grep Unknown
-  popd >/dev/null
-done
+# Checksum value is taken from https://downloads.apache.org/creadur/apache-rat-0.18/apache-rat-0.18-bin.tar.gz.sha512
+wget -q https://archive.apache.org/dist/creadur/apache-rat-0.18/apache-rat-0.18-bin.tar.gz -O /tmp/apache-rat-0.18-bin.tar.gz
+echo "315b16536526838237c42b5e6b613d29adc77e25a6e44a866b2b7f8b162e03d3629d49c9faea86ceb864a36b2c42838b8ce43d6f2db544e961f2259e242748f4  /tmp/apache-rat-0.18-bin.tar.gz" | sha512sum -c -
+tar -xzf /tmp/apache-rat-0.18-bin.tar.gz -C /tmp
 ```
 
-You should see only '0 Unknown licences"
-
-Cleanup:
+Unpack the release source archive (the `<package + version>-source.tar.gz` file) to a folder
 
 ```shell script
-cat /tmp/files.txt | xargs rm -rf
+rm -rf /tmp/apache-airflow-providers-src && mkdir -p /tmp/apache-airflow-providers-src && tar -xzf ${PATH_TO_AIRFLOW_SVN}/providers/${RELEASE_DATE}/apache_airflow_providers-*-source.tar.gz --strip-components 1 -C /tmp/apache-airflow-providers-src
+```
+
+Run the check:
+
+```shell script
+cp ${AIRFLOW_REPO_ROOT}/.rat-excludes /tmp/apache-airflow-providers-src/.rat-excludes
+java -jar /tmp/apache-rat-0.18/apache-rat-0.18.jar --input-exclude-file /tmp/apache-airflow-providers-src/.rat-excludes /tmp/apache-airflow-providers-src/ | grep -E "! |INFO: "
+```
+
+You should see no files reported as Unknown or with wrong licence and summary of the check similar to:
+
+```
+INFO: Apache Creadur RAT 0.18 (Apache Software Foundation)
+INFO: Excluding patterns: .git-blame-ignore-revs, .github/*, .git ...
+INFO: Excluding MISC collection.
+INFO: Excluding HIDDEN_DIR collection.
+SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+INFO: RAT summary:
+INFO:   Approved:  15615
+INFO:   Archives:  2
+INFO:   Binaries:  813
+INFO:   Document types:  5
+INFO:   Ignored:  2392
+INFO:   License categories:  2
+INFO:   License names:  2
+INFO:   Notices:  216
+INFO:   Standards:  15609
+INFO:   Unapproved:  0
+INFO:   Unknown:  0
+```
+
+There should be no files reported as Unknown or Unapproved. The files that are unknown or unapproved should be shown with a line starting with `!`.
+
+For example:
+
+```
+! Unapproved:         1    A count of unapproved licenses.
+! /CODE_OF_CONDUCT.md
 ```
 
 ### Signature check
@@ -958,6 +1302,7 @@ Download the KEYS file from the above link and save it locally.
 You can import the whole KEYS file into gpg by running the following command:
 
 ```shell script
+wget https://dist.apache.org/repos/dist/release/airflow/KEYS
 gpg --import KEYS
 ```
 
@@ -981,6 +1326,10 @@ gpg --keyserver keys.gnupg.net --receive-keys CDE15C6E4D3A8EC4ECF4BA4B6674E08AD7
 
 Once you have the keys, the signatures can be verified by running this:
 
+```shell
+cd ${PATH_TO_AIRFLOW_SVN}/providers/${RELEASE_DATE}
+```
+
 ```shell script
 for i in *.asc
 do
@@ -997,32 +1346,38 @@ this is a valid key already.  To suppress the warning you may edit the key's tru
 by running `gpg --edit-key <key id> trust` and entering `5` to assign trust level `ultimate`.
 
 ```
-Checking apache-airflow-2.0.2rc4.tar.gz.asc
-gpg: assuming signed data in 'apache-airflow-2.0.2rc4.tar.gz'
-gpg: Signature made sob, 22 sie 2020, 20:28:28 CEST
-gpg:                using RSA key 12717556040EEF2EEAF1B9C275FCCD0A25FA0E4B
-gpg: Good signature from "Kaxil Naik <kaxilnaik@gmail.com>" [unknown]
-gpg: WARNING: This key is not certified with a trusted signature!
-gpg:          There is no indication that the signature belongs to the owner.
-Primary key fingerprint: 1271 7556 040E EF2E EAF1  B9C2 75FC CD0A 25FA 0E4B
+Checking apache_airflow_providers-2025-11-03-source.tar.gz.asc
 
-Checking apache_airflow-2.0.2rc4-py2.py3-none-any.whl.asc
-gpg: assuming signed data in 'apache_airflow-2.0.2rc4-py2.py3-none-any.whl'
-gpg: Signature made sob, 22 sie 2020, 20:28:31 CEST
-gpg:                using RSA key 12717556040EEF2EEAF1B9C275FCCD0A25FA0E4B
-gpg: Good signature from "Kaxil Naik <kaxilnaik@gmail.com>" [unknown]
-gpg: WARNING: This key is not certified with a trusted signature!
+gpg: assuming signed data in 'apache_airflow_providers-2025-11-03-source.tar.gz'
+gpg: Signature made Mon 03 Nov 2025 09:30:25 CET
+gpg:                using EDDSA key 0B63993D3B84EE3E2EBB984B2A454DAA1E6A437B
+gpg:                issuer "eladkal@apache.org"
+gpg: Good signature from "Elad Kalif <eladkal@apache.org>" [unknown]
+gpg: WARNING: The key's User ID is not certified with a trusted signature!
 gpg:          There is no indication that the signature belongs to the owner.
-Primary key fingerprint: 1271 7556 040E EF2E EAF1  B9C2 75FC CD0A 25FA 0E4B
+Primary key fingerprint: 0B63 993D 3B84 EE3E 2EBB  984B 2A45 4DAA 1E6A 437B
+Checking apache_airflow_providers_edge3-1.4.1-py3-none-any.whl.asc
 
-Checking apache-airflow-2.0.2rc4-source.tar.gz.asc
-gpg: assuming signed data in 'apache-airflow-2.0.2rc4-source.tar.gz'
-gpg: Signature made sob, 22 sie 2020, 20:28:25 CEST
-gpg:                using RSA key 12717556040EEF2EEAF1B9C275FCCD0A25FA0E4B
-gpg: Good signature from "Kaxil Naik <kaxilnaik@gmail.com>" [unknown]
-gpg: WARNING: This key is not certified with a trusted signature!
+gpg: assuming signed data in 'apache_airflow_providers_edge3-1.4.1-py3-none-any.whl'
+gpg: Signature made Mon 03 Nov 2025 09:30:24 CET
+gpg:                using EDDSA key 0B63993D3B84EE3E2EBB984B2A454DAA1E6A437B
+gpg:                issuer "eladkal@apache.org"
+gpg: Good signature from "Elad Kalif <eladkal@apache.org>" [unknown]
+gpg: WARNING: The key's User ID is not certified with a trusted signature!
 gpg:          There is no indication that the signature belongs to the owner.
-Primary key fingerprint: 1271 7556 040E EF2E EAF1  B9C2 75FC CD0A 25FA 0E4B
+Primary key fingerprint: 0B63 993D 3B84 EE3E 2EBB  984B 2A45 4DAA 1E6A 437B
+Checking apache_airflow_providers_edge3-1.4.1.tar.gz.asc
+
+gpg: assuming signed data in 'apache_airflow_providers_edge3-1.4.1.tar.gz'
+gpg: Signature made Mon 03 Nov 2025 09:30:24 CET
+gpg:                using EDDSA key 0B63993D3B84EE3E2EBB984B2A454DAA1E6A437B
+gpg:                issuer "eladkal@apache.org"
+gpg: Good signature from "Elad Kalif <eladkal@apache.org>" [unknown]
+gpg: WARNING: The key's User ID is not certified with a trusted signature!
+gpg:          There is no indication that the signature belongs to the owner.
+Primary key fingerprint: 0B63 993D 3B84 EE3E 2EBB  984B 2A45 4DAA 1E6A 437B
+⌁0% [jarek:~/code/asf-dist/dev/airflow/providers] dist ‡ for i in *.sha512
+
 ```
 
 ### SHA512 check
@@ -1039,8 +1394,10 @@ done
 You should get output similar to:
 
 ```
-Checking apache-airflow-providers-google-1.0.0rc1.tar.gz.sha512
-Checking apache_airflow-providers-google-1.0.0rc1-py3-none-any.whl.sha512
+Checking apache_airflow_providers-2025-11-03-source.tar.gz.sha512
+Checking apache_airflow_providers_edge3-1.4.1-py3-none-any.whl.sha512
+Checking apache_airflow_providers_edge3-1.4.1.tar.gz.sha512
+...
 ```
 
 ## Verify the release candidate by Contributors
@@ -1057,9 +1414,11 @@ described in
 But you can use any of the installation methods you prefer (you can even install it via the binary wheels
 downloaded from the SVN).
 
+For values for <provider>==<VERSION>rc<X>, refer to the PR/email from Release Manager. For example, in order to test keycloak provider, [PR-60496](https://github.com/apache/airflow/issues/60496) lists ""Provider keycloak: 0.5.0rc1". Hence use "apache-airflow-providers-keycloak==0.5.0rc1" in below steps.
+
 ### Installing in your local virtualenv
 
-You have to make sure you have Airflow 2* installed in your PIP virtualenv
+You have to make sure you have Airflow 3* installed in your PIP virtualenv
 (the version you want to install providers with).
 
 ```shell
@@ -1068,8 +1427,10 @@ pip install apache-airflow-providers-<provider>==<VERSION>rc<X>
 
 ### Installing with Breeze
 
+You can use any Airflow 3.X.Y version, like 3.2.0, to install specific version for testing, using breeze.
+
 ```shell
-breeze start-airflow --use-airflow-version 2.10.3 --python 3.10 --backend postgres \
+breeze start-airflow --use-airflow-version 3.1.3 --python 3.10 --backend postgres \
     --load-example-dags --load-default-connections
 ```
 
@@ -1079,19 +1440,22 @@ After you are in Breeze:
 pip install apache-airflow-providers-<provider>==<VERSION>rc<X>
 ```
 
-NOTE! You should `Ctrl-C` and restart the connections to restart airflow components and make sure new
-Provider distributions is used.
+NOTE! After installing the provider package, restart the Airflow components so the new provider is loaded.
+If you started Breeze with `breeze start-airflow`, in the terminal multiplexer (mprocs or tmux)
+use the keyboard shortcuts to **stop** and then **start** each managed component:
+**scheduler**, **api_server**, **triggerer**, and **dag_processor**.
 
 ### Building your own docker image
 
 If you prefer to build your own image, you can also use the official image and PyPI packages to test
 Provider distributions. This is especially helpful when you want to test integrations, but you need to install
-additional tools. Below is an example Dockerfile, which installs providers for Google/
+additional tools. Below is an example Dockerfile, which installs providers for Google. Please note, these
+version numbers are arbitrary. You'll need to substitute the proper version numbers when running this
+yourself.
 
 ```dockerfile
-FROM apache/airflow:2.2.3
-
-RUN pip install  --user apache-airflow-providers-google==2.2.2.rc1
+FROM apache/airflow:3.1.3
+RUN pip install  --user apache-airflow-providers-google==18.1.0.rc1
 
 USER ${AIRFLOW_UID}
 ```
@@ -1117,19 +1481,21 @@ that the Airflow works as you expected.
 
 # Publish release
 
-Replace the DAYS_BACK with how many days ago you prepared the release.
-Normally it's 3 but in case it's longer change it. The output should match the prepare date.
-
-```
-export DAYS_BACK=3
-export RELEASE_DATE=$(LANG=en_US.UTF-8 date -u -v-${DAYS_BACK}d "+%B %d, %Y")
-export RELEASE_MANAGER_NAME="Elad Kalif"
+```shell script
+export RELEASE_DATE=2025-11-14
+export RELEASE_MANAGER_NAME="RELEASE_MANAGER_NAME"
 echo "prepare release date is ${RELEASE_DATE}"
 ```
 
 ## Summarize the voting for the Apache Airflow release
 
 Once the vote has been passed, you will need to send a result vote to dev@airflow.apache.org:
+
+> [!NOTE]
+> A Delegate may send this `[RESULT][VOTE]` email under the [delegated
+> process](#delegating-release-duties-to-a-non-pmc-committer), but only after confirming at least 3
+> binding `+1` votes from PMC members are already present in the vote thread — the email reports a
+> decision the PMC has already made, it does not make that decision.
 
 In both subject and message update DATE OF RELEASE, FIRST/LAST NAMES and numbers). In case
 some providers were  excluded, explain why they were excluded and what is the plan for them
@@ -1147,15 +1513,18 @@ the next RC candidates:
 Email subject:
 
 ```
-[RESULT][VOTE] Airflow Providers - release of ${PREPARE_RELEASE_DATE}
+cat <<EOF
+[RESULT][VOTE] Airflow Providers - release preparation date ${RELEASE_DATE}
+EOF
 ```
 
 Email content:
 
 ```
+cat <<EOF
 Hello,
 
-Apache Airflow Providers prepared on ${PREPARE_RELEASE_DATE} have been accepted.
+Apache Airflow Providers prepared on ${RELEASE_DATE} have been accepted.
 
 3 "+1" binding votes received:
 - FIRST LAST NAME (binding)
@@ -1176,10 +1545,18 @@ Vote thread: https://lists.apache.org/thread/cs6mcvpn2lk9w2p4oz43t20z3fg5nl7l
 I'll continue with the release process, and the release announcement will follow shortly.
 
 Cheers,
-<your name>
+${RELEASE_MANAGER_NAME}
+EOF
 ```
 
 ## Publish release to SVN
+
+> [!NOTE]
+> Under the [delegated process](#delegating-release-duties-to-a-non-pmc-committer) this step is
+> owned by the **PMC member** — moving artifacts into `dist/release` requires PMC write karma that a
+> non-PMC Delegate does not have (see the ownership table). The Delegate should have already
+> confirmed the vote passed and, if helpful, staged the exact `svn cp`/`clean-old-provider-artifacts`
+> commands below for the PMC member to run.
 
 The best way of doing this is to svn cp  between the two repos (this avoids having to upload the binaries
 again, and gives a clearer history in the svn commit logs.
@@ -1195,7 +1572,8 @@ export AIRFLOW_REPO_ROOT="$(pwd -P)"
 # Go the folder where you have checked out the release repo from SVN
 # Make sure this is direct directory and a symbolic link
 # Otherwise 'svn mv' errors out if it is with "E200033: Another process is blocking the working copy database
-cd "<ROOT_WHERE_YOUR_ASF_DIST_IS_CREATED>"
+# Assuming that your `asf-dist` is checked out in the same folder as airflow:
+cd ..
 
 export ASF_DIST_PARENT="$(pwd -P)"
 # make sure physical path is used, in case original directory is symbolically linked
@@ -1206,7 +1584,7 @@ cd "${ASF_DIST_PARENT}"
 # Update to latest version
 svn update --set-depth=infinity asf-dist/dev/airflow asf-dist/release/airflow
 
-SOURCE_DIR="${ASF_DIST_PARENT}/asf-dist/dev/airflow/providers"
+SOURCE_DIR="${ASF_DIST_PARENT}/asf-dist/dev/airflow/providers/${RELEASE_DATE}"
 
 # If some packages have been excluded, remove them now
 # Check the packages are there (replace <provider> with the name of the provider that you remove)
@@ -1214,11 +1592,8 @@ ls ${SOURCE_DIR}/*<provider>*
 # Remove them
 svn rm ${SOURCE_DIR}/*<provider>*
 
-# Create providers folder if it does not exist
-# All latest releases are kept in this one folder without version sub-folder
-cd "${ASF_DIST_PARENT}/asf-dist/release/airflow"
-mkdir -pv providers
-cd providers
+# All latest releases are kept in this providers folder without version sub-folder
+cd "${ASF_DIST_PARENT}/asf-dist/release/airflow/providers"
 
 # Copy your providers with the target name to dist directory and to SVN
 rm -rf "${AIRFLOW_REPO_ROOT}"/dist/*
@@ -1239,11 +1614,12 @@ breeze release-management clean-old-provider-artifacts --directory $(pwd -P)
 # You need to do go to the asf-dist directory in order to commit both dev and release together
 cd ${ASF_DIST_PARENT}/asf-dist
 # Commit to SVN
-svn commit -m "Release Airflow Providers on $(date "+%Y-%m-%d%n")"
+svn commit -m "Release Airflow Providers on $(date "+%Y-%m-%d%n"): release preparation date ${RELEASE_DATE}"
 ```
 
 Verify that the packages appear in
-[providers](https://dist.apache.org/repos/dist/release/airflow/providers)
+[providers](https://dist.apache.org/repos/dist/release/airflow/providers) and the (always first)
+`apache_airflow_providers-RELEASE_DATE-source.tar.gz` file should have the right RELEASE_DATE.
 
 You are expected to see all latest versions of providers.
 The ones you are about to release (with new version) and the ones that are not part of the current release.
@@ -1268,17 +1644,28 @@ This is simply by removing the relevant files locally.
 
 ## Publish the packages to PyPI
 
+> [!NOTE]
+> Under the [delegated process](#delegating-release-duties-to-a-non-pmc-committer) this final PyPI
+> upload is owned by the **PMC member**, using the same trusted publishing identity as the RC upload
+> — it is not delegated.
+
 By that time the packages should be in your dist folder.
 
 ```shell script
-cd ${AIRFLOW_REPO_ROOT}
-git checkout <ONE_OF_THE_RC_TAGS_FOR_ONE_OF_THE_RELEASED_PROVIDERS>
+cd "$AIRFLOW_REPO_ROOT"
+git checkout providers/${RELEASE_DATE}
 ```
 
-example `git checkout providers-amazon/7.0.0rc2`
+example `git checkout providers/2025-10-31`
 
 Note you probably will see message `You are in 'detached HEAD' state.`
 This is expected, the RC tag is most likely behind the main branch.
+
+* Remove source artifact:
+
+```shell script
+rm dist/apache_airflow_providers-${RELEASE_DATE}-source.tar.gz
+```
 
 * Verify the artifacts that would be uploaded:
 
@@ -1286,31 +1673,79 @@ This is expected, the RC tag is most likely behind the main branch.
 twine check ${AIRFLOW_REPO_ROOT}/dist/*.whl ${AIRFLOW_REPO_ROOT}/dist/*.tar.gz
 ```
 
-* Upload the package to PyPi:
+* Configure a short-lived PyPI token for this upload only. **Until Trusted
+  Publishing is deployed for the Airflow provider distributions on PyPI**,
+  the recommended practice is:
+
+  1. Log in to https://pypi.org and create an API token right before the
+     upload step. **Scope caveat:** you would ideally create a
+     project-scoped token, but PyPI only allows project-scoped tokens for
+     projects you already own/maintain on that account. Most Airflow
+     release managers do not have per-project owner rights on every
+     provider being released, so in practice you will need to create an
+     account-wide ("all projects") token. That is acceptable **only if**
+     you treat it as single-use and delete it immediately after the upload
+     (step 4 below). Never keep an all-projects token on disk longer than
+     the upload itself.
+  2. Put it in `~/.pypirc` (or export as `TWINE_USERNAME=__token__`
+     `TWINE_PASSWORD=pypi-...`).
+  3. Run the upload (below).
+  4. **Immediately delete the token** from the PyPI web UI after the upload
+     completes. Do not keep long-lived release-manager tokens on disk.
+
+  This is a defence-in-depth practice: the RM machine becomes a one-time
+  release vehicle, not a persistent point of compromise.
+
+* Upload the packages to PyPI. Only the provider wheels and sdists are uploaded — the ASF
+  `-source.tar.gz` tarball and the `.asc`/`.sha512` files are SVN-only. The PyPI URLs twine prints
+  are extracted (sorted, de-duplicated) into `files/packages.txt` for the announcement message; both
+  files land in `files/` (git-ignored):
 
 ```shell script
-twine upload -r pypi ${AIRFLOW_REPO_ROOT}/dist/*.whl ${AIRFLOW_REPO_ROOT}/dist/*.tar.gz
+mkdir -p "${AIRFLOW_REPO_ROOT}/files"
+# COLUMNS=200 stops rich (twine's printer) from wrapping long URLs when stdout is a pipe.
+COLUMNS=200 twine upload -r pypi ${AIRFLOW_REPO_ROOT}/dist/*.whl \
+  $(ls ${AIRFLOW_REPO_ROOT}/dist/*.tar.gz | grep -v -- '-source.tar.gz') 2>&1 \
+  | tee "${AIRFLOW_REPO_ROOT}/files/twine-upload.log"
+# Only trust packages.txt if the upload above succeeded (PIPESTATUS[0] == 0):
+grep -oE 'https://pypi\.org/project/[^[:space:]]+' "${AIRFLOW_REPO_ROOT}/files/twine-upload.log" \
+  | sort -u > "${AIRFLOW_REPO_ROOT}/files/packages.txt"
 ```
 
-* Verify that the packages are available under the links printed.
-
-Copy links to updated packages, sort it alphabetically and save it on the side. You will need it for the announcement message.
-
-* Again, confirm that the packages are available under the links printed.
+* Confirm that the packages are available under the links printed. The sorted list is saved in
+  `files/packages.txt` for the announcement message.
 
 
-## Add tags in git
+## Add the final release tag in git
 
-Assume that your remote for apache repository is called `apache` you should now
-set tags for the providers in the repo.
+These instructions assume the standard remote naming convention
+(`upstream` → `apache/airflow`, `origin` → your fork — see
+[`contributing-docs/10_working_with_git.rst`](../contributing-docs/10_working_with_git.rst#git-remote-naming-conventions)).
+`breeze release-management tag-providers` auto-detects which of your remotes points
+at `apache/airflow`, so it also works for release-manager setups where the
+apache/airflow clone is configured as `origin`. Set tags for the providers in the
+repository.
 
 Sometimes in cases when there is a connectivity issue to GitHub, it might be possible that local tags get created
-and lead to annoying errors. The default behaviour would be to clean such local tags up.
+and lead to annoying errors. The default behavior would be to clean such local tags up.
 
-If you want to disable this behaviour, set the env **CLEAN_LOCAL_TAGS** to false.
+If you want to disable this behavior, set the env **CLEAN_LOCAL_TAGS** to false.
+
+As when [pushing the RC tags](#push-the-rc-tags), check out the wave tag first — `tag-providers`
+tags `HEAD`, so the final tags must be created from the wave commit and not from whatever the
+checkout happens to be on:
 
 ```shell script
-breeze release-management tag-providers
+git checkout providers/${RELEASE_DATE}
+# Both SHAs printed here must be identical before you tag
+git rev-parse HEAD "providers/${RELEASE_DATE}^{commit}"
+breeze release-management tag-providers --release-date ${RELEASE_DATE}
+```
+
+Then confirm each pushed tag resolves to the wave commit (`^{}` dereferences the annotated tag):
+
+```shell script
+git ls-remote upstream "refs/tags/providers-<PROVIDER>/<VERSION>^{}"
 ```
 
 ## Publish documentation
@@ -1323,112 +1758,101 @@ you need to run several workflows to publish the documentation. More details abo
 [Docs README](../docs/README.md) showing the architecture and workflows including manual workflows for
 emergency cases.
 
-We have two options publishing the documentation 1. Using breeze commands 2. Manually using GitHub Actions.:
-
-### Using breeze commands
-
-You can use the `breeze` command to publish the documentation.
-The command does the following:
+You usually use the `breeze` command to publish the documentation. The command does the following:
 
 1. Triggers [Publish Docs to S3](https://github.com/apache/airflow/actions/workflows/publish-docs-to-s3.yml).
 2. Triggers workflow in apache/airflow-site to refresh
 3. Triggers S3 to GitHub Sync
 
+First - unset GITHUB_TOKEN if you have it set, this workflows reads token from your github repository
+configuration if you login with `gh`, do it only once - you do not have repeat it afterwards.
+
 ```shell script
-  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto> all-providers
+unset GITHUB_TOKEN
+brew install gh
+gh auth login
+```
+
+Run workflows:
+
+```shell script
+  breeze workflow-run publish-docs --ref providers/${RELEASE_DATE} --site-env live all-providers
+```
+
+If you need to exclude some providers from the documentation you need to add `--exclude-providers` flag
+with space separated list of excluded providers.
+
+```shell script
+  breeze workflow-run publish-docs --ref providers/${RELEASE_DATE} --site-env live all-providers --exclude-docs "apprise slack"
 ```
 
 Or if you just want to publish a few selected providers, you can run:
 
 ```shell script
-  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto> PACKAGE1 PACKAGE2 ..
+  breeze workflow-run publish-docs --ref providers/${RELEASE_DATE} --site-env live PACKAGE1 PACKAGE2 ..
 ```
 
+> [!WARNING]
+> Make sure to NOT close the terminal while the command is running and to keep your computer from
+> sleep. This command will run several (3!) workflows from your terminal and this is important to keep
+> it running until completion.
 
-The `--ref` parameter should be the tag of the final candidate you are publishing.
+<!-- -->
 
-The `--site-env` parameter should be set to `staging` for pre-release versions or `live` for final releases. the default option is `auto`
-if the tag is rc it publishes to `staging` bucket, otherwise it publishes to `live` bucket.
+> [!NOTE]
+> If the workflow fails because a file it references or executes is missing or has incompatible
+> logic in the release tag (e.g. it was added or changed in `main` after the tag was cut), see
+> [Fixing released documentation](#fixing-released-documentation) in the Misc section below for
+> the `-docs` branch workaround.
 
-Other available parameters can be found with:
+There is also a manual way of running the workflows (see at the end of the document, this should normally
+not be needed unless there is some problem with workflow automation above)
 
-```shell
-breeze workflow-run publish-docs --help
-```
+> [!NOTE]
+> The **Provider Registry** at `airflow.apache.org/registry/` is rebuilt automatically as part of the
+> `publish-docs-to-s3.yml` workflow (it calls `registry-build.yml` as a post-publish job). The registry
+> extracts metadata from `provider.yaml` files and PyPI, so it picks up new/updated providers without
+> manual intervention. If you need to rebuild the registry independently, trigger the `registry-build.yml`
+> workflow manually. See [`registry/README.md`](../registry/README.md) for details.
 
-### Manually using GitHub Actions
+### Update airflow-site index for new providers
 
-There are two steps to publish the documentation:
+If this release adds a brand-new provider, also update
+`airflow-site/landing-pages/site/content/en/docs/_index.md` in the
+`apache/airflow-site` repository. The "Active providers" list there is
+maintained manually, so new providers will not appear on the public docs index
+until that file is updated and the live site refresh completes.
 
-1. Publish the documentation to the live S3 bucket.
-
-The release manager publishes the documentation using GitHub Actions workflow
-[Publish Docs to S3](https://github.com/apache/airflow/actions/workflows/publish-docs-to-s3.yml).
-
-You should specify the final tag to use to build the docs and list of providers to publish
-(separated by spaces) or ``all-providers`` in case you want to publish all providers
-(optionally you can exclude some of those providers).
-
-The release manager publishes the documentation using GitHub Actions workflow
-[Publish Docs to S3](https://github.com/apache/airflow/actions/workflows/publish-docs-to-s3.yml).
-By default `auto` selection should publish to the `live` bucket - based on
-the tag you use - pre-release tags go to staging. But you can also override it and specify the destination
-manually to be `live` or `staging`.
-
-After that step, the provider documentation should be available under the http://airflow.apache.org URL
-(also present in the PyPI packages) but stable links and drop-down boxes should not be yet updated.
-
-2. Invalidate Fastly cache, update version drop-down and stable links with the new versions of the documentation.
-
-Before doing it - review the state of removed, suspended, new packages in
-[the docs index](https://github.com/apache/airflow-site/blob/master/landing-pages/site/content/en/docs/_index.md):
-Make sure to use `main` branch to run the workflow.
-
-There are few special considerations when the list of provider is updated.
-
-- If you publish a new package, you must add it to the list of packages in the index.
-- If there are changes to suspension or removal status of a package, you must move it appropriate section.
-- In case you need to make any changes - create the commit and push changes and merge it to `main` branch.
-  in [airflow-site](https://github.com/apache/airflow-site) repository.
-
-```shell script
-cd airflow-site
-export AIRFLOW_SITE_DIRECTORY="$(pwd -P)"
-cd "${AIRFLOW_SITE_DIRECTORY}"
-branch="add-documentation-$(date "+%Y-%m-%d%n")"
-git checkout -b "${branch}"
-git add .
-git commit -m "Add documentation for packages - $(date "+%Y-%m-%d%n")"
-git push --set-upstream origin "${branch}"
-```
-
-Merging the PR with the index changes to `main` will trigger site publishing.
-
-If you do not need to merge a PR, you should manually run the
-[Build docs](https://github.com/apache/airflow-site/actions/workflows/build.yml)
-workflow in `airflow-site` repository to refresh indexes and drop-downs.
-
-After that build from PR or workflow completes, the new version should be available in the drop-down
-list and stable links should be updated, also Fastly cache will be invalidated.
+To avoid publishing the provider in the site index too early, keep the
+`apache/airflow-site` change unmerged until the live release window, then merge
+it immediately before or together with the `live` refresh step above.
 
 ## Update providers metadata
 
+Create PR and open it to be merged:
+
 ```shell script
-cd ${AIRFLOW_REPO_ROOT}
+cd "$AIRFLOW_REPO_ROOT"
 git checkout main
-git pull apache main
+git pull upstream main
 current_date=$(date '+%Y-%m-%d%n')
 branch="update-providers-metadata-${current_date}"
 git checkout -b "${branch}"
 breeze release-management generate-providers-metadata --refresh-constraints-and-airflow-releases
 git add -p .
 git commit -m "Update providers metadata ${current_date}"
-git push --set-upstream origin "${branch}"
+gh pr create --title "Update providers metadata ${current_date}" --web
 ```
 
-Create PR and get it merged
-
 ## Notify developers of release
+
+> [!NOTE]
+> Under the [delegated process](#delegating-release-duties-to-a-non-pmc-committer) the official
+> post-release communications — this announcement, the [security-issue
+> announcements](#send-announcements-about-security-issues-fixed-in-the-release), [social
+> media](#announce-about-the-release-in-social-media), and the [committee
+> report](#add-release-data-to-apache-committee-report-helper) — are made by the **PMC member**
+> under the PMC's authority. The Delegate can still draft the text and hand it over.
 
 Notify users@airflow.apache.org (cc'ing dev@airflow.apache.org) that
 the artifacts have been published.
@@ -1448,15 +1872,16 @@ cat <<EOF
 Dear Airflow community,
 
 I'm happy to announce that new versions of Airflow Providers packages prepared on ${RELEASE_DATE} were just released.
+
 Full list of PyPI packages released is added at the end of the message.
 
 The source release, as well as the binary releases, are available here:
 
-https://airflow.apache.org/docs/apache-airflow-providers/installing-from-sources
+https://airflow.apache.org/docs/apache-airflow-providers/installing-from-sources.html
 
-You can install the providers via PyPI: https://airflow.apache.org/docs/apache-airflow-providers/installing-from-pypi
+You can install the providers via PyPI: https://airflow.apache.org/docs/apache-airflow-providers/installing-from-pypi.html
 
-The documentation is available at https://airflow.apache.org/docs/ and linked from the PyPI packages.
+The documentation index is available at https://airflow.apache.org/docs/ and documentation for individual provider versions is linked directly from PyPI.
 
 ----
 
@@ -1479,8 +1904,9 @@ Trying to send HTML content will result in failure.
 ## Send announcements about security issues fixed in the release
 
 The release manager should review and mark as READY all the security issues fixed in the release.
-Such issues are marked as affecting `< <JUST_RELEASED_VERSION>` in the CVE management tool
-at https://cveprocess.apache.org/. Then the release manager should announced the issues via the tool.
+Such issues can be listed under the section `Providers {RELEASE_DATE}` in [security issues board](https://github.com/orgs/airflow-s/projects/2).
+Go through the list of these issues and check for each of them the fix has been released as part of this release.
+Then the release manager should announce the issues via the CVE management tool at https://cveprocess.apache.org/.
 
 Once announced, each of the issue should be linked with a 'reference' with tag 'vendor advisory' with the
 URL to the announcement published automatically by the CVE management tool.
@@ -1508,7 +1934,6 @@ Example for special cases:
 ------------------------------------------------------------------------------------------------------------
 Announcement is done from official Apache-Airflow accounts.
 
-* X: https://x.com/ApacheAirflow
 * LinkedIn: https://www.linkedin.com/company/apache-airflow/
 * Fosstodon: https://fosstodon.org/@airflow
 * Bluesky: https://bsky.app/profile/apache-airflow.bsky.social
@@ -1520,7 +1945,9 @@ If you don't have access to the account ask a PMC member to post.
 
 ## Add release data to Apache Committee Report Helper
 
-Add the release data (version and date) at: https://reporter.apache.org/addrelease.html?airflow
+You should get email about it to your account that should urge you to add it, but in
+case you don't, you can add it manually:
+add the release data (version and date) at: https://reporter.apache.org/addrelease.html?airflow
 
 ## Close the testing status issue
 
@@ -1555,22 +1982,66 @@ Run `breeze setup regenerate-command-images --force`
 
 Update test_get_removed_providers in `/dev/breeze/tests/test_packages.py` by removing the provider from the list
 
-
-## Misc / Post Release Helpers
-
-In case you need to rebuild docs with addition of a commit that is not part of the original release use
+# Misc / Post release Helpers
 
 
-```shell script
-  breeze workflow-run publish-docs --ref <tag> --site-env <staging/live/auto> PACKAGE1 \
-  --apply-commits <commit_hash> --skip-write-to-stable-folder \
-  PACKAGE1
+Those processes are related to the release of Airflow but should be run in exceptional situations.
+
+## Fixing released documentation
+
+This section covers two related scenarios:
+
+1. **Post-publish fixes** — rebuilding already-published docs with changes merged to `main` after
+   the release (e.g. HTML layout changes, typo fixes, formatting fixes).
+2. **Failed initial publish** — the `publish-docs-to-s3.yml` workflow fails because a file it
+   references or executes is missing or has incompatible logic in the release tag — e.g. it was
+   added or significantly changed in `main` after the tag was cut.
+
+In both cases the process is as follows:
+
+* When you want to re-publish `providers-PROVIDER/X.Y.Z` docs, create (or pull if already created)
+  `providers-PROVIDER/X.Y.Z-docs` branch
+* Cherry-pick changes you want to add and push to the main `apache/airflow` repo
+* Run the publishing workflow.
+
+In case you are releasing latest released version of Provider (which should be most of the cases),
+run this:
+
+```bash
+breeze workflow-run publish-docs --site-env live --ref providers-PROVIDER/X.Y.Z-docs \
+   --skip-tag-validation \
+   PROVIDER
 ```
 
-Example:
+In case you are releasing an older version of Provider, you should skip writing to stable folder
 
-```shell script
-breeze workflow-run publish-docs --ref providers-apache-hive/9.0.0 --site-env live \
-  --apply-commits 4ae273cbedec66c87dc40218c7a94863390a380d --skip-write-to-stable-folder \
-  apache.hive
+```bash
+breeze workflow-run publish-docs --site-env live --ref providers-PROVIDER/X.Y.Z-docs \
+   --skip-tag-validation \
+   --skip-write-to-stable-folder \
+   PROVIDER
+```
+
+Similarly you can rebuild all provider docs:
+
+* When you want to re-publish `providers/YYYY-MM-DD` docs, create (or pull if already created)
+  `providers/YYYY-MM-DD-docs` branch
+* Cherry-pick changes you want to add and push to the main `apache/airflow` repo
+* Run the publishing workflow.
+
+In case you are releasing latest released version of Provider (which should be most of the cases), run this:
+
+```bash
+breeze workflow-run publish-docs --site-env live --ref providers/YYYY-MM-DD-docs \
+   --skip-tag-validation \
+   all-providers
+```
+
+In case you are releasing an older version of Provider, you should skip writing to stable folder
+
+```bash
+breeze workflow-run publish-docs --site-env live --ref providers/YYYY-MM-DD-docs \
+   --skip-tag-validation \
+   --skip-write-to-stable-folder \
+   all-providers
 ```

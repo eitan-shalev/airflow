@@ -31,7 +31,7 @@ try:
 except ImportError:
     BASEHOOK_PATCH_PATH = "airflow.hooks.base.BaseHook"
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.ads.hooks.ads import GoogleAdsHook
 
 API_VERSION = "api_version"
@@ -51,9 +51,22 @@ EXTRAS_DEVELOPER_TOKEN = {
     "google_ads_client": ADS_CLIENT_DEVELOPER_TOKEN,
 }
 
+# Flat format (matches get_connection_form_widgets output)
+EXTRAS_FLAT_DEVELOPER_TOKEN = {
+    "developer_token": "dev_token",
+    "refresh_token": "refresh_val",
+    "client_id": "client_id_val",
+    "client_secret": "client_secret_val",
+}
+
 
 @pytest.fixture(
-    params=[EXTRAS_DEVELOPER_TOKEN, EXTRAS_SERVICE_ACCOUNT], ids=["developer_token", "service_account"]
+    params=[
+        EXTRAS_DEVELOPER_TOKEN,
+        EXTRAS_SERVICE_ACCOUNT,
+        EXTRAS_FLAT_DEVELOPER_TOKEN,
+    ],
+    ids=["developer_token", "service_account", "flat_developer_token"],
 )
 def mock_hook(request):
     with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection") as conn:
@@ -62,13 +75,22 @@ def mock_hook(request):
         yield hook
 
 
+@pytest.fixture
+def mock_default_version_hook():
+    with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection") as conn:
+        hook = GoogleAdsHook()
+        conn.return_value.extra_dejson = EXTRAS_DEVELOPER_TOKEN
+        yield hook
+
+
 @pytest.fixture(
     params=[
         {"input": EXTRAS_DEVELOPER_TOKEN, "expected_result": "developer_token"},
         {"input": EXTRAS_SERVICE_ACCOUNT, "expected_result": "service_account"},
+        {"input": EXTRAS_FLAT_DEVELOPER_TOKEN, "expected_result": "developer_token"},
         {"input": {"google_ads_client": {}}, "expected_result": AirflowException},
     ],
-    ids=["developer_token", "service_account", "empty"],
+    ids=["developer_token", "service_account", "flat_developer_token", "empty"],
 )
 def mock_hook_for_authentication_method(request):
     with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection") as conn:
@@ -86,11 +108,23 @@ class TestGoogleAdsHook:
         client.return_value.get_service.assert_called_once_with("CustomerService", version=API_VERSION)
 
     @mock.patch("airflow.providers.google.ads.hooks.ads.GoogleAdsClient")
+    def test_get_customer_service_uses_client_default_version(self, mock_client, mock_default_version_hook):
+        mock_default_version_hook._get_customer_service
+
+        mock_client.load_from_dict.return_value.get_service.assert_called_once_with("CustomerService")
+
+    @mock.patch("airflow.providers.google.ads.hooks.ads.GoogleAdsClient")
     def test_get_service(self, mock_client, mock_hook):
         mock_hook._get_service()
         client = mock_client.load_from_dict
         client.assert_called_once_with(mock_hook.google_ads_config)
         client.return_value.get_service.assert_called_once_with("GoogleAdsService", version=API_VERSION)
+
+    @mock.patch("airflow.providers.google.ads.hooks.ads.GoogleAdsClient")
+    def test_get_service_uses_client_default_version(self, mock_client, mock_default_version_hook):
+        mock_default_version_hook._get_service
+
+        mock_client.load_from_dict.return_value.get_service.assert_called_once_with("GoogleAdsService")
 
     @mock.patch("airflow.providers.google.ads.hooks.ads.GoogleAdsClient")
     def test_search(self, mock_client, mock_hook):

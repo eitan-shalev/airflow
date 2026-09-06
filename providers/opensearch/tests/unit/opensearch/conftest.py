@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from airflow.models import Connection
-from airflow.providers.opensearch.version_compat import BaseHook
+from airflow.providers.common.compat.sdk import BaseHook
 
 try:
     from opensearchpy import OpenSearch
@@ -47,55 +47,6 @@ class MockSearch(OpenSearchHook):
 
     def index(self, document: dict, index_name: str, doc_id: int, **kwargs: Any) -> Any:
         return doc_id
-
-
-class MockClient:
-    def count(self, index: Any = None, body: Any = None):
-        return {"count": 1, "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0}}
-
-    def search(self, index=None, body=None, sort=None, size=None, from_=None):
-        return self.sample_log_response()
-
-    def sample_log_response(self):
-        return {
-            "_shards": {"failed": 0, "skipped": 0, "successful": 7, "total": 7},
-            "hits": {
-                "hits": [
-                    {
-                        "_id": "jdeZT4kBjAZqZnexVUxk",
-                        "_source": {
-                            "dag_id": "example_bash_operator",
-                            "execution_date": "2023_07_09T07_47_32_000000",
-                            "levelname": "INFO",
-                            "message": "Some Message 1",
-                            "event": "Some Message 1",
-                            "task_id": "run_after_loop",
-                            "try_number": "1",
-                            "offset": 0,
-                        },
-                        "_type": "_doc",
-                    },
-                    {
-                        "_id": "qteZT4kBjAZqZnexVUxl",
-                        "_source": {
-                            "dag_id": "example_bash_operator",
-                            "execution_date": "2023_07_09T07_47_32_000000",
-                            "levelname": "INFO",
-                            "message": "Another Some Message 2",
-                            "event": "Another Some Message 2",
-                            "task_id": "run_after_loop",
-                            "try_number": "1",
-                            "offset": 1,
-                        },
-                        "_type": "_doc",
-                    },
-                ],
-                "max_score": 2.482621,
-                "total": {"relation": "eq", "value": 36},
-            },
-            "timed_out": False,
-            "took": 7,
-        }
 
 
 @pytest.fixture

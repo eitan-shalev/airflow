@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Container, Iterable, Mapping
 from datetime import timedelta
-from typing import Any, TypeVar, overload
+from typing import Any, Literal, TypeVar, overload
 
 from docker.types import Mount
 from kubernetes.client import models as k8s
@@ -32,13 +32,13 @@ from airflow.sdk.bases.decorator import FParams, FReturn, Task, TaskDecorator, _
 from airflow.sdk.definitions.dag import dag
 from airflow.sdk.definitions.decorators.condition import AnyConditionFunc
 from airflow.sdk.definitions.decorators.task_group import task_group
-from airflow.typing_compat import Literal
 
 # Please keep this in sync with __init__.py's __all__.
 __all__ = [
     "TaskDecorator",
     "TaskDecoratorCollection",
     "dag",
+    "result",
     "task",
     "task_group",
     "setup",
@@ -535,6 +535,7 @@ class TaskDecoratorCollection:
         tolerations: list[k8s.V1Toleration] | None = None,
         security_context: k8s.V1PodSecurityContext | dict | None = None,
         container_security_context: k8s.V1SecurityContext | dict | None = None,
+        xcom_sidecar_container_security_context: k8s.V1SecurityContext | dict | None = None,
         dnspolicy: str | None = None,
         dns_config: k8s.V1PodDNSConfig | None = None,
         hostname: str | None = None,
@@ -624,6 +625,8 @@ class TaskDecoratorCollection:
         :param security_context: Security options the pod should run with
             (PodSecurityContext).
         :param container_security_context: security options the container should run with.
+        :param xcom_sidecar_container_security_context: security options the xcom sidecar container
+            should run with. Overrides the value configured on the Kubernetes connection.
         :param dnspolicy: DNS policy for the pod.
         :param dns_config: dns configuration (ip addresses, searches, options) for the pod.
         :param hostname: hostname for the pod.
@@ -708,6 +711,7 @@ class TaskDecoratorCollection:
         tolerations: list[k8s.V1Toleration] | None = None,
         security_context: k8s.V1PodSecurityContext | dict | None = None,
         container_security_context: k8s.V1SecurityContext | dict | None = None,
+        xcom_sidecar_container_security_context: k8s.V1SecurityContext | dict | None = None,
         dnspolicy: str | None = None,
         dns_config: k8s.V1PodDNSConfig | None = None,
         hostname: str | None = None,
@@ -794,6 +798,8 @@ class TaskDecoratorCollection:
         :param security_context: Security options the pod should run with
             (PodSecurityContext).
         :param container_security_context: security options the container should run with.
+        :param xcom_sidecar_container_security_context: security options the xcom sidecar container
+            should run with. Overrides the value configured on the Kubernetes connection.
         :param dnspolicy: DNS policy for the pod.
         :param dns_config: dns configuration (ip addresses, searches, options) for the pod.
         :param hostname: hostname for the pod.
@@ -949,3 +955,4 @@ class TaskDecoratorCollection:
 task: TaskDecoratorCollection
 setup: Callable
 teardown: Callable
+result: Callable

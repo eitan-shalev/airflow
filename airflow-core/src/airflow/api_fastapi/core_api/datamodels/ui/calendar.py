@@ -19,8 +19,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
-
+from airflow.api_fastapi.core_api.base import BaseModel
 from airflow.utils.state import DagRunState
 
 
@@ -43,3 +42,18 @@ class CalendarTimeRangeCollectionResponse(BaseModel):
 
     total_entries: int
     dag_runs: list[CalendarTimeRangeResponse]
+
+
+class CalendarDeadlineResponse(BaseModel):
+    """Represents aggregated deadline counts for a specific calendar time bucket."""
+
+    date: datetime
+    missed: bool
+    count: int
+
+
+class CalendarDeadlineCollectionResponse(BaseModel):
+    """Response model for calendar deadline aggregation results."""
+
+    total_entries: int
+    deadlines: list[CalendarDeadlineResponse]

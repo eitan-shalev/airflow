@@ -22,16 +22,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 from airflow.providers.google.marketing_platform.hooks.campaign_manager import GoogleCampaignManagerHook
-from airflow.providers.google.version_compat import AIRFLOW_V_3_0_PLUS
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.sdk import BaseSensorOperator
-else:
-    from airflow.sensors.base import BaseSensorOperator  # type: ignore[no-redef]
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class GoogleCampaignManagerReportSensor(BaseSensorOperator):
@@ -49,7 +44,7 @@ class GoogleCampaignManagerReportSensor(BaseSensorOperator):
     :param profile_id: The DFA user profile ID.
     :param report_id: The ID of the report.
     :param file_id: The ID of the report file.
-    :param api_version: The version of the api that will be requested, for example 'v4'.
+    :param api_version: The version of the api that will be requested, for example 'v5'.
     :param gcp_conn_id: The connection ID to use when fetching connection info.
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
@@ -84,7 +79,7 @@ class GoogleCampaignManagerReportSensor(BaseSensorOperator):
         profile_id: str,
         report_id: str,
         file_id: str,
-        api_version: str = "v4",
+        api_version: str = "v5",
         gcp_conn_id: str = "google_cloud_default",
         mode: str = "reschedule",
         poke_interval: int = 60 * 5,

@@ -22,12 +22,22 @@ description: |
     `Samba <https://www.samba.org/>`__
 
 state: ready
-source-date-epoch: 1756877466
+lifecycle: production
+source-date-epoch: 1787011200
 # Note that those versions are maintained by release manager - do not update them manually
 # with the exception of case where other provider in sources has >= new provider version.
 # In such case adding >= NEW_VERSION and bumping to NEW_VERSION in a provider have
 # to be done in the same PR
 versions:
+  - 4.13.0
+  - 4.12.6
+  - 4.12.5
+  - 4.12.4
+  - 4.12.3
+  - 4.12.2
+  - 4.12.1
+  - 4.12.0
+  - 4.11.1
   - 4.11.0
   - 4.10.3
   - 4.10.2
@@ -76,4 +86,34 @@ transfers:
 
 connection-types:
   - hook-class-name: airflow.providers.samba.hooks.samba.SambaHook
+    hook-name: "Samba"
     connection-type: samba
+    conn-fields:
+      share_type:
+        label: Share Type
+        schema:
+          type:
+            - string
+            - 'null'
+          default: posix
+        description: >-
+          The share OS type (`posix` or `windows`).
+          Used to determine the formatting of file and folder paths.
+      auth_protocol:
+        label: Auth Protocol
+        schema:
+          type:
+            - string
+            - 'null'
+          default: negotiate
+          enum:
+            - negotiate
+            - ntlm
+            - kerberos
+        description: >-
+          Must be one of: negotiate, ntlm, kerberos. With `kerberos`, the system's
+          ticket cache is used and login/password are optional.
+    ui-field-behaviour:
+      hidden-fields: []
+      relabeling:
+        schema: Share

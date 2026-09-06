@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import pendulum
 
-try:
-    from airflow.sdk import dag, task, teardown
-except ImportError:
-    # Airflow 2 path
-    from airflow.decorators import dag, task, teardown  # type: ignore[attr-defined,no-redef]
+# This example uses common.compat for Airflow 2.x/3.x compatibility.
+# If you only need Airflow 3+, you can use: from airflow.sdk import dag, task, teardown
+from airflow.providers.common.compat.sdk import dag, task, teardown
 from airflow.providers.openai.operators.openai import OpenAIEmbeddingOperator
 from airflow.providers.pgvector.operators.pgvector import PgVectorIngestOperator
 
@@ -96,5 +94,5 @@ example_pgvector_dag()
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

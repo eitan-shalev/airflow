@@ -23,34 +23,35 @@ from typing import TYPE_CHECKING
 
 from airflow.utils.session import NEW_SESSION, provide_session
 
+from tests_common.test_utils.compat import DagSerialization, SerializedDAG
+
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from airflow.sdk import DAG
-    from airflow.serialization.serialized_objects import SerializedDAG
 
 
 def create_scheduler_dag(dag: DAG | SerializedDAG) -> SerializedDAG:
-    from airflow.serialization.serialized_objects import SerializedDAG
-
     if isinstance(dag, SerializedDAG):
         return dag
-    return SerializedDAG.deserialize_dag(SerializedDAG.serialize_dag(dag))
+    return DagSerialization.deserialize_dag(DagSerialization.serialize_dag(dag))
 
 
 @provide_session
 def sync_dag_to_db(
     dag: DAG,
     bundle_name: str = "testing",
+    bundle_version: str | None = None,
     session: Session = NEW_SESSION,
 ) -> SerializedDAG:
-    return sync_dags_to_db([dag], bundle_name=bundle_name, session=session)[0]
+    return sync_dags_to_db([dag], bundle_name=bundle_name, bundle_version=bundle_version, session=session)[0]
 
 
 @provide_session
 def sync_dags_to_db(
     dags: Collection[DAG],
     bundle_name: str = "testing",
+    bundle_version: str | None = None,
     session: Session = NEW_SESSION,
 ) -> Sequence[SerializedDAG]:
     """
@@ -62,17 +63,23 @@ def sync_dags_to_db(
     """
     from airflow.models.dagbundle import DagBundleModel
     from airflow.models.serialized_dag import SerializedDagModel
-    from airflow.serialization.serialized_objects import LazyDeserializedDAG, SerializedDAG
+    from airflow.serialization.serialized_objects import LazyDeserializedDAG
 
     session.merge(DagBundleModel(name=bundle_name))
     session.flush()
 
     def _write_dag(dag: DAG) -> SerializedDAG:
-        data = SerializedDAG.to_dict(dag)
-        SerializedDagModel.write_dag(LazyDeserializedDAG(data=data), bundle_name, session=session)
-        return SerializedDAG.from_dict(data)
+        data = DagSerialization.to_dict(dag)
+        SerializedDagModel.write_dag(
+            LazyDeserializedDAG(data=data), bundle_name, bundle_version, session=session
+        )
+        session.flush()
+        serialized_dag = SerializedDagModel.get_dag(dag.dag_id, session=session)
+        if serialized_dag is None:
+            raise RuntimeError(f"Serialized DAG {dag.dag_id!r} was not found after writing to the database")
+        return serialized_dag
 
-    SerializedDAG.bulk_write_to_db(bundle_name, None, dags, session=session)
+    SerializedDAG.bulk_write_to_db(bundle_name, bundle_version, dags, session=session)
     scheduler_dags = [_write_dag(dag) for dag in dags]
     session.flush()
     return scheduler_dags

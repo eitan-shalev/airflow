@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -36,6 +37,7 @@ from airflow_breeze.commands.common_image_options import (
     option_additional_python_deps,
     option_airflow_constraints_reference_build,
     option_build_progress,
+    option_cache_from_image,
     option_debian_version,
     option_dev_apt_command,
     option_dev_apt_deps,
@@ -52,6 +54,7 @@ from airflow_breeze.commands.common_image_options import (
     option_push,
     option_python_image,
     option_skip_image_file_deletion,
+    option_tag_as,
     option_verify,
     option_wait_for_image,
 )
@@ -73,7 +76,6 @@ from airflow_breeze.commands.common_options import (
     option_run_in_parallel,
     option_skip_cleanup,
     option_use_uv,
-    option_uv_http_timeout,
     option_verbose,
     option_version_suffix,
 )
@@ -81,12 +83,12 @@ from airflow_breeze.commands.common_package_installation_options import (
     option_airflow_constraints_location,
     option_airflow_constraints_mode_ci,
 )
-from airflow_breeze.global_constants import UV_VERSION
+from airflow_breeze.global_constants import CI_IMAGE_SOURCES_HASH_LABEL, UV_VERSION
 from airflow_breeze.params.build_ci_params import BuildCiParams
 from airflow_breeze.utils.ci_group import ci_group
 from airflow_breeze.utils.click_utils import BreezeGroup
 from airflow_breeze.utils.confirm import STANDARD_TIMEOUT, Answer, user_confirm
-from airflow_breeze.utils.console import Output, get_console
+from airflow_breeze.utils.console import Output, console_print, get_console
 from airflow_breeze.utils.docker_command_utils import (
     build_cache,
     check_remote_ghcr_io_commands,
@@ -99,7 +101,7 @@ from airflow_breeze.utils.docker_command_utils import (
 from airflow_breeze.utils.github import download_artifact_from_pr, download_artifact_from_run_id
 from airflow_breeze.utils.image import run_pull_image, run_pull_in_parallel
 from airflow_breeze.utils.mark_image_as_refreshed import mark_image_as_rebuilt
-from airflow_breeze.utils.md5_build_check import md5sum_check_if_build_is_needed
+from airflow_breeze.utils.md5_build_check import calculate_ci_sources_hash, md5sum_check_if_build_is_needed
 from airflow_breeze.utils.parallel import (
     DockerBuildxProgressMatcher,
     ShowLastLineProgressMatcher,
@@ -125,7 +127,7 @@ if TYPE_CHECKING:
 @click.group(
     cls=BreezeGroup, name="ci-image", help="Tools that developers can use to manually manage CI images"
 )
-def ci_image():
+def ci_image_group():
     pass
 
 
@@ -141,7 +143,7 @@ def check_if_image_building_is_needed(ci_image_params: BuildCiParams, output: Ou
     if result.returncode != 0:
         return True
     if not ci_image_params.force_build and not ci_image_params.upgrade_to_newer_dependencies:
-        if not should_we_run_the_build(build_ci_params=ci_image_params):
+        if not confirm_build_if_sources_changed(build_ci_params=ci_image_params):
             return False
     return True
 
@@ -235,7 +237,7 @@ option_ci_image_file_to_load = click.option(
 )
 
 
-@ci_image.command(name="build")
+@ci_image_group.command(name="build")
 @option_additional_airflow_extras
 @option_additional_dev_apt_command
 @option_additional_dev_apt_deps
@@ -248,6 +250,7 @@ option_ci_image_file_to_load = click.option(
 @option_answer
 @option_build_progress
 @option_builder
+@option_cache_from_image
 @option_commit_sha
 @option_debian_version
 @option_debug_resources
@@ -273,7 +276,6 @@ option_ci_image_file_to_load = click.option(
 @option_upgrade_on_failure
 @option_upgrade_to_newer_dependencies
 @option_use_uv
-@option_uv_http_timeout
 @option_verbose
 @option_version_suffix
 def build(
@@ -288,6 +290,7 @@ def build(
     airflow_constraints_reference: str,
     build_progress: str,
     builder: str,
+    cache_from_image: str | None,
     commit_sha: str | None,
     debian_version: str,
     debug_resources: bool,
@@ -312,7 +315,6 @@ def build(
     upgrade_on_failure: bool,
     upgrade_to_newer_dependencies: bool,
     use_uv: bool,
-    uv_http_timeout: int,
     version_suffix: str,
 ):
     """Build CI image. Include building multiple images for all python versions."""
@@ -324,7 +326,7 @@ def build(
             output=None,
         )
         if return_code != 0:
-            get_console().print(f"[error]Error when building image! {info}")
+            console_print(f"[error]Error when building image! {info}")
             sys.exit(return_code)
 
     perform_environment_checks()
@@ -341,6 +343,7 @@ def build(
         airflow_constraints_reference=airflow_constraints_reference,
         build_progress=build_progress,
         builder=builder,
+        cache_from_image=cache_from_image,
         commit_sha=commit_sha,
         debian_version=debian_version,
         dev_apt_command=dev_apt_command,
@@ -359,7 +362,6 @@ def build(
         upgrade_on_failure=upgrade_on_failure,
         upgrade_to_newer_dependencies=upgrade_to_newer_dependencies,
         use_uv=use_uv,
-        uv_http_timeout=uv_http_timeout,
         version_suffix=version_suffix,
     )
     if platform:
@@ -404,7 +406,7 @@ def build(
         run_build(ci_image_params=base_build_params)
 
 
-@ci_image.command(name="pull")
+@ci_image_group.command(name="pull")
 @option_python
 @option_run_in_parallel
 @option_parallelism
@@ -469,7 +471,7 @@ def pull(
             wait_for_image=wait_for_image,
         )
         if return_code != 0:
-            get_console().print(f"[error]There was an error when pulling CI image: {info}[/]")
+            console_print(f"[error]There was an error when pulling CI image: {info}[/]")
             sys.exit(return_code)
 
 
@@ -512,7 +514,7 @@ def run_verify_in_parallel(
     )
 
 
-@ci_image.command(name="save")
+@ci_image_group.command(name="save")
 @option_ci_image_file_to_save
 @option_github_repository
 @option_image_file_dir
@@ -542,16 +544,16 @@ def save(
         image_file_to_store = image_file
     else:
         image_file_to_store = image_file_dir / image_file
-    get_console().print(f"[info]Saving Python CI image {image_name} to {image_file_to_store}[/]")
+    console_print(f"[info]Saving Python CI image {image_name} to {image_file_to_store}[/]")
     result = run_command(
         ["docker", "image", "save", "-o", image_file_to_store.as_posix(), image_name], check=False
     )
     if result.returncode != 0:
-        get_console().print(f"[error]Error when saving image: {result.stdout}[/]")
+        console_print(f"[error]Error when saving image: {result.stdout}[/]")
         sys.exit(result.returncode)
 
 
-@ci_image.command(name="load")
+@ci_image_group.command(name="load")
 @option_ci_image_file_to_load
 @option_dry_run
 @option_from_run
@@ -562,6 +564,7 @@ def save(
 @option_platform_single
 @option_python
 @option_skip_image_file_deletion
+@option_tag_as
 @option_verbose
 def load(
     from_run: str | None,
@@ -573,6 +576,7 @@ def load(
     platform: str,
     python: str,
     skip_image_file_deletion: bool,
+    tag_as: str | None,
 ):
     """Load CI image from a file."""
     perform_environment_checks()
@@ -590,19 +594,19 @@ def load(
         image_file_to_load = image_file_dir / image_file
 
     if not image_file_to_load.name.endswith(f"-{python}.tar"):
-        get_console().print(
+        console_print(
             f"[error]The image file {image_file_to_load} does not end with '-{python}.tar'. Exiting.[/]"
         )
         sys.exit(1)
     if not image_file_to_load.name.startswith(f"ci-image-save-v3-{escaped_platform}"):
-        get_console().print(
+        console_print(
             f"[error]The image file {image_file_to_load} does not start with "
             f"'ci-image-save-v3-{escaped_platform}'. Exiting.[/]"
         )
         sys.exit(1)
 
-    if from_run or from_pr and not github_token:
-        get_console().print(
+    if (from_run or from_pr) and not github_token:
+        console_print(
             "[error]The parameter `--github-token` must be provided if `--from-run` or `--from-pr` is "
             "provided. Exiting.[/]"
         )
@@ -614,23 +618,32 @@ def load(
         download_artifact_from_pr(from_pr, image_file_to_load, github_repository, github_token)
 
     if not image_file_to_load.exists():
-        get_console().print(f"[error]The image {image_file_to_load} does not exist.[/]")
+        console_print(f"[error]The image {image_file_to_load} does not exist.[/]")
         sys.exit(1)
 
-    get_console().print(f"[info]Loading Python CI image from {image_file_to_load}[/]")
+    console_print(f"[info]Loading Python CI image from {image_file_to_load}[/]")
     result = run_command(["docker", "image", "load", "-i", image_file_to_load.as_posix()], check=False)
     if result.returncode != 0:
-        get_console().print(f"[error]Error when loading image: {result.stdout}[/]")
+        console_print(f"[error]Error when loading image: {result.stdout}[/]")
         sys.exit(result.returncode)
+    if tag_as:
+        console_print(f"[info]Tagging {build_ci_params.airflow_image_name} as {tag_as}[/]")
+        result = run_command(
+            ["docker", "tag", build_ci_params.airflow_image_name, tag_as],
+            check=False,
+        )
+        if result.returncode != 0:
+            console_print(f"[error]Error when tagging image: {result.stdout}[/]")
+            sys.exit(result.returncode)
     if not skip_image_file_deletion:
-        get_console().print(f"[info]Deleting image file {image_file_to_load}[/]")
+        console_print(f"[info]Deleting image file {image_file_to_load}[/]")
         image_file_to_load.unlink()
     if get_verbose():
         run_command(["docker", "images", "-a"])
     mark_image_as_rebuilt(ci_image_params=build_ci_params)
 
 
-@ci_image.command(
+@ci_image_group.command(
     name="verify",
     context_settings=dict(
         ignore_unknown_options=True,
@@ -669,7 +682,7 @@ def verify(
     perform_environment_checks()
     check_remote_ghcr_io_commands()
     if (pull or image_name) and run_in_parallel:
-        get_console().print(
+        console_print(
             "[error]You cannot use --pull,--image-name and --run-in-parallel at the same time. Exiting[/]"
         )
         sys.exit(1)
@@ -705,7 +718,7 @@ def verify(
             check_remote_ghcr_io_commands()
             command_to_run = ["docker", "pull", image_name]
             run_command(command_to_run, check=True)
-        get_console().print(f"[info]Verifying CI image: {image_name}[/]")
+        console_print(f"[info]Verifying CI image: {image_name}[/]")
         return_code, info = verify_an_image(
             image_name=image_name,
             output=None,
@@ -716,11 +729,48 @@ def verify(
         sys.exit(return_code)
 
 
-def should_we_run_the_build(build_ci_params: BuildCiParams) -> bool:
+def get_ci_image_sources_hash_label(airflow_image_name: str) -> str | None:
     """
-    Check if we should run the build based on what files have been modified since last build and answer from
-    the user.
+    Reads the sources-hash label from the CI image - None if the image or the label is missing.
 
+    :param airflow_image_name: name of the image to inspect
+    """
+    inspect_result = run_command(
+        ["docker", "inspect", airflow_image_name, "-f", "{{json .Config.Labels}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if inspect_result.returncode != 0 or not inspect_result.stdout:
+        return None
+    try:
+        labels = json.loads(inspect_result.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+    if not labels:
+        return None
+    return labels.get(CI_IMAGE_SOURCES_HASH_LABEL)
+
+
+def is_ci_image_built_from_current_sources(ci_image_params: BuildCiParams) -> bool:
+    """
+    Check if the CI image present in the Docker daemon was built from sources identical to the
+    current checkout - possibly by another checkout (e.g. a git worktree) sharing the same daemon.
+
+    :param ci_image_params: parameters of the image to check
+    """
+    image_sources_hash = get_ci_image_sources_hash_label(ci_image_params.airflow_image_name)
+    if not image_sources_hash:
+        return False
+    return image_sources_hash == calculate_ci_sources_hash()
+
+
+def confirm_build_if_sources_changed(build_ci_params: BuildCiParams) -> bool:
+    """
+    Confirm whether to build based on important source changes and the user's answer.
+
+    * If the image already matches current sources (e.g. it was built in another git worktree
+      sharing the same Docker daemon), the local build cache is refreshed and no build is needed
     * If build is needed, the user is asked for confirmation
     * If the branch is not rebased it warns the user to rebase (to make sure latest remote cache is useful)
     * Builds Image/Skips/Quits depending on the answer
@@ -730,6 +780,13 @@ def should_we_run_the_build(build_ci_params: BuildCiParams) -> bool:
     # We import those locally so that click autocomplete works
     from inputimeout import TimeoutOccurred
 
+    if is_ci_image_built_from_current_sources(build_ci_params):
+        console_print(
+            f"[info]Docker image {build_ci_params.airflow_image_name} was built from the same "
+            "important sources - no rebuild is needed.[/]"
+        )
+        mark_image_as_rebuilt(ci_image_params=build_ci_params)
+        return False
     if not md5sum_check_if_build_is_needed(
         build_ci_params=build_ci_params,
         md5sum_cache_dir=build_ci_params.md5sum_cache_dir,
@@ -746,7 +803,7 @@ def should_we_run_the_build(build_ci_params: BuildCiParams) -> bool:
         if answer == answer.YES:
             if is_repo_rebased(build_ci_params.github_repository, build_ci_params.airflow_branch):
                 return True
-            get_console().print(
+            console_print(
                 "\n[warning]This might take a lot of time (more than 10 minutes) even if you have "
                 "a good network connection. We think you should attempt to rebase first.[/]\n"
             )
@@ -757,25 +814,25 @@ def should_we_run_the_build(build_ci_params: BuildCiParams) -> bool:
             )
             if answer == Answer.YES:
                 return True
-            get_console().print(
+            console_print(
                 f"[info]Please rebase your code to latest {build_ci_params.airflow_branch} "
                 "before continuing.[/]\nCheck this link to find out how "
                 "https://github.com/apache/airflow/blob/main/contributing-docs/10_working_with_git.rst\n"
             )
-            get_console().print("[error]Exiting the process[/]\n")
+            console_print("[error]Exiting the process[/]\n")
             sys.exit(1)
         elif answer == Answer.NO:
             instruct_build_image(build_ci_params.python)
             return False
         else:  # users_status == Answer.QUIT:
-            get_console().print("\n[warning]Quitting the process[/]\n")
+            console_print("\n[warning]Quitting the process[/]\n")
             sys.exit()
     except TimeoutOccurred:
-        get_console().print("\nTimeout. Considering your response as No\n")
+        console_print("\nTimeout. Considering your response as No\n")
         instruct_build_image(build_ci_params.python)
         return False
     except Exception as e:
-        get_console().print(f"\nTerminating the process on {e}")
+        console_print(f"\nTerminating the process on {e}")
         sys.exit(1)
 
 
@@ -845,9 +902,7 @@ def run_build_ci_image(
         if build_command_result.returncode != 0 and not ci_image_params.upgrade_to_newer_dependencies:
             if ci_image_params.upgrade_on_failure:
                 ci_image_params.upgrade_to_newer_dependencies = True
-                get_console().print(
-                    "[warning]Attempting to build with --upgrade-to-newer-dependencies on failure"
-                )
+                console_print("[warning]Attempting to build with --upgrade-to-newer-dependencies on failure")
                 build_command_result = run_command(
                     prepare_docker_build_command(
                         image_params=ci_image_params,
@@ -859,10 +914,10 @@ def run_build_ci_image(
                     output=output,
                 )
             else:
-                get_console().print(
+                console_print(
                     "[warning]Your image build failed. It could be caused by conflicting dependencies."
                 )
-                get_console().print(
+                console_print(
                     "[info]Run `breeze ci-image build --upgrade-to-newer-dependencies` to upgrade them.\n"
                 )
         if build_command_result.returncode == 0:
@@ -870,9 +925,9 @@ def run_build_ci_image(
     return build_command_result.returncode, f"Image build: {param_description}"
 
 
-def rebuild_or_pull_ci_image_if_needed(command_params: ShellParams | BuildCiParams) -> None:
+def build_ci_image_if_needed(command_params: ShellParams | BuildCiParams) -> None:
     """
-    Rebuilds CI image if needed and user confirms it.
+    Build the CI image if needed and the user confirms it.
 
     :param command_params: parameters of the command to execute
     """
@@ -896,9 +951,16 @@ def rebuild_or_pull_ci_image_if_needed(command_params: ShellParams | BuildCiPara
     )
     if build_ci_image_check_cache.exists():
         if get_verbose():
-            get_console().print(f"[info]{command_params.image_type} image already built locally.[/]")
+            console_print(f"[info]{command_params.image_type} image already built locally.[/]")
+    elif not ci_image_params.force_build and is_ci_image_built_from_current_sources(ci_image_params):
+        console_print(
+            f"[info]{command_params.image_type} image for Python {command_params.python} was built "
+            "from the same important sources in another checkout (e.g. a git worktree). Reusing it.[/]"
+        )
+        mark_image_as_rebuilt(ci_image_params=ci_image_params)
+        return
     else:
-        get_console().print(
+        console_print(
             f"[warning]{command_params.image_type} image for Python {command_params.python} "
             f"was never built locally or was deleted. Forcing build.[/]"
         )
@@ -911,11 +973,11 @@ def rebuild_or_pull_ci_image_if_needed(command_params: ShellParams | BuildCiPara
             ci_image_params=ci_image_params, param_description=ci_image_params.python, output=None
         )
         if return_code != 0:
-            get_console().print(f"[error]Error when building image! {info}")
+            console_print(f"[error]Error when building image! {info}")
             sys.exit(return_code)
 
 
-@ci_image.command(name="export-mount-cache")
+@ci_image_group.command(name="export-mount-cache")
 @click.option(
     "--cache-file",
     required=True,
@@ -930,13 +992,13 @@ def export_mount_cache(
     cache_file: Path,
 ):
     """
-    Export content of the the mount cache to a directory.
+    Export content of the mount cache to a directory.
     """
     perform_environment_checks()
     make_sure_builder_configured(params=BuildCiParams(builder=builder))
     dockerfile = f"""
     # syntax=docker/dockerfile:1.4
-    FROM ghcr.io/astral-sh/uv:{UV_VERSION}-bookworm-slim
+    FROM ghcr.io/astral-sh/uv:{UV_VERSION}-debian-slim
     ARG TARGETARCH
     ARG DEPENDENCY_CACHE_EPOCH=<REPLACE_FROM_DOCKER_CI>
     RUN --mount=type=cache,id=ci-$TARGETARCH-$DEPENDENCY_CACHE_EPOCH,target=/root/.cache/ \\
@@ -947,9 +1009,9 @@ def export_mount_cache(
 
     dockerfile_ci_content = (AIRFLOW_ROOT_PATH / "Dockerfile.ci").read_text()
     dependency_cache_epoch = dockerfile_ci_content.split("DEPENDENCY_CACHE_EPOCH=")[1].split("\n")[0]
-    get_console().print(f"[info]Dependency cache epoch from Dockerfile.ci = {dependency_cache_epoch}[/]")
+    console_print(f"[info]Dependency cache epoch from Dockerfile.ci = {dependency_cache_epoch}[/]")
     dockerfile = dockerfile.replace("<REPLACE_FROM_DOCKER_CI>", dependency_cache_epoch)
-    get_console().print("[info]Building temporary image including copying cache content to the image[/]")
+    console_print("[info]Building temporary image including copying cache content to the image[/]")
     builder_opt: list[str] = []
     if builder != "autodetect":
         builder_opt = ["--builder", builder]
@@ -959,28 +1021,28 @@ def export_mount_cache(
         text=True,
         check=True,
     )
-    get_console().print("[info]Built temporary image[/]")
-    get_console().print("[info]Creating temporary container[/]")
+    console_print("[info]Built temporary image[/]")
+    console_print("[info]Creating temporary container[/]")
     run_command(
         ["docker", "create", "--name", "airflow-export-cache-container", "airflow-export-cache"], check=True
     )
-    get_console().print("[info]Created temporary container[/]")
-    get_console().print(f"[info]Copying exported cache from the container to {cache_file}[/]")
+    console_print("[info]Created temporary container[/]")
+    console_print(f"[info]Copying exported cache from the container to {cache_file}[/]")
     run_command(
         ["docker", "cp", "airflow-export-cache-container:/root/.cache.tar.gz", cache_file.as_posix()],
         check=True,
     )
-    get_console().print("[info]Copied exported cache from the container[/]")
-    get_console().print("[info]Removing the temporary container[/]")
+    console_print("[info]Copied exported cache from the container[/]")
+    console_print("[info]Removing the temporary container[/]")
     run_command(["docker", "rm", "airflow-export-cache-container"], check=True)
-    get_console().print("[info]Removed the temporary container[/]")
-    get_console().print("[info]Removing the temporary image[/]")
+    console_print("[info]Removed the temporary container[/]")
+    console_print("[info]Removing the temporary image[/]")
     run_command(["docker", "rmi", "airflow-export-cache"], check=True)
-    get_console().print("[info]Removed the temporary image[/]")
-    get_console().print(f"[success]Exported mount cache to {cache_file}[/]")
+    console_print("[info]Removed the temporary image[/]")
+    console_print(f"[success]Exported mount cache to {cache_file}[/]")
 
 
-@ci_image.command(name="import-mount-cache")
+@ci_image_group.command(name="import-mount-cache")
 @click.option(
     "--cache-file",
     required=True,
@@ -995,7 +1057,7 @@ def import_mount_cache(
     cache_file: Path,
 ):
     """
-    Export content of the the mount cache to a directory.
+    Export content of the mount cache to a directory.
     """
     perform_environment_checks()
     make_sure_builder_configured(params=BuildCiParams(builder=builder))
@@ -1011,16 +1073,16 @@ def import_mount_cache(
     import tempfile
 
     context = Path(tempfile.mkdtemp())
-    get_console().print(f"[info]Context: {context}[/]")
+    console_print(f"[info]Context: {context}[/]")
     context_cache_file = context / "cache.tar.gz"
-    get_console().print(f"[info]Copying cache file to context: {context_cache_file}[/]")
+    console_print(f"[info]Copying cache file to context: {context_cache_file}[/]")
     cache_file.rename(context_cache_file)
-    get_console().print(f"[info]Copied cache file to context: {context_cache_file}[/]")
+    console_print(f"[info]Copied cache file to context: {context_cache_file}[/]")
     dockerfile_ci_content = (AIRFLOW_ROOT_PATH / "Dockerfile.ci").read_text()
     dependency_cache_epoch = dockerfile_ci_content.split("DEPENDENCY_CACHE_EPOCH=")[1].split("\n")[0]
-    get_console().print(f"[info]Dependency cache epoch from Dockerfile.ci = {dependency_cache_epoch}[/]")
+    console_print(f"[info]Dependency cache epoch from Dockerfile.ci = {dependency_cache_epoch}[/]")
     dockerfile = dockerfile.replace("<REPLACE_FROM_DOCKER_CI>", dependency_cache_epoch)
-    get_console().print("[info]Building temporary image and copying cache to mount cache[/]")
+    console_print("[info]Building temporary image and copying cache to mount cache[/]")
     builder_opt: list[str] = []
     if builder != "autodetect":
         builder_opt = ["--builder", builder]
@@ -1041,12 +1103,13 @@ def import_mount_cache(
         text=True,
         check=True,
     )
-    get_console().print("[info]Built temporary image and copied cache[/]")
-    get_console().print("[info]Removing temporary image[/]")
+    console_print("[info]Built temporary image and copied cache[/]")
+    console_print("[info]Removing temporary image[/]")
     run_command(["docker", "rmi", "airflow-import-cache"], check=True)
-    get_console().print("[info]Built temporary image and copying context[/]")
-    get_console().print(f"[info]Removing context: {context}[/]")
+    run_command(["docker", "system", "prune", "-f"], check=True)
+    console_print("[info]Built temporary image and copying context[/]")
+    console_print(f"[info]Removing context: {context}[/]")
     context_cache_file.unlink()
     context.rmdir()
-    get_console().print(f"[info]Removed context: {context}[/]")
-    get_console().print(f"[success]Imported mount cache from {cache_file}[/]")
+    console_print(f"[info]Removed context: {context}[/]")
+    console_print(f"[success]Imported mount cache from {cache_file}[/]")

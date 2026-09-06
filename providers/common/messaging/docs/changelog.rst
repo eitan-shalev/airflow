@@ -25,6 +25,66 @@
 Changelog
 ---------
 
+2.0.4
+.....
+
+Misc
+~~~~
+
+* ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix stale system test documentation links (#65071)``
+
+
+2.0.3
+.....
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Prepare providers release 2026-03-09 (#63198)``
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+
+2.0.2
+.....
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Providers wave 2025-12-30 (#59947)``
+   * ``Prepare providers release 2025-12-09 (#59249)``
+   * ``Updates to release process of providers (#58316)``
+
+2.0.1
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Fix documentation/provider.yaml consistencies (#57283)``
+   * ``Prepare release for Oct 2025 wave of providers (#57029)``
+   * ``Enable PT011 rule to prvoider tests (#56495)``
+   * ``Remove placeholder Release Date in changelog and index files (#56056)``
+   * ``Prepare release for Sep 2025 2nd wave of providers (#55688)``
+   * ``Add section in doc about using message payload (#55438)``
+
 2.0.0
 .....
 
@@ -47,8 +107,6 @@ Doc-only
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Switch pre-commit to prek (#54258)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Fix Airflow 2 reference in README/index of providers (#55240)``
 
 1.0.5

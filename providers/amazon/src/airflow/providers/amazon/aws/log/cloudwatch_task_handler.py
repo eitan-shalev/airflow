@@ -19,20 +19,25 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import inspect
 import json
 import logging
 import os
+import shutil
+from collections.abc import Generator
 from datetime import date, datetime, timedelta, timezone
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import attrs
 import watchtower
+from botocore.exceptions import ClientError
 
-from airflow.configuration import conf
 from airflow.providers.amazon.aws.hooks.logs import AwsLogsHook
 from airflow.providers.amazon.aws.utils import datetime_to_epoch_utc_ms
+from airflow.providers.common.compat.sdk import conf
 from airflow.utils.log.file_task_handler import FileTaskHandler
 from airflow.utils.log.logging_mixin import LoggingMixin
 
@@ -40,8 +45,15 @@ if TYPE_CHECKING:
     import structlog.typing
 
     from airflow.models.taskinstance import TaskInstance
+    from airflow.providers.amazon.aws.hooks.logs import CloudWatchLogEvent
     from airflow.sdk.types import RuntimeTaskInstanceProtocol as RuntimeTI
-    from airflow.utils.log.file_task_handler import LogMessages, LogSourceInfo
+    from airflow.utils.log.file_task_handler import (
+        LogMessages,
+        LogResponse,
+        LogSourceInfo,
+        RawLogStream,
+        StreamingLogResponse,
+    )
 
 
 def json_serialize_legacy(value: Any) -> str | None:
@@ -82,6 +94,10 @@ class CloudWatchRemoteLogIO(LoggingMixin):  # noqa: D101
     log_stream_name: str = ""
     log_group: str = attrs.field(init=False, repr=False)
     region_name: str = attrs.field(init=False, repr=False)
+    _cached_handler: watchtower.CloudWatchLogHandler | None = attrs.field(
+        init=False, default=None, repr=False
+    )
+    _closed: bool = attrs.field(init=False, default=False, repr=False)
 
     @log_group.default
     def _(self):
@@ -91,6 +107,40 @@ class CloudWatchRemoteLogIO(LoggingMixin):  # noqa: D101
     def _(self):
         return self.log_group_arn.split(":")[3]
 
+    @classmethod
+    def from_config(cls) -> CloudWatchRemoteLogIO:
+        """Build the remote log IO from Airflow logging configuration."""
+        remote_task_handler_kwargs = conf.getjson("logging", "remote_task_handler_kwargs", fallback={})
+        if not isinstance(remote_task_handler_kwargs, dict):
+            raise ValueError(
+                "logging/remote_task_handler_kwargs must be a JSON object (a python dict), we got "
+                f"{type(remote_task_handler_kwargs)}"
+            )
+        # remote_task_handler_kwargs mixes FileTaskHandler kwargs with IO kwargs; only the
+        # latter belong to this class (same split as airflow_local_settings.py).
+        fth_params = frozenset(inspect.signature(FileTaskHandler.__init__).parameters) - {
+            "self",
+            "base_log_folder",
+        }
+        io_kwargs = {k: v for k, v in remote_task_handler_kwargs.items() if k not in fth_params}
+        remote_base_log_folder = conf.get_mandatory_value("logging", "remote_base_log_folder")
+        url_parts = urlsplit(remote_base_log_folder)
+        log_group_arn = url_parts.netloc + url_parts.path
+        if not log_group_arn:
+            raise ValueError(
+                "Cannot derive a CloudWatch log group ARN from "
+                f"logging/remote_base_log_folder: {remote_base_log_folder!r}"
+            )
+        return cls(
+            **{
+                "base_log_folder": os.path.expanduser(conf.get_mandatory_value("logging", "base_log_folder")),
+                "remote_base": remote_base_log_folder,
+                "delete_local_copy": conf.getboolean("logging", "delete_local_logs"),
+                "log_group_arn": log_group_arn,
+            }
+            | io_kwargs,
+        )
+
     @cached_property
     def hook(self):
         """Returns AwsLogsHook."""
@@ -98,8 +148,7 @@ class CloudWatchRemoteLogIO(LoggingMixin):  # noqa: D101
             aws_conn_id=conf.get("logging", "remote_log_conn_id"), region_name=self.region_name
         )
 
-    @cached_property
-    def handler(self) -> watchtower.CloudWatchLogHandler:
+    def _build_handler(self) -> watchtower.CloudWatchLogHandler:
         _json_serialize = conf.getimport("aws", "cloudwatch_task_handler_json_serializer", fallback=None)
         return watchtower.CloudWatchLogHandler(
             log_group_name=self.log_group,
@@ -108,6 +157,20 @@ class CloudWatchRemoteLogIO(LoggingMixin):  # noqa: D101
             boto3_client=self.hook.get_conn(),
             json_serialize_default=_json_serialize or json_serialize_legacy,
         )
+
+    @property
+    def handler(self) -> watchtower.CloudWatchLogHandler:
+        """
+        Return the streaming handler, rebuilding it if dictConfig closed it mid-task.
+
+        dictConfig's non-incremental reset closes every handler in ``logging._handlerList``,
+        leaving this one with ``shutting_down=True`` (it then silently drops every record).
+        Rebuild only while the IO is live: once :meth:`close` has run, keep the closed handler
+        so a late record is dropped instead of spawning an orphan handler and background thread.
+        """
+        if self._cached_handler is None or (not self._closed and self._cached_handler.shutting_down):
+            self._cached_handler = self._build_handler()
+        return self._cached_handler
 
     @cached_property
     def processors(self) -> tuple[structlog.typing.Processor, ...]:
@@ -118,16 +181,19 @@ class CloudWatchRemoteLogIO(LoggingMixin):  # noqa: D101
         logRecordFactory = getLogRecordFactory()
         # The handler MUST be initted here, before the processor is actually used to log anything.
         # Otherwise, logging that occurs during the creation of the handler can create infinite loops.
-        _handler = self.handler
+        _ = self.handler
         from airflow.sdk.log import relative_path_from_logger
 
         def proc(logger: structlog.typing.WrappedLogger, method_name: str, event: structlog.typing.EventDict):
             if not logger or not (stream_name := relative_path_from_logger(logger)):
                 return event
+            # Resolve the handler on every record: configure_logging() may have
+            # closed the one built above, in which case ``handler`` rebuilds it.
+            handler = self.handler
             # We can't set the log stream name in the above init handler because
             # the log path isn't known at that stage.
             # Instead, we should always rely on the path (log stream name) provided by the logger.
-            _handler.log_stream_name = stream_name.as_posix().replace(":", "_")
+            handler.log_stream_name = stream_name.as_posix().replace(":", "_")
             name = event.get("logger_name") or event.get("logger", "")
             level = structlog.stdlib.NAME_TO_LEVEL.get(method_name.lower(), logging.INFO)
             msg = copy.copy(event)
@@ -142,41 +208,74 @@ class CloudWatchRemoteLogIO(LoggingMixin):  # noqa: D101
                 ct = created.timestamp()
                 record.created = ct
                 record.msecs = int((ct - int(ct)) * 1000) + 0.0  # Copied from stdlib logging
-            _handler.handle(record)
+            handler.handle(record)
             return event
 
         return (proc,)
 
     def close(self):
-        # Use the flush method to ensure all logs are sent to CloudWatch.
-        # Closing the handler sets `shutting_down` to True, which prevents any further logs from being sent.
-        # When `shutting_down` is True, means the logging system is in the process of shutting down,
-        # during which it attempts to flush the logs which are queued.
-        if self.handler is None or self.handler.shutting_down:
+        """
+        Flush pending events one last time and mark the IO closed.
+
+        Only ever called from :meth:`upload`. Mark the IO closed first so ``handler`` stops
+        rebuilding: a record arriving after teardown must be dropped, not revive a fresh
+        handler. Read the cached handler directly so we never build one just to flush it.
+        """
+        self._closed = True
+        handler = self._cached_handler
+        if handler is None or handler.shutting_down:
             return
 
-        self.handler.flush()
+        handler.flush()
 
-    def upload(self, path: os.PathLike | str, ti: RuntimeTI):
-        # No-op, as we upload via the processor as we go
-        # But we need to give the handler time to finish off its business
+    def upload(self, path: os.PathLike | str, ti: RuntimeTI | None = None) -> None:
+        """Upload the given log path to the remote storage."""
+        # No batch upload — logs stream in real-time. Flush pending events and clean up.
         self.close()
-        return
+        if self.delete_local_copy:
+            base = self.base_log_folder.resolve()
+            raw = Path(path)
+            local_path = (raw if raw.is_absolute() else base / raw).resolve()
+            try:
+                local_path.relative_to(base)
+            except ValueError:
+                self.log.warning(
+                    "Skipping deletion: path %s is outside base_log_folder %s",
+                    local_path,
+                    base,
+                )
+                return
+            parent = local_path.parent
+            if parent.exists():
+                shutil.rmtree(parent, ignore_errors=True)
+                if parent.exists():
+                    self.log.warning("Failed to delete local log dir: %s", parent)
 
-    def read(self, relative_path, ti: RuntimeTI) -> tuple[LogSourceInfo, LogMessages | None]:
-        logs: LogMessages | None = []
+    def read(self, relative_path: str, ti: RuntimeTI) -> LogResponse:
+        messages, logs = self.stream(relative_path, ti)
+        str_logs: list[str] = [f"{msg}\n" for group in logs for msg in group]
+
+        return messages, str_logs
+
+    def stream(self, relative_path: str, ti: RuntimeTI) -> StreamingLogResponse:
+        logs: list[RawLogStream] = []
         messages = [
             f"Reading remote log from Cloudwatch log_group: {self.log_group} log_stream: {relative_path}"
         ]
         try:
-            logs = [self.get_cloudwatch_logs(relative_path, ti)]
+            gen: RawLogStream = (
+                self._parse_log_event_as_dumped_json(event)
+                for event in self.get_cloudwatch_logs(relative_path, ti)
+            )
+            logs = [gen]
         except Exception as e:
-            logs = None
             messages.append(str(e))
 
         return messages, logs
 
-    def get_cloudwatch_logs(self, stream_name: str, task_instance: RuntimeTI):
+    def get_cloudwatch_logs(
+        self, stream_name: str, task_instance: RuntimeTI
+    ) -> Generator[CloudWatchLogEvent, None, None]:
         """
         Return all logs from the given log stream.
 
@@ -197,24 +296,40 @@ class CloudWatchRemoteLogIO(LoggingMixin):  # noqa: D101
             log_stream_name=stream_name,
             end_time=end_time,
         )
-        return "\n".join(self._event_to_str(event) for event in events)
 
-    def _event_to_dict(self, event: dict) -> dict:
+        def _iter_events() -> Generator[CloudWatchLogEvent, None, None]:
+            try:
+                yield from events
+            except ClientError as e:
+                # A missing log stream means no logs were written for this stream
+                # (e.g. the task logged to stdout instead of remote storage, or has
+                # not produced any logs). Surface a hint instead of a 500 error, and
+                # instead of an empty view that looks like remote logging silently failed.
+                if e.response.get("Error", {}).get("Code") != "ResourceNotFoundException":
+                    raise
+                notice_ts = end_time or datetime_to_epoch_utc_ms(datetime.now(tz=timezone.utc))
+                yield {
+                    "timestamp": notice_ts,
+                    "ingestionTime": notice_ts,
+                    "message": (
+                        f"No log stream found in CloudWatch (log_group={self.log_group}, "
+                        f"log_stream={stream_name}). The task may have logged to stdout only, "
+                        f"not produced any logs yet, or remote logging may be misconfigured."
+                    ),
+                }
+
+        return _iter_events()
+
+    def _parse_log_event_as_dumped_json(self, event: CloudWatchLogEvent) -> str:
         event_dt = datetime.fromtimestamp(event["timestamp"] / 1000.0, tz=timezone.utc).isoformat()
-        message = event["message"]
+        event_msg = event["message"]
         try:
-            message = json.loads(message)
+            message = json.loads(event_msg)
             message["timestamp"] = event_dt
-            return message
         except Exception:
-            return {"timestamp": event_dt, "event": message}
+            message = {"timestamp": event_dt, "event": event_msg}
 
-    def _event_to_str(self, event: dict) -> str:
-        event_dt = datetime.fromtimestamp(event["timestamp"] / 1000.0, tz=timezone.utc)
-        # Format a datetime object to a string in Zulu time without milliseconds.
-        formatted_event_dt = event_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        message = event["message"]
-        return f"[{formatted_event_dt}] {message}"
+        return json.dumps(message)
 
 
 class CloudwatchTaskHandler(FileTaskHandler, LoggingMixin):
@@ -249,10 +364,12 @@ class CloudwatchTaskHandler(FileTaskHandler, LoggingMixin):
         self.log_group = split_arn[6]
         self.region_name = split_arn[3]
         self.closed = False
+        self.log_relative_path: str = ""
 
         self.io = CloudWatchRemoteLogIO(
             base_log_folder=base_log_folder,
             log_group_arn=log_group_arn,
+            delete_local_copy=conf.getboolean("logging", "delete_local_logs"),
         )
 
     @cached_property
@@ -269,8 +386,9 @@ class CloudwatchTaskHandler(FileTaskHandler, LoggingMixin):
     def set_context(self, ti: TaskInstance, *, identifier: str | None = None):
         super().set_context(ti)
         self.io.log_stream_name = self._render_filename(ti, ti.try_number)
-
         self.handler = self.io.handler
+        self.ti = ti
+        self.log_relative_path = self.io.log_stream_name
 
     def close(self):
         """Close the handler responsible for the upload of the local log file to Cloudwatch."""
@@ -281,8 +399,17 @@ class CloudwatchTaskHandler(FileTaskHandler, LoggingMixin):
         if self.closed:
             return
 
-        if self.handler is not None:
-            self.handler.close()
+        # Close the handler the IO is actually using now, not the reference captured in
+        # set_context(): dictConfig may have closed that one and the IO rebuilt since, and
+        # closing the stale handler would leak the live handler's background thread.
+        live_handler = self.io._cached_handler
+        if live_handler is not None:
+            live_handler.close()
+        if hasattr(self, "ti"):
+            try:
+                self.io.upload(self.log_relative_path, self.ti)
+            except Exception:
+                self.log.exception("Failed to delete local log after streaming to CloudWatch")
         # Mark closed so we don't double write if close is called twice
         self.closed = True
 
@@ -291,4 +418,22 @@ class CloudwatchTaskHandler(FileTaskHandler, LoggingMixin):
     ) -> tuple[LogSourceInfo, LogMessages]:
         stream_name = self._render_filename(task_instance, try_number)
         messages, logs = self.io.read(stream_name, task_instance)
-        return messages, logs or []
+
+        messages = [
+            f"Reading remote log from Cloudwatch log_group: {self.io.log_group} log_stream: {stream_name}"
+        ]
+        try:
+            events = self.io.get_cloudwatch_logs(stream_name, task_instance)
+            logs = ["\n".join(self._event_to_str(event) for event in events)]
+        except Exception as e:
+            logs = []
+            messages.append(str(e))
+
+        return messages, logs
+
+    def _event_to_str(self, event: CloudWatchLogEvent) -> str:
+        event_dt = datetime.fromtimestamp(event["timestamp"] / 1000.0, tz=timezone.utc)
+        # Format a datetime object to a string in Zulu time without milliseconds.
+        formatted_event_dt = event_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        message = event["message"]
+        return f"[{formatted_event_dt}] {message}"

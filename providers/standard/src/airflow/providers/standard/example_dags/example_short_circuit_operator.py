@@ -15,21 +15,22 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Example DAG demonstrating the usage of the ShortCircuitOperator."""
+"""
+### ShortCircuitOperator
+
+This example demonstrates how to use the ShortCircuitOperator to continue a workflow only when a condition
+is truthy. It also shows how `ignore_downstream_trigger_rules=False` lets later downstream tasks respect
+their trigger rules after the direct downstream tasks are skipped.
+"""
 
 from __future__ import annotations
 
 import pendulum
 
+from airflow.providers.common.compat.sdk import TriggerRule
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.python import ShortCircuitOperator
 from airflow.sdk import DAG, chain
-
-try:
-    from airflow.sdk import TriggerRule
-except ImportError:
-    # Compatibility for Airflow < 3.1
-    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 with DAG(
     dag_id="example_short_circuit_operator",
@@ -37,6 +38,7 @@ with DAG(
     start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
     catchup=False,
     tags=["example"],
+    doc_md=__doc__,
 ) as dag:
     # [START howto_operator_short_circuit]
     cond_true = ShortCircuitOperator(

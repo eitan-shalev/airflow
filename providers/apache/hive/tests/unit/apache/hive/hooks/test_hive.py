@@ -27,15 +27,14 @@ import polars as pl
 import pytest
 from hmsclient import HMSClient
 
-from airflow.exceptions import AirflowException
 from airflow.models.connection import Connection
 from airflow.models.dag import DAG
 from airflow.providers.apache.hive.hooks.hive import HiveCliHook, HiveMetastoreHook, HiveServer2Hook
+from airflow.providers.common.compat.sdk import AIRFLOW_VAR_NAME_FORMAT_MAPPING, AirflowException, timezone
 from airflow.secrets.environment_variables import CONN_ENV_PREFIX
-from airflow.utils import timezone
 
 from tests_common.test_utils.asserts import assert_equal_ignore_multiple_spaces
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_3_PLUS
 from unit.apache.hive import (
     BaseMockConnectionCursor,
     InvalidHiveCliHook,
@@ -43,13 +42,6 @@ from unit.apache.hive import (
     MockHiveServer2Hook,
     MockSubProcess,
 )
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.sdk.execution_time.context import AIRFLOW_VAR_NAME_FORMAT_MAPPING
-else:
-    from airflow.utils.operator_helpers import (  # type: ignore[no-redef, attr-defined]
-        AIRFLOW_VAR_NAME_FORMAT_MAPPING,
-    )
 
 DEFAULT_DATE = timezone.datetime(2015, 1, 1)
 DEFAULT_DATE_ISO = DEFAULT_DATE.isoformat()
@@ -60,6 +52,17 @@ class EmptyMockConnectionCursor(BaseMockConnectionCursor):
     def __init__(self):
         super().__init__()
         self.iterable = []
+
+
+def get_hive_cli_connection(extra_dejson=None, login=None, password=None):
+    connection = mock.MagicMock()
+    connection.extra_dejson = {"use_beeline": True, **(extra_dejson or {})}
+    connection.host = "localhost"
+    connection.port = 10000
+    connection.schema = "default"
+    connection.login = login
+    connection.password = password
+    return connection
 
 
 @pytest.mark.db_test
@@ -106,6 +109,7 @@ class TestHiveCliHook:
             "airflow.ctx.dag_owner=airflow",
             "-hiveconf",
             "airflow.ctx.dag_email=test@airflow.com",
+            *(["-hiveconf", "airflow.ctx.team_name="] if AIRFLOW_V_3_3_PLUS else []),
             "-hiveconf",
             "mapreduce.job.queuename=airflow",
             "-hiveconf",
@@ -123,6 +127,33 @@ class TestHiveCliHook:
             cwd="/tmp/airflow_hiveop_test_run_cli",
             close_fds=True,
         )
+
+    @mock.patch("airflow.providers.apache.hive.hooks.hive.send_sql_hook_lineage")
+    @mock.patch("tempfile.tempdir", "/tmp/")
+    @mock.patch("tempfile._RandomNameSequence.__next__")
+    @mock.patch("subprocess.Popen")
+    def test_run_cli_hook_lineage(self, mock_popen, mock_temp_dir, mock_send_lineage):
+        mock_subprocess = MockSubProcess()
+        mock_popen.return_value = mock_subprocess
+        mock_temp_dir.return_value = "test_run_cli"
+        hql = "SHOW DATABASES"
+        envron_name = "AIRFLOW_CTX_LOGICAL_DATE" if AIRFLOW_V_3_0_PLUS else "AIRFLOW_CTX_EXECUTION_DATE"
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "AIRFLOW_CTX_DAG_ID": "test_dag_id",
+                "AIRFLOW_CTX_TASK_ID": "test_task_id",
+                envron_name: "2015-01-01T00:00:00+00:00",
+                "AIRFLOW_CTX_TRY_NUMBER": "1",
+                "AIRFLOW_CTX_DAG_RUN_ID": "55",
+                "AIRFLOW_CTX_DAG_OWNER": "airflow",
+                "AIRFLOW_CTX_DAG_EMAIL": "test@airflow.com",
+            },
+        ):
+            hook = MockHiveCliHook()
+            hook.run_cli(hql, schema="some_schema")
+
+        mock_send_lineage.assert_called_once_with(context=hook, sql=f"USE some_schema;\n{hql}\n")
 
     def test_hive_cli_hook_invalid_schema(self):
         hook = InvalidHiveCliHook()
@@ -598,6 +629,113 @@ class TestHiveMetastoreHook:
         assert metastore_mock.drop_partition(self.table, db=self.database, part_vals=[DEFAULT_DATE_DS]), ret
 
 
+class TestHiveCliHookJdbcParams:
+    @mock.patch.object(HiveCliHook, "get_connection")
+    def test_jdbc_params_append_to_beeline_url(self, mock_get_connection):
+        mock_get_connection.return_value = get_hive_cli_connection()
+
+        hook = HiveCliHook(
+            jdbc_params={
+                "transportMode": "http",
+                "sslTrustStore": "/opt/hive/truststore.jks",
+                "trustStorePassword": "secret=ok",
+            }
+        )
+
+        assert hook._prepare_cli_cmd() == [
+            "beeline",
+            "-u",
+            '"jdbc:hive2://localhost:10000/default;'
+            'transportMode=http;sslTrustStore=/opt/hive/truststore.jks;trustStorePassword=secret=ok"',
+        ]
+
+    @mock.patch.object(HiveCliHook, "get_connection")
+    def test_jdbc_params_compose_with_auth_login_and_password(self, mock_get_connection):
+        mock_get_connection.return_value = get_hive_cli_connection(login="user", password="password")
+
+        hook = HiveCliHook(auth="LDAP", jdbc_params={"transportMode": "http"})
+
+        assert hook._prepare_cli_cmd() == [
+            "beeline",
+            "-u",
+            '"jdbc:hive2://localhost:10000/default;auth=LDAP;transportMode=http"',
+            "-n",
+            "user",
+            "-p",
+            "password",
+        ]
+
+    @mock.patch.object(HiveCliHook, "get_connection")
+    def test_hook_jdbc_params_append_in_order(self, mock_get_connection):
+        mock_get_connection.return_value = get_hive_cli_connection()
+
+        hook = HiveCliHook(
+            jdbc_params={
+                "transportMode": "http",
+                "sslTrustStore": "/opt/hive/truststore.jks",
+            }
+        )
+
+        assert hook._prepare_cli_cmd() == [
+            "beeline",
+            "-u",
+            '"jdbc:hive2://localhost:10000/default;transportMode=http;sslTrustStore=/opt/hive/truststore.jks"',
+        ]
+
+    @mock.patch.object(HiveCliHook, "get_connection")
+    def test_empty_jdbc_param_value_is_ignored(self, mock_get_connection):
+        mock_get_connection.return_value = get_hive_cli_connection()
+
+        hook = HiveCliHook(jdbc_params={"transportMode": "", "sslTrustStore": "/opt/hive/truststore.jks"})
+
+        assert hook._prepare_cli_cmd() == [
+            "beeline",
+            "-u",
+            '"jdbc:hive2://localhost:10000/default;sslTrustStore=/opt/hive/truststore.jks"',
+        ]
+
+    @mock.patch.object(HiveCliHook, "get_connection")
+    def test_all_empty_jdbc_param_values_return_base_beeline_url(self, mock_get_connection):
+        mock_get_connection.return_value = get_hive_cli_connection()
+
+        hook = HiveCliHook(jdbc_params={"transportMode": "", "sslTrustStore": ""})
+
+        assert hook._prepare_cli_cmd() == [
+            "beeline",
+            "-u",
+            '"jdbc:hive2://localhost:10000/default"',
+        ]
+
+    @pytest.mark.parametrize(
+        ("jdbc_params", "message"),
+        [
+            ({"transportMode;ssl": "http"}, "Invalid JDBC parameter name"),
+            ({"transportMode=ssl": "http"}, "Invalid JDBC parameter name"),
+            ({"transport Mode": "http"}, "Invalid JDBC parameter name"),
+            ({"transportMode-": "http"}, "Invalid JDBC parameter name"),
+            ({"foo.": "x"}, "Invalid JDBC parameter name"),
+            ({"bar_": "x"}, "Invalid JDBC parameter name"),
+            ({"transportMode": "http;ssl=true"}, "Invalid JDBC parameter value"),
+        ],
+    )
+    @mock.patch.object(HiveCliHook, "get_connection")
+    def test_invalid_jdbc_params_are_rejected(self, mock_get_connection, jdbc_params, message):
+        mock_get_connection.return_value = get_hive_cli_connection()
+        hook = HiveCliHook(jdbc_params=jdbc_params)
+
+        with pytest.raises(ValueError, match=message):
+            hook._prepare_cli_cmd()
+
+    @pytest.mark.parametrize("value", [None, 1, True, {"mode": "http"}])
+    @mock.patch.object(HiveCliHook, "get_connection")
+    def test_non_string_jdbc_param_values_are_rejected(self, mock_get_connection, value):
+        mock_get_connection.return_value = get_hive_cli_connection()
+        hook = HiveCliHook(jdbc_params={"transportMode": value})
+
+        with pytest.raises(ValueError, match="Invalid JDBC parameter value"):
+            hook._prepare_cli_cmd()
+
+
 @pytest.mark.db_test
 class TestHiveServer2Hook:
     def _upload_dataframe(self):
@@ -657,8 +795,49 @@ class TestHiveServer2Hook:
                 database="default",
             )
 
+    @mock.patch("pyhive.hive.connect")
+    def test_get_conn_with_password_plain(self, mock_connect):
+        conn_id = "conn_plain_with_password"
+        conn_env = CONN_ENV_PREFIX + conn_id.upper()
+
+        with mock.patch.dict(
+            "os.environ",
+            {conn_env: "jdbc+hive2://login:password@localhost:10000/default?auth_mechanism=PLAIN"},
+        ):
+            HiveServer2Hook(hiveserver2_conn_id=conn_id).get_conn()
+            mock_connect.assert_called_once_with(
+                host="localhost",
+                port=10000,
+                auth="PLAIN",
+                kerberos_service_name=None,
+                username="login",
+                password="password",
+                database="default",
+            )
+
+    @mock.patch("pyhive.hive.connect")
+    def test_get_conn_with_password_none_auth(self, mock_connect):
+        """Test that password is passed through even when auth_mechanism is NONE."""
+        conn_id = "conn_none_with_password"
+        conn_env = CONN_ENV_PREFIX + conn_id.upper()
+
+        with mock.patch.dict(
+            "os.environ",
+            {conn_env: "jdbc+hive2://user:mypassword@localhost:10000/default"},
+        ):
+            HiveServer2Hook(hiveserver2_conn_id=conn_id).get_conn()
+            mock_connect.assert_called_once_with(
+                host="localhost",
+                port=10000,
+                auth="NONE",
+                kerberos_service_name=None,
+                username="user",
+                password="mypassword",
+                database="default",
+            )
+
     @pytest.mark.parametrize(
-        "host, port, schema, message",
+        ("host", "port", "schema", "message"),
         [
             ("localhost", "10000", "default", None),
             ("localhost:", "10000", "default", "The host used in beeline command"),
@@ -773,6 +952,20 @@ class TestHiveServer2Hook:
         results = hook.get_results(query, schema=self.database)
 
         assert results["data"] == [(1, 1), (2, 2)]
+
+    @mock.patch("airflow.providers.apache.hive.hooks.hive.send_sql_hook_lineage")
+    def test_get_results_sends_hook_lineage(self, mock_send_lineage):
+        hook = MockHiveServer2Hook()
+
+        query = f"SELECT * FROM {self.table}"
+        hook.get_results(query, schema=self.database)
+
+        mock_send_lineage.assert_called()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is hook
+        assert call_kw["sql"] == query
+        assert call_kw["cur"] is hook.mock_cursor
+        assert call_kw["default_schema"] == self.database
 
     def test_to_csv(self):
         hook = MockHiveServer2Hook()
@@ -892,6 +1085,27 @@ class TestHiveServer2Hook:
         assert f"test_{date_key}" in output
         assert "test_dag_run_id" in output
 
+    def test_sqlalchemy_uri(self):
+        """Test sqlalchemy_url with connection parameters"""
+
+        with mock.patch.object(HiveServer2Hook, "get_connection") as mock_get_conn:
+            mock_get_conn.return_value = Connection(
+                conn_id="test_hive_conn",
+                conn_type="hive_cli",
+                host="localhost",
+                port=10000,
+                schema="default",
+                login="admin",
+                password="admin",
+            )
+            hook = HiveServer2Hook()
+            uri = hook.sqlalchemy_url
+            assert uri.host == "localhost"
+            assert uri.port == 10000
+            assert uri.database == "default"
+            assert uri.username == "admin"
+            assert uri.password == "admin"
+
 
 @pytest.mark.db_test
 @mock.patch.dict("os.environ", AIRFLOW__CORE__SECURITY="kerberos")
@@ -912,7 +1126,7 @@ class TestHiveCli:
         assert not hook.high_availability
 
     @pytest.mark.parametrize(
-        "extra_dejson, correct_proxy_user, proxy_user",
+        ("extra_dejson", "correct_proxy_user", "proxy_user"),
         [
             ({"proxy_user": "a_user_proxy"}, "hive.server2.proxy.user=a_user_proxy", None),
         ],
@@ -944,22 +1158,26 @@ class TestHiveCli:
             hook._prepare_cli_cmd()
 
     @pytest.mark.parametrize(
-        "extra_dejson, expected_keys",
+        ("extra_dejson", "expected_keys"),
         [
             (
                 {"high_availability": "true"},
-                "serviceDiscoveryMode=zooKeeper;ssl=true;zooKeeperNamespace=hiveserver2",
+                "serviceDiscoveryMode=zooKeeper;ssl=True;zooKeeperNamespace=hiveserver2",
             ),
             (
                 {"high_availability": "false"},
-                "serviceDiscoveryMode=zooKeeper;ssl=true;zooKeeperNamespace=hiveserver2",
+                "serviceDiscoveryMode=zooKeeper;ssl=True;zooKeeperNamespace=hiveserver2",
             ),
-            ({}, "serviceDiscoveryMode=zooKeeper;ssl=true;zooKeeperNamespace=hiveserver2"),
+            (
+                {"high_availability": "true", "ssl": "false", "zoo_keeper_namespace": "custom_hive_server"},
+                "serviceDiscoveryMode=zooKeeper;ssl=false;zooKeeperNamespace=custom_hive_server",
+            ),
+            ({}, "serviceDiscoveryMode=zooKeeper;ssl=True;zooKeeperNamespace=hiveserver2"),
             # with proxy user
             (
                 {"proxy_user": "a_user_proxy", "high_availability": "true"},
                 "hive.server2.proxy.user=a_user_proxy;"
-                "serviceDiscoveryMode=zooKeeper;ssl=true;zooKeeperNamespace=hiveserver2",
+                "serviceDiscoveryMode=zooKeeper;ssl=True;zooKeeperNamespace=hiveserver2",
             ),
         ],
     )

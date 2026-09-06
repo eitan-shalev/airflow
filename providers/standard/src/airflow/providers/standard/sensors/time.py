@@ -17,35 +17,15 @@
 # under the License.
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import warnings
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
 from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.sdk import BaseSensorOperator, conf, timezone
 from airflow.providers.standard.triggers.temporal import DateTimeTrigger
-from airflow.providers.standard.version_compat import BaseSensorOperator
-
-try:
-    from airflow.triggers.base import StartTriggerArgs  # type: ignore[no-redef]
-except ImportError:  # TODO: Remove this when min airflow version is 2.10.0 for standard provider
-
-    @dataclass
-    class StartTriggerArgs:  # type: ignore[no-redef]
-        """Arguments required for start task execution from triggerer."""
-
-        trigger_cls: str
-        next_method: str
-        trigger_kwargs: dict[str, Any] | None = None
-        next_kwargs: dict[str, Any] | None = None
-        timeout: datetime.timedelta | None = None
-
-
-try:
-    from airflow.sdk import timezone
-except ImportError:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
+from airflow.triggers.base import StartTriggerArgs
 
 if TYPE_CHECKING:
     from airflow.sdk import Context
@@ -102,8 +82,12 @@ class TimeSensor(BaseSensorOperator):
         self.end_from_trigger = end_from_trigger
 
         if self.start_from_trigger:
-            self.start_trigger_args.trigger_kwargs = dict(
-                moment=self.target_datetime, end_from_trigger=self.end_from_trigger
+            # Replaced rather than mutated: ``start_trigger_args`` is a class attribute, so
+            # assigning through it would overwrite the arguments of every other task built
+            # from this operator.
+            self.start_trigger_args = dataclasses.replace(
+                self.start_trigger_args,
+                trigger_kwargs=dict(moment=self.target_datetime, end_from_trigger=self.end_from_trigger),
             )
 
     def execute(self, context: Context) -> None:

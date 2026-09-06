@@ -40,7 +40,7 @@ class ConnectionDetails:
 
 @dataclass
 class DagDetails:
-    """Represents the details of a DAG."""
+    """Represents the details of a Dag."""
 
     id: str | None = None
     team_name: str | None = None
@@ -48,7 +48,12 @@ class DagDetails:
 
 @dataclass
 class BackfillDetails:
-    """Represents the details of a backfill."""
+    """
+    Represents the details of a backfill.
+
+    .. deprecated:: 3.1.8
+        Use DagAccessEntity.Run instead for a dag level access control.
+    """
 
     id: NonNegativeInt | None = None
 
@@ -76,6 +81,13 @@ class PoolDetails:
 
 
 @dataclass
+class TeamDetails:
+    """Represents the details of a team."""
+
+    name: str | None = None
+
+
+@dataclass
 class VariableDetails:
     """Represents the details of a variable."""
 
@@ -86,9 +98,16 @@ class VariableDetails:
 class AccessView(Enum):
     """Enum of specific views the user tries to access."""
 
+    # Audit log rows not tied to a Dag -- Connection, Variable, Pool, … operations:
+    # there is no per-Dag key to authorize on, so they get their own admin-by-default
+    # view rather than riding on Dag-level ``DagAccessEntity.AUDIT_LOG`` access.
+    AUDIT_LOGS_ALL = "AUDIT_LOGS_ALL"
     CLUSTER_ACTIVITY = "CLUSTER_ACTIVITY"
     DOCS = "DOCS"
     IMPORT_ERRORS = "IMPORT_ERRORS"
+    # Import errors for files with no registered Dag: there is no per-Dag key to
+    # authorize on, so they get their own admin-by-default view.
+    IMPORT_ERRORS_ALL = "IMPORT_ERRORS_ALL"
     JOBS = "JOBS"
     PLUGINS = "PLUGINS"
     PROVIDERS = "PROVIDERS"
@@ -97,7 +116,7 @@ class AccessView(Enum):
 
 
 class DagAccessEntity(Enum):
-    """Enum of DAG entities the user tries to access."""
+    """Enum of Dag entities the user tries to access."""
 
     AUDIT_LOG = "AUDIT_LOG"
     CODE = "CODE"

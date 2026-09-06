@@ -27,15 +27,7 @@ from airflow.providers.yandex.hooks.yandex import YandexCloudBaseHook
 
 from tests_common.test_utils.config import conf_vars
 
-try:
-    import importlib.util
-
-    if not importlib.util.find_spec("airflow.sdk.bases.hook"):
-        raise ImportError
-
-    BASEHOOK_PATCH_PATH = "airflow.sdk.bases.hook.BaseHook"
-except ImportError:
-    BASEHOOK_PATCH_PATH = "airflow.hooks.base.BaseHook"
+BASEHOOK_PATCH_PATH = "airflow.providers.common.compat.sdk.BaseHook"
 
 
 class TestYandexHook:
@@ -71,7 +63,7 @@ class TestYandexHook:
 
         with conf_vars({("yandex", "sdk_user_agent_prefix"): sdk_prefix}):
             hook = YandexCloudBaseHook()
-            assert hook.sdk._channels._client_user_agent.startswith(sdk_prefix)
+            assert sdk_prefix in str(hook.sdk._channels.channel_options)
 
     @mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection")
     @mock.patch("airflow.providers.yandex.utils.credentials.get_credentials")

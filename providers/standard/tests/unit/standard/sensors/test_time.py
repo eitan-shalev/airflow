@@ -23,15 +23,12 @@ import pendulum
 import pytest
 import time_machine
 
-from airflow.exceptions import TaskDeferred
 from airflow.models.dag import DAG
+from airflow.providers.common.compat.sdk import TaskDeferred
 from airflow.providers.standard.sensors.time import TimeSensor
 from airflow.providers.standard.triggers.temporal import DateTimeTrigger
 
-try:
-    from airflow.sdk import timezone
-except ImportError:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
+from tests_common.test_utils.compat import timezone
 
 DEFAULT_TIMEZONE = pendulum.timezone("Asia/Singapore")  # UTC+08:00
 DEFAULT_DATE_WO_TZ = datetime(2015, 1, 1)
@@ -40,7 +37,7 @@ DEFAULT_DATE_WITH_TZ = datetime(2015, 1, 1, tzinfo=DEFAULT_TIMEZONE)
 
 class TestTimeSensor:
     @pytest.mark.parametrize(
-        "tzinfo, start_date, target_time ,expected",
+        ("tzinfo", "start_date", "target_time", "expected"),
         [
             (timezone.utc, DEFAULT_DATE_WO_TZ, time(10, 0), True),
             (timezone.utc, DEFAULT_DATE_WITH_TZ, time(16, 0), True),
@@ -63,7 +60,7 @@ class TestTimeSensor:
             assert op.target_datetime.tzinfo == timezone.utc
 
     @pytest.mark.parametrize(
-        "current_datetime, server_timezone",
+        ("current_datetime", "server_timezone"),
         [
             ("2025-01-26 22:00:00", "UTC"),
             ("2025-01-27 07:00:00", "Asia/Seoul"),  # UTC+09:00
@@ -138,3 +135,22 @@ class TestTimeSensor:
             op.execute_complete(context={}, event={"status": "success"})
         except TypeError as e:
             pytest.fail(f"TypeError raised: {e}")
+
+    def test_start_trigger_args_are_not_shared_between_tasks(self):
+        """Each task must carry its own trigger arguments.
+
+        ``start_trigger_args`` is a class attribute, so assigning through it made every task
+        built from this operator advertise the moment of whichever was constructed last.
+        """
+        with DAG(
+            dag_id="test_start_trigger_args_not_shared",
+            schedule=None,
+            start_date=datetime(2020, 1, 1),
+        ):
+            early = TimeSensor(task_id="early", target_time=time(1, 0), start_from_trigger=True)
+            late = TimeSensor(task_id="late", target_time=time(23, 0), start_from_trigger=True)
+
+        assert early.start_trigger_args is not late.start_trigger_args
+        assert early.start_trigger_args.trigger_kwargs["moment"] == early.target_datetime
+        assert late.start_trigger_args.trigger_kwargs["moment"] == late.target_datetime
+        assert early.target_datetime != late.target_datetime

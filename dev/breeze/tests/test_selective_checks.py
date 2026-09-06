@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from rich.console import Console
@@ -27,8 +27,13 @@ from rich.console import Console
 from airflow_breeze.global_constants import (
     ALLOWED_KUBERNETES_VERSIONS,
     ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS,
+    CI_AMD_PLATFORM,
+    CI_ARM_PLATFORM,
+    CURRENT_PYTHON_MAJOR_MINOR_VERSIONS,
     DEFAULT_KUBERNETES_VERSION,
     DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
+    JAVA_SDK_VERSION,
+    NUMBER_OF_CORE_SLICES,
     NUMBER_OF_LOW_DEP_SLICES,
     PROVIDERS_COMPATIBILITY_TESTS_MATRIX,
     GithubEvents,
@@ -52,6 +57,18 @@ ALL_KUBERNETES_VERSIONS_AS_STRING = " ".join(ALLOWED_KUBERNETES_VERSIONS)
 ALL_KUBERNETES_VERSIONS_AS_LIST = "[" + ", ".join([f"'{v}'" for v in ALLOWED_KUBERNETES_VERSIONS]) + "]"
 ALL_PYTHON_VERSIONS_AS_STRING = " ".join(ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS)
 ALL_PYTHON_VERSIONS_AS_LIST = "[" + ", ".join([f"'{v}'" for v in ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS]) + "]"
+CURRENT_PYTHON_VERSIONS_AS_LIST = (
+    "[" + ", ".join([f"'{v}'" for v in CURRENT_PYTHON_MAJOR_MINOR_VERSIONS]) + "]"
+)
+
+DEFAULT_HELM_K8S_VERSION = ALLOWED_KUBERNETES_VERSIONS[0].lstrip("v")
+LAST_HELM_K8S_VERSION = ALLOWED_KUBERNETES_VERSIONS[-1].lstrip("v")
+DEFAULT_HELM_K8S_VERSIONS_JSON = json.dumps([DEFAULT_HELM_K8S_VERSION])
+ALL_HELM_K8S_VERSIONS_JSON = json.dumps(
+    [DEFAULT_HELM_K8S_VERSION]
+    if DEFAULT_HELM_K8S_VERSION == LAST_HELM_K8S_VERSION
+    else [DEFAULT_HELM_K8S_VERSION, LAST_HELM_K8S_VERSION]
+)
 
 PYTHON_K8S_COMBO_LENGTH = max(len(ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS), len(ALLOWED_KUBERNETES_VERSIONS))
 PYTHON_VERSIONS_MAX = (ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS * 2)[:PYTHON_K8S_COMBO_LENGTH]
@@ -66,9 +83,7 @@ ZIP_PYTHON_AND_KUBERNETES_VERSIONS_AS_LIST = (
 
 
 ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON = json.dumps(
-    [
-        {"description": "API...Serialization", "test_types": ALL_CI_SELECTIVE_TEST_TYPES},
-    ]
+    _get_test_list_as_json(_split_list(sorted(ALL_CI_SELECTIVE_TEST_TYPES.split()), NUMBER_OF_CORE_SLICES))
 )
 
 ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON = json.dumps(
@@ -89,73 +104,140 @@ LIST_OF_ALL_PROVIDER_TESTS_AS_JSON = json.dumps(
     _get_test_list_as_json(_split_list(sorted(LIST_OF_ALL_PROVIDER_TESTS), 5))
 )
 
-ALL_MYPY_CHECKS_ARRAY = [
-    "mypy-airflow-core",
-    "mypy-providers",
-    "mypy-dev",
-    "mypy-task-sdk",
-    "mypy-devel-common",
-    "mypy-airflow-ctl",
-]
-
-ALL_MYPY_CHECKS = str(ALL_MYPY_CHECKS_ARRAY)
-
-ALL_MYPY_CHECKS_EXCEPT_PROVIDERS = str(
-    [check for check in ALL_MYPY_CHECKS_ARRAY if check != "mypy-providers"]
-)
 
 ALL_SKIPPED_COMMITS_ON_NO_CI_IMAGE = (
-    "check-provider-yaml-valid,flynt,identity,lint-helm-chart,mypy-airflow-core,mypy-airflow-ctl,"
-    "mypy-dev,mypy-devel-common,mypy-providers,mypy-task-sdk,"
-    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui"
+    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,flynt,identity,ktlint,lint-helm-chart,"
+    "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
 )
 
-ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED = (
-    "identity,mypy-airflow-core,mypy-airflow-ctl,mypy-dev,mypy-devel-common,mypy-providers,mypy-task-sdk"
+ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED = "identity,update-uv-lock"
+
+ALL_SKIPPED_COMMITS_IF_ONLY_UI_OPENAPI_CHANGED = (
+    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,flynt,identity,ktlint,"
+    "lint-helm-chart,mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,"
+    "mypy-airflow-e2e-tests,mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,"
+    "mypy-kubernetes-tests,mypy-scripts,mypy-shared-configuration,mypy-shared-dagnode,"
+    "mypy-shared-listeners,mypy-shared-logging,mypy-shared-module_loading,"
+    "mypy-shared-observability,mypy-shared-plugins_manager,mypy-shared-providers_discovery,"
+    "mypy-shared-secrets_backend,mypy-shared-secrets_masker,mypy-shared-serialization,"
+    "mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,"
+    "mypy-task-sdk-integration-tests,update-uv-lock"
 )
 
 ALL_SKIPPED_COMMITS_IF_NO_UI = (
-    "identity,mypy-airflow-core,mypy-airflow-ctl,mypy-dev,mypy-devel-common,"
-    "mypy-providers,mypy-task-sdk,ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui"
+    "check-ts-sdk-supervisor-schema,identity,ktlint,mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
 )
 ALL_SKIPPED_COMMITS_IF_NO_HELM_TESTS = (
-    "identity,lint-helm-chart,mypy-airflow-core,mypy-airflow-ctl,mypy-dev,mypy-devel-common,"
-    "mypy-providers,mypy-task-sdk"
+    "check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+    "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,update-uv-lock"
 )
 
 ALL_SKIPPED_COMMITS_IF_NO_UI_AND_HELM_TESTS = (
-    "identity,lint-helm-chart,mypy-airflow-core,mypy-airflow-ctl,mypy-dev,mypy-devel-common,"
-    "mypy-providers,mypy-task-sdk,ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui"
+    "check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+    "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+)
+
+# API source/test change with NO OpenAPI spec change: the full matrix is no longer
+# forced. airflow-core Python changed (so mypy-airflow-core + flynt run); no
+# provider.yaml, helm, or UI files changed, so those checks stay skipped.
+ALL_SKIPPED_COMMITS_IF_ONLY_API_SOURCE_CHANGED = (
+    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+    "mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,"
+    "mypy-task-sdk,mypy-task-sdk-integration-tests,"
+    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
 )
 
 ALL_SKIPPED_COMMITS_IF_NO_PROVIDERS_AND_UI = (
-    "check-provider-yaml-valid,identity,mypy-airflow-core,mypy-airflow-ctl,"
-    "mypy-dev,mypy-devel-common,mypy-providers,mypy-task-sdk,"
-    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui"
+    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,"
+    "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
 )
 
 ALL_SKIPPED_COMMITS_IF_NO_PROVIDERS = (
-    "check-provider-yaml-valid,identity,lint-helm-chart,mypy-airflow-core,mypy-airflow-ctl,"
-    "mypy-dev,mypy-devel-common,mypy-providers,mypy-task-sdk,"
-    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui"
+    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+    "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
 )
 
 
 ALL_SKIPPED_COMMITS_IF_NO_PROVIDERS_UI_AND_HELM_TESTS = (
-    "check-provider-yaml-valid,identity,lint-helm-chart,mypy-airflow-core,mypy-airflow-ctl,"
-    "mypy-dev,mypy-devel-common,mypy-providers,mypy-task-sdk,"
-    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui"
+    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+    "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
 )
 
 ALL_SKIPPED_COMMITS_IF_NO_CODE_PROVIDERS_AND_HELM_TESTS = (
-    "check-provider-yaml-valid,flynt,identity,lint-helm-chart,mypy-airflow-core,mypy-airflow-ctl,"
-    "mypy-dev,mypy-devel-common,mypy-providers,mypy-task-sdk"
+    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,flynt,identity,ktlint,lint-helm-chart,"
+    "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,update-uv-lock"
 )
 
 ALL_SKIPPED_COMMITS_IF_NOT_IMPORTANT_FILES_CHANGED = (
-    "check-provider-yaml-valid,flynt,identity,lint-helm-chart,mypy-airflow-core,mypy-airflow-ctl,"
-    "mypy-dev,mypy-devel-common,mypy-providers,mypy-task-sdk,"
-    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui"
+    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,flynt,identity,ktlint,lint-helm-chart,"
+    "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+    "mypy-scripts,"
+    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
 )
 
 
@@ -163,8 +245,7 @@ All_SKIPPED_COMMITS_IF_NON_MAIN_BRANCH = (
     "check-airflow-provider-compatibility,check-airflow-providers-bug-report-template,"
     "check-extra-packages-references,check-provider-yaml-valid,"
     "compile-fab-assets,generate-openapi-spec-fab,identity,"
-    "lint-helm-chart,mypy-airflow-core,mypy-airflow-ctl,mypy-dev,"
-    "mypy-devel-common,mypy-providers,mypy-task-sdk,validate-operators-init"
+    "lint-helm-chart,update-uv-lock,validate-operators-init"
 )
 
 
@@ -228,7 +309,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
 
 
 @pytest.mark.parametrize(
-    "files, expected_outputs,",
+    ("files", "expected_outputs"),
     [
         (
             pytest.param(
@@ -249,8 +330,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "core-test-types-list-as-strings-in-json": None,
                     "providers-test-types-list-as-strings-in-json": None,
                     "individual-providers-test-types-list-as-strings-in-json": None,
-                    "run-mypy": "false",
-                    "mypy-checks": "[]",
+                    "run-mypy-providers": "false",
                 },
                 id="No tests on simple change",
             )
@@ -268,75 +348,114 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
             pytest.param(
                 ("airflow-core/src/airflow/api/file.py",),
                 {
-                    "selected-providers-list-as-string": "",
+                    "full-tests-needed": "false",
+                    "selected-providers-list-as-string": "common.compat fab",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "ci-image-build": "true",
-                    "prod-image-build": "true",
-                    "run-helm-tests": "true",
+                    "prod-image-build": "false",
+                    "run-helm-tests": "false",
                     "run-unit-tests": "true",
+                    "run-amazon-tests": "false",
+                    "run-api-tests": "true",
                     "docs-build": "true",
-                    "skip-prek-hooks": ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED,
+                    "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_ONLY_API_SOURCE_CHANGED,
                     "upgrade-to-newer-dependencies": "false",
-                    "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "individual-providers-test-types-list-as-strings-in-json": LIST_OF_ALL_PROVIDER_TESTS_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "core-test-types-list-as-strings-in-json": json.dumps(
+                        [{"description": "API...Always", "test_types": "API Always"}]
+                    ),
+                    "providers-test-types-list-as-strings-in-json": json.dumps(
+                        [{"description": "common.compat,fab", "test_types": "Providers[common.compat,fab]"}]
+                    ),
+                    "individual-providers-test-types-list-as-strings-in-json": json.dumps(
+                        [
+                            {
+                                "description": "common.compat...fab",
+                                "test_types": "Providers[common.compat] Providers[fab]",
+                            }
+                        ]
+                    ),
+                    "run-mypy-providers": "false",
                 },
-                id="All tests should be run when API file changed",
+                id="API source change (no spec) runs API + fab only, not the full matrix",
             )
         ),
         (
             pytest.param(
                 ("airflow-core/src/airflow/api_fastapi/file.py",),
                 {
+                    "full-tests-needed": "false",
+                    "selected-providers-list-as-string": "common.compat fab",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "ci-image-build": "true",
-                    "prod-image-build": "true",
-                    "run-helm-tests": "true",
+                    "prod-image-build": "false",
+                    "run-helm-tests": "false",
                     "run-unit-tests": "true",
-                    "run-amazon-tests": "true",
+                    "run-amazon-tests": "false",
+                    "run-api-tests": "true",
                     "docs-build": "true",
-                    "skip-prek-hooks": ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED,
+                    "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_ONLY_API_SOURCE_CHANGED,
                     "upgrade-to-newer-dependencies": "false",
-                    "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "individual-providers-test-types-list-as-strings-in-json": LIST_OF_ALL_PROVIDER_TESTS_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "core-test-types-list-as-strings-in-json": json.dumps(
+                        [{"description": "API...Always", "test_types": "API Always"}]
+                    ),
+                    "providers-test-types-list-as-strings-in-json": json.dumps(
+                        [{"description": "common.compat,fab", "test_types": "Providers[common.compat,fab]"}]
+                    ),
+                    "individual-providers-test-types-list-as-strings-in-json": json.dumps(
+                        [
+                            {
+                                "description": "common.compat...fab",
+                                "test_types": "Providers[common.compat] Providers[fab]",
+                            }
+                        ]
+                    ),
+                    "run-mypy-providers": "false",
                 },
-                id="All tests should be run when fastapi files change",
+                id="fastapi source change (no spec) runs API + fab only, not the full matrix",
             )
         ),
         (
             pytest.param(
                 ("airflow-core/tests/unit/api/file.py",),
                 {
+                    "full-tests-needed": "false",
+                    "selected-providers-list-as-string": "common.compat fab",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "ci-image-build": "true",
-                    "prod-image-build": "true",
-                    "run-helm-tests": "true",
+                    "prod-image-build": "false",
+                    "run-helm-tests": "false",
                     "run-unit-tests": "true",
-                    "run-amazon-tests": "true",
-                    "docs-build": "true",
-                    "skip-prek-hooks": ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED,
+                    "run-amazon-tests": "false",
+                    "run-api-tests": "true",
+                    "docs-build": "false",
+                    "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_ONLY_API_SOURCE_CHANGED,
                     "upgrade-to-newer-dependencies": "false",
-                    "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "individual-providers-test-types-list-as-strings-in-json": LIST_OF_ALL_PROVIDER_TESTS_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "core-test-types-list-as-strings-in-json": json.dumps(
+                        [{"description": "API...Always", "test_types": "API Always"}]
+                    ),
+                    "providers-test-types-list-as-strings-in-json": json.dumps(
+                        [{"description": "common.compat,fab", "test_types": "Providers[common.compat,fab]"}]
+                    ),
+                    "individual-providers-test-types-list-as-strings-in-json": json.dumps(
+                        [
+                            {
+                                "description": "common.compat...fab",
+                                "test_types": "Providers[common.compat] Providers[fab]",
+                            }
+                        ]
+                    ),
+                    "run-mypy-providers": "false",
                 },
-                id="All tests should run when API test files change",
+                id="API test change (no spec) runs API + fab only, not the full matrix",
             )
         ),
         (
@@ -354,15 +473,26 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "run-unit-tests": "true",
                     "run-amazon-tests": "false",
                     "docs-build": "true",
-                    "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_PROVIDERS_UI_AND_HELM_TESTS,
+                    "skip-prek-hooks": (
+                        "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                        "mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                        "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                        "mypy-scripts,"
+                        "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                        "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                        "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                        "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                        "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                    ),
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": json.dumps(
-                        [{"description": "Always...Serialization", "test_types": "Always Core Serialization"}]
+                        _get_test_list_as_json(
+                            _split_list(sorted(["Always", "Core", "Serialization"]), NUMBER_OF_CORE_SLICES)
+                        )
                     ),
                     "providers-test-types-list-as-strings-in-json": None,
                     "individual-providers-test-types-list-as-strings-in-json": None,
-                    "run-mypy": "true",
-                    "mypy-checks": "['mypy-airflow-core']",
+                    "run-mypy-providers": "false",
                     "skip-providers-tests": "true",
                 },
                 id="Only Serialization tests",
@@ -375,33 +505,56 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers/postgres/tests/unit/postgres/file.py",
                 ),
                 {
-                    "selected-providers-list-as-string": "",
+                    "full-tests-needed": "false",
+                    "selected-providers-list-as-string": "amazon common.compat common.sql fab google "
+                    "microsoft.azure openlineage pgvector postgres",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "ci-image-build": "true",
-                    "prod-image-build": "true",
-                    "run-helm-tests": "true",
+                    "prod-image-build": "false",
+                    "run-helm-tests": "false",
                     "run-unit-tests": "true",
                     "run-amazon-tests": "true",
+                    "run-api-tests": "true",
                     "docs-build": "true",
-                    "skip-prek-hooks": ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED,
+                    "skip-prek-hooks": (
+                        "check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                        "mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                        "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                        "mypy-scripts,"
+                        "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                        "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                        "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                        "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,"
+                        "mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                        "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                    ),
                     "upgrade-to-newer-dependencies": "false",
-                    "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "individual-providers-test-types-list-as-strings-in-json": LIST_OF_ALL_PROVIDER_TESTS_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "core-test-types-list-as-strings-in-json": json.dumps(
+                        [{"description": "API...Always", "test_types": "API Always"}]
+                    ),
+                    "providers-test-types-list-as-strings-in-json": json.dumps(
+                        [
+                            {
+                                "description": "amazon...google",
+                                "test_types": "Providers[amazon] "
+                                "Providers[common.compat,common.sql,fab,microsoft.azure,openlineage,pgvector,postgres] "
+                                "Providers[google]",
+                            }
+                        ]
+                    ),
+                    "run-mypy-providers": "true",
                 },
-                id="All tests and docs should run on API change",
+                id="API source + provider change runs API + affected providers, not the full matrix",
             )
         ),
         (
             pytest.param(
                 ("providers/apache/beam/tests/unit/apache/beam/file.py",),
                 {
-                    "selected-providers-list-as-string": "apache.beam common.compat google",
+                    "selected-providers-list-as-string": "common.compat google",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -411,7 +564,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "run-helm-tests": "false",
                     "run-unit-tests": "true",
                     "run-amazon-tests": "false",
-                    "docs-build": "true",
+                    "docs-build": "false",
                     "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_UI_AND_HELM_TESTS,
                     "run-kubernetes-tests": "false",
                     "upgrade-to-newer-dependencies": "false",
@@ -421,22 +574,20 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "apache.beam,c...google",
-                                "test_types": "Providers[apache.beam,common.compat] Providers[google]",
+                                "description": "common.compat...google",
+                                "test_types": "Providers[common.compat] Providers[google]",
                             }
                         ]
                     ),
                     "individual-providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "apache.beam...google",
-                                "test_types": "Providers[apache.beam] "
-                                "Providers[common.compat] Providers[google]",
+                                "description": "common.compat...google",
+                                "test_types": "Providers[common.compat] Providers[google]",
                             }
                         ]
                     ),
-                    "run-mypy": "true",
-                    "mypy-checks": "['mypy-providers']",
+                    "run-mypy-providers": "true",
                 },
                 id="Selected Providers and docs should run",
             )
@@ -445,7 +596,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
             pytest.param(
                 ("providers/apache/beam/tests/unit/apache/beam/file.py",),
                 {
-                    "selected-providers-list-as-string": "apache.beam common.compat google",
+                    "selected-providers-list-as-string": "common.compat google",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -455,7 +606,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "run-helm-tests": "false",
                     "run-unit-tests": "true",
                     "run-amazon-tests": "false",
-                    "docs-build": "true",
+                    "docs-build": "false",
                     "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_UI_AND_HELM_TESTS,
                     "run-kubernetes-tests": "false",
                     "upgrade-to-newer-dependencies": "false",
@@ -465,25 +616,23 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "apache.beam,c...google",
-                                "test_types": "Providers[apache.beam,common.compat] Providers[google]",
+                                "description": "common.compat...google",
+                                "test_types": "Providers[common.compat] Providers[google]",
                             }
                         ]
                     ),
                     "individual-providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "apache.beam...google",
-                                "test_types": "Providers[apache.beam] "
-                                "Providers[common.compat] Providers[google]",
+                                "description": "common.compat...google",
+                                "test_types": "Providers[common.compat] Providers[google]",
                             }
                         ]
                     ),
-                    "run-mypy": "true",
-                    "mypy-checks": "['mypy-providers']",
+                    "run-mypy-providers": "true",
                     "skip-providers-tests": "false",
                 },
-                id="Selected Providers and docs should run when system tests are modified",
+                id="Selected Providers should run when system tests are modified",
             )
         ),
         (
@@ -493,7 +642,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers/apache/beam/tests/unit/apache/beam/file.py",
                 ),
                 {
-                    "selected-providers-list-as-string": "apache.beam common.compat google",
+                    "selected-providers-list-as-string": "common.compat google",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -513,22 +662,20 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "apache.beam,c...google",
-                                "test_types": "Providers[apache.beam,common.compat] Providers[google]",
+                                "description": "common.compat...google",
+                                "test_types": "Providers[common.compat] Providers[google]",
                             }
                         ]
                     ),
                     "individual-providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "apache.beam...google",
-                                "test_types": "Providers[apache.beam] "
-                                "Providers[common.compat] Providers[google]",
+                                "description": "common.compat...google",
+                                "test_types": "Providers[common.compat] Providers[google]",
                             }
                         ]
                     ),
-                    "run-mypy": "true",
-                    "mypy-checks": "['mypy-providers']",
+                    "run-mypy-providers": "true",
                     "skip-providers-tests": "false",
                 },
                 id="Selected Providers and docs should run when both system tests and tests are modified",
@@ -541,7 +688,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers/apache/beam/tests/unit/apache/beam/file.py",
                 ),
                 {
-                    "selected-providers-list-as-string": "apache.beam common.compat google",
+                    "selected-providers-list-as-string": "common.compat google",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -561,26 +708,23 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "apache.beam,c...google",
-                                "test_types": "Providers[apache.beam,common.compat] Providers[google]",
+                                "description": "common.compat...google",
+                                "test_types": "Providers[common.compat] Providers[google]",
                             }
                         ]
                     ),
                     "individual-providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "apache.beam...google",
-                                "test_types": "Providers[apache.beam] "
-                                "Providers[common.compat] Providers[google]",
+                                "description": "common.compat...google",
+                                "test_types": "Providers[common.compat] Providers[google]",
                             }
                         ]
                     ),
-                    "run-mypy": "true",
-                    "mypy-checks": "['mypy-providers']",
+                    "run-mypy-providers": "true",
                     "skip-providers-tests": "false",
                 },
-                id="Selected Providers and docs should run when both system "
-                "tests and tests are modified for more than one provider",
+                id="Selected Providers and docs should run when both system tests and tests are modified for more than one provider",
             )
         ),
         (
@@ -603,8 +747,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": None,
                     "providers-test-types-list-as-strings-in-json": None,
-                    "run-mypy": "false",
-                    "mypy-checks": "[]",
+                    "run-mypy-providers": "false",
                 },
                 id="Only docs builds should run - no tests needed",
             )
@@ -618,23 +761,169 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "ci-image-build": "true",
-                    "prod-image-build": "false",
+                    "prod-image-build": "true",
                     "run-api-tests": "false",
                     "run-helm-tests": "false",
                     "run-kubernetes-tests": "false",
                     "run-unit-tests": "true",
                     "run-task-sdk-tests": "true",
+                    "run-task-sdk-integration-tests": "true",
                     "docs-build": "true",
                     "full-tests-needed": "false",
-                    "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_PROVIDERS_UI_AND_HELM_TESTS,
+                    "skip-prek-hooks": (
+                        "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                        "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                        "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                        "mypy-scripts,"
+                        "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                        "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                        "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                        "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk-integration-tests,"
+                        "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                    ),
                     "skip-providers-tests": "false",
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": "['mypy-providers', 'mypy-task-sdk']",
+                    "run-mypy-providers": "true",
                 },
                 id="Task SDK source file changed - Task SDK, Core and provider tests should run",
+            )
+        ),
+        (
+            pytest.param(
+                ("task-sdk-integration-tests/tests/airflow/sdk/random.py",),
+                {
+                    "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
+                    "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
+                    "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
+                    "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                    "run-api-tests": "false",
+                    "run-helm-tests": "false",
+                    "run-kubernetes-tests": "false",
+                    "run-unit-tests": "false",
+                    "run-task-sdk-tests": "false",
+                    "run-task-sdk-integration-tests": "true",
+                    "docs-build": "false",
+                    "full-tests-needed": "false",
+                    "skip-prek-hooks": (
+                        "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                        "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                        "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                        "mypy-scripts,"
+                        "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                        "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                        "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                        "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,"
+                        "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                    ),
+                    "skip-providers-tests": "true",
+                    "upgrade-to-newer-dependencies": "false",
+                    "run-mypy-providers": "false",
+                },
+                id="Task SDK integration tests files changed - "
+                "Task SDK integration tests and prod image build should run but no other tests",
+            )
+        ),
+        (
+            pytest.param(
+                ("ts-sdk/src/coordinator/runtime.ts",),
+                {
+                    "prod-image-build": "true",
+                    "run-unit-tests": "false",
+                    "run-task-sdk-tests": "false",
+                    "run-task-sdk-integration-tests": "false",
+                    "run-ts-sdk-e2e-tests": "true",
+                    "run-go-sdk-e2e-tests": "false",
+                    "full-tests-needed": "false",
+                },
+                id="TypeScript SDK files changed - TS SDK e2e tests and prod image build should run",
+            )
+        ),
+        (
+            pytest.param(
+                ("ts-sdk/README.md",),
+                {
+                    "prod-image-build": "false",
+                    "run-ts-sdk-e2e-tests": "false",
+                    "full-tests-needed": "false",
+                },
+                id="TypeScript SDK README-only change - TS SDK e2e tests should be skipped",
+            )
+        ),
+        (
+            pytest.param(
+                ("airflow-ctl/src/airflowctl/random.py",),
+                {
+                    "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
+                    "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
+                    "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
+                    "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                    "run-api-tests": "false",
+                    "run-helm-tests": "false",
+                    "run-kubernetes-tests": "false",
+                    "run-unit-tests": "true",
+                    "run-airflow-ctl-tests": "true",
+                    "run-airflow-ctl-integration-tests": "true",
+                    "docs-build": "true",
+                    "full-tests-needed": "false",
+                    "skip-prek-hooks": (
+                        "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                        "mypy-airflow-core,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                        "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                        "mypy-scripts,"
+                        "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                        "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                        "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                        "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                        "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                    ),
+                    "skip-providers-tests": "true",
+                    "upgrade-to-newer-dependencies": "false",
+                    "run-mypy-providers": "false",
+                },
+                id="Airflow CTL source file changed - Airflow CTL tests should run",
+            )
+        ),
+        (
+            pytest.param(
+                ("airflow-ctl-tests/tests/random.py",),
+                {
+                    "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
+                    "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
+                    "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
+                    "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                    "run-api-tests": "false",
+                    "run-helm-tests": "false",
+                    "run-kubernetes-tests": "false",
+                    "run-unit-tests": "false",
+                    "run-airflow-ctl-tests": "false",
+                    "run-airflow-ctl-integration-tests": "true",
+                    "docs-build": "false",
+                    "full-tests-needed": "false",
+                    "skip-prek-hooks": (
+                        "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                        "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-e2e-tests,"
+                        "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                        "mypy-scripts,"
+                        "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                        "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                        "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                        "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                        "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                    ),
+                    "skip-providers-tests": "true",
+                    "upgrade-to-newer-dependencies": "false",
+                    "run-mypy-providers": "false",
+                },
+                id="Airflow CTL integration tests files changed - "
+                "Airflow CTL integration tests and prod image build should run but no other tests",
             )
         ),
         (
@@ -644,8 +933,8 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers/postgres/tests/unit/postgres/file.py",
                 ),
                 {
-                    "selected-providers-list-as-string": "amazon common.sql google "
-                    "openlineage pgvector postgres",
+                    "selected-providers-list-as-string": "amazon common.compat common.sql google "
+                    "microsoft.azure openlineage pgvector postgres",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -667,13 +956,12 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                             {
                                 "description": "amazon...google",
                                 "test_types": "Providers[amazon] "
-                                "Providers[common.sql,openlineage,pgvector,postgres] "
+                                "Providers[common.compat,common.sql,microsoft.azure,openlineage,pgvector,postgres] "
                                 "Providers[google]",
                             }
                         ]
                     ),
-                    "run-mypy": "true",
-                    "mypy-checks": "['mypy-providers']",
+                    "run-mypy-providers": "true",
                 },
                 id="Helm tests, providers (both upstream and downstream),"
                 "kubernetes tests and docs should run",
@@ -687,7 +975,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers/http/tests/file.py",
                 ),
                 {
-                    "selected-providers-list-as-string": "amazon apache.livy dbt.cloud dingding discord google http",
+                    "selected-providers-list-as-string": "amazon apache.livy atlassian.jira common.compat dbt.cloud dingding discord google http informatica pagerduty",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -708,27 +996,35 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                         [
                             {
                                 "description": "amazon...google",
-                                "test_types": "Providers[amazon] Providers[apache.livy,dbt.cloud,dingding,discord,http] Providers[google]",
+                                "test_types": "Providers[amazon] Providers[apache.livy,atlassian.jira,common.compat,dbt.cloud,dingding,discord,http,informatica,pagerduty] Providers[google]",
                             }
                         ]
                     ),
                     "individual-providers-test-types-list-as-strings-in-json": json.dumps(
                         [
                             {
-                                "description": "amazon...apache.livy",
-                                "test_types": "Providers[amazon] Providers[apache.livy]",
+                                "description": "amazon...atlassian.jir",
+                                "test_types": "Providers[amazon] Providers[apache.livy] Providers[atlassian.jira]",
                             },
                             {
-                                "description": "dbt.cloud...dingding",
-                                "test_types": "Providers[dbt.cloud] Providers[dingding]",
+                                "description": "common.compat...dbt.cloud",
+                                "test_types": "Providers[common.compat] Providers[dbt.cloud]",
                             },
-                            {"description": "discord", "test_types": "Providers[discord]"},
-                            {"description": "google", "test_types": "Providers[google]"},
-                            {"description": "http", "test_types": "Providers[http]"},
+                            {
+                                "description": "dingding...discord",
+                                "test_types": "Providers[dingding] Providers[discord]",
+                            },
+                            {
+                                "description": "google...http",
+                                "test_types": "Providers[google] Providers[http]",
+                            },
+                            {
+                                "description": "informatica...pagerduty",
+                                "test_types": "Providers[informatica] Providers[pagerduty]",
+                            },
                         ]
                     ),
-                    "run-mypy": "true",
-                    "mypy-checks": "['mypy-providers']",
+                    "run-mypy-providers": "true",
                 },
                 id="Helm tests, http and all relevant providers, kubernetes tests and "
                 "docs should run even if unimportant files were added",
@@ -742,7 +1038,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "providers/airbyte/tests/file.py",
                 ),
                 {
-                    "selected-providers-list-as-string": "airbyte",
+                    "selected-providers-list-as-string": "airbyte common.compat",
                     "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -760,7 +1056,12 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                         [{"description": "Always", "test_types": "Always"}]
                     ),
                     "providers-test-types-list-as-strings-in-json": json.dumps(
-                        [{"description": "airbyte", "test_types": "Providers[airbyte]"}]
+                        [
+                            {
+                                "description": "airbyte,common.compat",
+                                "test_types": "Providers[airbyte,common.compat]",
+                            }
+                        ]
                     ),
                 },
                 id="Helm tests, airbyte providers, kubernetes tests and "
@@ -783,18 +1084,14 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "ci-image-build": "true",
                     "prod-image-build": "true",
                     "run-helm-tests": "true",
-                    "run-unit-tests": "true",
+                    "run-unit-tests": "false",
                     "docs-build": "true",
                     "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_PROVIDERS_AND_UI,
                     "run-amazon-tests": "false",
                     "run-kubernetes-tests": "true",
                     "upgrade-to-newer-dependencies": "false",
-                    "core-test-types-list-as-strings-in-json": json.dumps(
-                        [{"description": "Always", "test_types": "Always"}]
-                    ),
                     "providers-test-types-list-as-strings-in-json": None,
-                    "run-mypy": "false",
-                    "mypy-checks": "[]",
+                    "run-mypy-providers": "false",
                 },
                 id="Docs should run even if unimportant files were added and prod image "
                 "should be build for chart changes",
@@ -820,8 +1117,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "upgrade-to-newer-dependencies": "true",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="Everything should run and upgrading to newer requirements as dependencies change",
             )
@@ -830,7 +1126,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
             ("providers/amazon/src/airflow/providers/amazon/provider.yaml",),
             {
                 "selected-providers-list-as-string": "amazon apache.hive cncf.kubernetes "
-                "common.compat common.messaging common.sql exasol ftp google http imap microsoft.azure "
+                "common.compat common.messaging common.sql databricks exasol ftp google http imap microsoft.azure "
                 "mongo mysql openlineage postgres salesforce ssh teradata",
                 "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                 "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
@@ -840,9 +1136,11 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                 "prod-image-build": "false",
                 "run-helm-tests": "false",
                 "run-unit-tests": "true",
-                "docs-build": "true",
+                "docs-build": "false",
                 # no python files changed so flynt should not run
-                "skip-prek-hooks": "flynt," + ALL_SKIPPED_COMMITS_IF_NO_UI_AND_HELM_TESTS,
+                "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_UI_AND_HELM_TESTS.replace(
+                    "check-ts-sdk-supervisor-schema,", "check-ts-sdk-supervisor-schema,flynt,", 1
+                ),
                 "run-kubernetes-tests": "false",
                 "upgrade-to-newer-dependencies": "false",
                 "run-amazon-tests": "true",
@@ -854,21 +1152,20 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                         {
                             "description": "amazon...google",
                             "test_types": "Providers[amazon] Providers[apache.hive,cncf.kubernetes,"
-                            "common.compat,common.messaging,common.sql,exasol,ftp,http,imap,"
+                            "common.compat,common.messaging,common.sql,databricks,exasol,ftp,http,imap,"
                             "microsoft.azure,mongo,mysql,openlineage,postgres,salesforce,ssh,teradata] "
                             "Providers[google]",
                         }
                     ]
                 ),
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-providers']",
+                "run-mypy-providers": "true",
             },
             id="Providers tests run including amazon tests if only amazon provider.yaml files changed",
         ),
         pytest.param(
             ("providers/airbyte/tests/airbyte/__init__.py",),
             {
-                "selected-providers-list-as-string": "airbyte",
+                "selected-providers-list-as-string": "airbyte common.compat",
                 "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                 "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                 "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
@@ -878,7 +1175,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                 "run-helm-tests": "false",
                 "run-unit-tests": "true",
                 "run-amazon-tests": "false",
-                "docs-build": "true",
+                "docs-build": "false",
                 "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_UI_AND_HELM_TESTS,
                 "run-kubernetes-tests": "false",
                 "upgrade-to-newer-dependencies": "false",
@@ -886,10 +1183,14 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     [{"description": "Always", "test_types": "Always"}]
                 ),
                 "providers-test-types-list-as-strings-in-json": json.dumps(
-                    [{"description": "airbyte", "test_types": "Providers[airbyte]"}]
+                    [
+                        {
+                            "description": "airbyte,common.compat",
+                            "test_types": "Providers[airbyte,common.compat]",
+                        }
+                    ]
                 ),
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-providers']",
+                "run-mypy-providers": "true",
             },
             id="Providers tests run without amazon tests if no amazon file changed",
         ),
@@ -897,7 +1198,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
             ("providers/amazon/src/airflow/providers/amazon/file.py",),
             {
                 "selected-providers-list-as-string": "amazon apache.hive cncf.kubernetes "
-                "common.compat common.messaging common.sql exasol ftp google http imap microsoft.azure "
+                "common.compat common.messaging common.sql databricks exasol ftp google http imap microsoft.azure "
                 "mongo mysql openlineage postgres salesforce ssh teradata",
                 "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                 "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
@@ -920,14 +1221,13 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                         {
                             "description": "amazon...google",
                             "test_types": "Providers[amazon] Providers[apache.hive,cncf.kubernetes,"
-                            "common.compat,common.messaging,common.sql,exasol,ftp,http,imap,"
+                            "common.compat,common.messaging,common.sql,databricks,exasol,ftp,http,imap,"
                             "microsoft.azure,mongo,mysql,openlineage,postgres,salesforce,ssh,teradata] "
                             "Providers[google]",
                         }
                     ]
                 ),
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-providers']",
+                "run-mypy-providers": "true",
             },
             id="Providers tests run including amazon tests if amazon provider files changed",
         ),
@@ -944,13 +1244,27 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                 "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                 "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                 "ci-image-build": "true",
-                "prod-image-build": "false",
+                # common providers feed OpenLineage e2e tests, which need the PROD image.
+                "prod-image-build": "true",
+                "run-openlineage-e2e-tests": "true",
+                # ordinary OL PR (no canary, no "full tests needed" label): compat matrix stays off.
+                "run-openlineage-e2e-compat-tests": "false",
                 "run-helm-tests": "false",
                 "run-unit-tests": "true",
                 "run-amazon-tests": "false",
-                "docs-build": "true",
+                "docs-build": "false",
                 "run-kubernetes-tests": "false",
-                "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_UI_AND_HELM_TESTS,
+                "skip-prek-hooks": (
+                    "check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                    "mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                    "mypy-scripts,"
+                    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                ),
                 "upgrade-to-newer-dependencies": "false",
                 "core-test-types-list-as-strings-in-json": json.dumps(
                     [{"description": "Always", "test_types": "Always"}]
@@ -963,8 +1277,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                         }
                     ]
                 ),
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-airflow-core', 'mypy-providers']",
+                "run-mypy-providers": "true",
             },
             id="Only Always and common providers tests should run when only common.io and tests/always changed",
         ),
@@ -986,8 +1299,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                 "upgrade-to-newer-dependencies": "false",
                 "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                 "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                "run-mypy": "true",
-                "mypy-checks": ALL_MYPY_CHECKS,
+                "run-mypy-providers": "true",
             },
             id="All tests to run when standard operator changed",
         ),
@@ -1011,8 +1323,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="All tests should be run when tests/utils/ change",
             )
@@ -1037,11 +1348,10 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "testable-core-integrations": "['kerberos', 'redis']",
-                    "testable-providers-integrations": "['celery', 'cassandra', 'drill', 'tinkerpop', 'kafka', "
+                    "testable-core-integrations": "['kerberos', 'otel', 'redis']",
+                    "testable-providers-integrations": "['celery', 'cassandra', 'drill', 'elasticsearch', 'tinkerpop', 'kafka', "
                     "'mongo', 'pinot', 'qdrant', 'redis', 'trino', 'ydb']",
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="All tests should be run when devel-common/ change",
             )
@@ -1056,15 +1366,15 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "ci-image-build": "true",
-                    "prod-image-build": "false",
+                    "prod-image-build": "true",
                     "docs-build": "false",
                     "full-tests-needed": "false",
                     "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_CODE_PROVIDERS_AND_HELM_TESTS,
                     "upgrade-to-newer-dependencies": "false",
-                    "run-mypy": "false",
-                    "mypy-checks": "[]",
+                    "run-mypy-providers": "false",
                     "run-helm-tests": "false",
                     "run-ui-tests": "true",
+                    "run-ui-e2e-tests": "true",
                     "run-unit-tests": "false",
                     "run-go-sdk-tests": "false",
                     "run-airflow-ctl-tests": "false",
@@ -1091,8 +1401,7 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                 "core-test-types-list-as-strings-in-json": None,
                 "providers-test-types-list-as-strings-in-json": None,
                 "individual-providers-test-types-list-as-strings-in-json": None,
-                "run-mypy": "false",
-                "mypy-checks": "[]",
+                "run-mypy-providers": "false",
             },
             id="Run docs-build for RELEASE_NOTES.rst",
         ),
@@ -1106,16 +1415,25 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                 "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                 "ci-image-build": "true",
                 "run-helm-tests": "true",
-                "run-unit-tests": "true",
+                "run-unit-tests": "false",
                 "run-amazon-tests": "false",
                 "docs-build": "true",
-                "skip-prek-hooks": "check-provider-yaml-valid,flynt,identity,mypy-airflow-core,mypy-airflow-ctl,mypy-dev,mypy-devel-common,mypy-providers,mypy-task-sdk,ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui",
+                "skip-prek-hooks": (
+                    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,flynt,identity,ktlint,"
+                    "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                    "mypy-scripts,"
+                    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                ),
                 "upgrade-to-newer-dependencies": "false",
                 "core-test-types-list-as-strings-in-json": None,
                 "providers-test-types-list-as-strings-in-json": None,
                 "individual-providers-test-types-list-as-strings-in-json": None,
-                "run-mypy": "false",
-                "mypy-checks": "[]",
+                "run-mypy-providers": "false",
             },
             id="Run docs-build for chart/RELEASE_NOTES.rst",
         ),
@@ -1137,24 +1455,344 @@ def assert_outputs_are_printed(expected_outputs: dict[str, str], stderr: str):
                 "core-test-types-list-as-strings-in-json": None,
                 "providers-test-types-list-as-strings-in-json": None,
                 "individual-providers-test-types-list-as-strings-in-json": None,
-                "run-mypy": "false",
-                "mypy-checks": "[]",
+                "run-mypy-providers": "false",
             },
             id="Run docs-build for SECURITY.md",
         ),
         pytest.param(
             ("go-sdk/sdk/variable.go",),
-            {"run-go-sdk-tests": "true"},
-            id="Run go tests for go-sdk",
+            {
+                "run-go-sdk-tests": "true",
+                "run-java-sdk-e2e-tests": "false",
+            },
+            id="Run go tests for go-sdk and skip java e2e tests for non-java change",
+        ),
+        pytest.param(
+            ("java-sdk/sdk/build.gradle.kts",),
+            {
+                "run-java-sdk-tests": "true",
+                "run-java-sdk-e2e-tests": "true",
+                "prod-image-build": "true",
+            },
+            id="Run java unit and e2e tests for java-sdk source change",
+        ),
+        pytest.param(
+            ("java-sdk/README.md",),
+            {
+                "run-java-sdk-tests": "false",
+                "run-java-sdk-e2e-tests": "false",
+                "prod-image-build": "false",
+            },
+            id="Skip java unit and e2e tests for java-sdk README-only change",
+        ),
+        pytest.param(
+            ("airflow-e2e-tests/docker/java.yml",),
+            {
+                "run-java-sdk-tests": "false",
+                "run-java-sdk-e2e-tests": "true",
+                "prod-image-build": "true",
+            },
+            id="Run java e2e tests when java compose override changes",
+        ),
+        pytest.param(
+            ("ts-sdk/src/sdk/client.ts",),
+            {
+                "run-ts-sdk-docs": "true",
+            },
+            id="Build ts-sdk docs when the documented sources change",
+        ),
+        pytest.param(
+            ("ts-sdk/docs/index.md",),
+            {
+                "run-ts-sdk-docs": "true",
+                "run-ts-sdk-e2e-tests": "false",
+            },
+            id="Build ts-sdk docs for a docs-only Markdown change that skips ts-sdk tests",
+        ),
+        pytest.param(
+            ("ts-sdk/api-docs/dag-authoring-api.ts",),
+            {
+                "run-ts-sdk-docs": "true",
+                "run-ts-sdk-e2e-tests": "false",
+                "prod-image-build": "false",
+            },
+            id="Build only ts-sdk docs when a TypeDoc category entry point changes",
+        ),
+        pytest.param(
+            ("ts-sdk/tsconfig.json",),
+            {
+                "run-ts-sdk-docs": "true",
+            },
+            id="Build ts-sdk docs when tsconfig.json changes since docs/tsconfig.json extends it",
+        ),
+        pytest.param(
+            ("ts-sdk/package.json",),
+            {
+                "run-ts-sdk-docs": "true",
+            },
+            id="Build ts-sdk docs when package.json changes since it pins @msgpack/msgpack",
+        ),
+        pytest.param(
+            ("ts-sdk/README.md",),
+            {
+                "run-ts-sdk-docs": "false",
+            },
+            id="Skip ts-sdk docs build for a ts-sdk README-only change",
+        ),
+        pytest.param(
+            ("task-sdk/src/airflow/sdk/coordinators/java/coordinator.py",),
+            {
+                "run-java-sdk-e2e-tests": "true",
+                "prod-image-build": "true",
+            },
+            id="Run java e2e tests when JavaCoordinator changes",
+        ),
+        pytest.param(
+            ("go-sdk/sdk/variable.go",),
+            {
+                "run-go-sdk-tests": "true",
+                "run-go-sdk-e2e-tests": "true",
+                "prod-image-build": "true",
+            },
+            id="Run go unit and e2e tests for go-sdk source change",
+        ),
+        pytest.param(
+            ("go-sdk/go.mod",),
+            {
+                "run-go-sdk-tests": "true",
+                "run-go-sdk-e2e-tests": "true",
+                "prod-image-build": "true",
+            },
+            id="Run go unit and e2e tests for go-sdk dependency change",
+        ),
+        pytest.param(
+            ("go-sdk/README.md",),
+            {
+                "run-go-sdk-tests": "false",
+                "run-go-sdk-e2e-tests": "false",
+                "prod-image-build": "false",
+            },
+            id="Skip go unit and e2e tests for go-sdk README-only change",
+        ),
+        pytest.param(
+            ("go-sdk/adr/0001-bundle-packing-options.md",),
+            {
+                "run-go-sdk-tests": "false",
+                "run-go-sdk-e2e-tests": "false",
+                "prod-image-build": "false",
+            },
+            id="Skip go unit and e2e tests for go-sdk ADR-only change",
+        ),
+        pytest.param(
+            ("airflow-e2e-tests/docker/go.yml",),
+            {
+                "run-go-sdk-tests": "false",
+                "run-go-sdk-e2e-tests": "true",
+                "prod-image-build": "true",
+            },
+            id="Run go e2e tests when go compose override changes",
+        ),
+        pytest.param(
+            ("task-sdk/src/airflow/sdk/coordinators/executable/coordinator.py",),
+            {
+                "run-go-sdk-e2e-tests": "true",
+                "prod-image-build": "true",
+            },
+            id="Run go e2e tests when ExecutableCoordinator changes",
+        ),
+        pytest.param(
+            ("providers/openlineage/src/airflow/providers/openlineage/plugins/adapter.py",),
+            {
+                "run-openlineage-e2e-tests": "true",
+                "prod-image-build": "true",
+            },
+            id="Run OpenLineage e2e tests for openlineage provider change",
+        ),
+        pytest.param(
+            ("providers/common/compat/src/airflow/providers/common/compat/sdk.py",),
+            {
+                "run-openlineage-e2e-tests": "true",
+                "prod-image-build": "true",
+            },
+            id="Run OpenLineage e2e tests for common provider change",
+        ),
+        pytest.param(
+            ("airflow-e2e-tests/tests/airflow_e2e_tests/openlineage_tests/harness.py",),
+            {
+                "run-openlineage-e2e-tests": "true",
+                "run-openlineage-e2e-compat-tests": "false",
+                "prod-image-build": "true",
+            },
+            id="Run OpenLineage e2e tests (not the costly compat matrix) when the OL e2e suite changes",
+        ),
+        pytest.param(
+            ("providers/ftp/src/airflow/providers/ftp/hooks/ftp.py",),
+            {
+                "run-openlineage-e2e-tests": "false",
+                "run-openlineage-e2e-compat-tests": "false",
+                "prod-image-build": "false",
+            },
+            id="Do not run OpenLineage e2e tests for unrelated provider change",
+        ),
+        pytest.param(
+            ("airflow-e2e-tests/tests/airflow_e2e_tests/conftest.py",),
+            {
+                "run-openlineage-e2e-tests": "false",
+                "run-openlineage-e2e-compat-tests": "true",
+                "full-tests-needed": "false",
+                "prod-image-build": "true",
+            },
+            id="Run OpenLineage e2e compat tests when the shared e2e harness (conftest) changes",
+        ),
+        pytest.param(
+            ("airflow-e2e-tests/docker/openlineage-compat.Dockerfile",),
+            {
+                "run-openlineage-e2e-tests": "false",
+                "run-openlineage-e2e-compat-tests": "true",
+                "full-tests-needed": "false",
+                "prod-image-build": "true",
+            },
+            id="Run OpenLineage e2e compat tests when the compat Dockerfile changes",
+        ),
+        pytest.param(
+            (".github/workflows/openlineage-e2e-compat-tests.yml",),
+            {
+                # The compat workflow matches ENVIRONMENT_FILES, so it forces the full matrix.
+                # The compat therefore runs via full_tests_needed, not via OPENLINEAGE_E2E_COMPAT_FILES.
+                "run-openlineage-e2e-tests": "true",
+                "run-openlineage-e2e-compat-tests": "true",
+                "full-tests-needed": "true",
+            },
+            id="Compat workflow change forces the full matrix (compat runs via full_tests_needed)",
         ),
         (
             pytest.param(
                 ("devel-common/pyproject.toml",),
                 {
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="All mypy checks should run when devel-common/pyproject.toml changes",
+            )
+        ),
+        (
+            pytest.param(
+                ("providers/amazon/src/airflow/providers/amazon/aws/log/s3_task_handler.py",),
+                {
+                    "run-remote-logging-s3-e2e-tests": "true",
+                    "run-remote-logging-elasticsearch-e2e-tests": "false",
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                },
+                id="S3 remote logging changes enable only S3 e2e",
+            )
+        ),
+        (
+            pytest.param(
+                ("providers/elasticsearch/src/airflow/providers/elasticsearch/log/es_task_handler.py",),
+                {
+                    "run-remote-logging-s3-e2e-tests": "false",
+                    "run-remote-logging-elasticsearch-e2e-tests": "true",
+                    "run-remote-logging-opensearch-e2e-tests": "false",
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                },
+                id="Elasticsearch remote logging changes enable only Elasticsearch e2e",
+            )
+        ),
+        (
+            pytest.param(
+                ("providers/elasticsearch/src/airflow/providers/elasticsearch/log/es_json_formatter.py",),
+                {
+                    "run-remote-logging-s3-e2e-tests": "false",
+                    "run-remote-logging-elasticsearch-e2e-tests": "true",
+                    "run-remote-logging-opensearch-e2e-tests": "false",
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                },
+                id="Elasticsearch helper changes enable Elasticsearch e2e",
+            )
+        ),
+        (
+            pytest.param(
+                ("providers/opensearch/src/airflow/providers/opensearch/log/os_task_handler.py",),
+                {
+                    "run-remote-logging-s3-e2e-tests": "false",
+                    "run-remote-logging-elasticsearch-e2e-tests": "false",
+                    "run-remote-logging-opensearch-e2e-tests": "true",
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                },
+                id="OpenSearch remote logging changes enable only OpenSearch e2e",
+            )
+        ),
+        (
+            pytest.param(
+                ("providers/opensearch/src/airflow/providers/opensearch/log/os_json_formatter.py",),
+                {
+                    "run-remote-logging-s3-e2e-tests": "false",
+                    "run-remote-logging-elasticsearch-e2e-tests": "false",
+                    "run-remote-logging-opensearch-e2e-tests": "true",
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                },
+                id="OpenSearch helper changes enable OpenSearch e2e",
+            )
+        ),
+        (
+            pytest.param(
+                ("airflow-core/src/airflow/config_templates/airflow_local_settings.py",),
+                {
+                    "run-remote-logging-s3-e2e-tests": "true",
+                    "run-remote-logging-elasticsearch-e2e-tests": "true",
+                    "run-remote-logging-opensearch-e2e-tests": "true",
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                },
+                id="Shared remote logging changes enable both remote logging e2e jobs",
+            )
+        ),
+        (
+            pytest.param(
+                ("shared/logging/src/airflow_shared/logging/remote.py",),
+                {
+                    "run-remote-logging-s3-e2e-tests": "true",
+                    "run-remote-logging-elasticsearch-e2e-tests": "true",
+                    "run-remote-logging-opensearch-e2e-tests": "true",
+                    "ci-image-build": "true",
+                    "prod-image-build": "true",
+                },
+                id="Shared logging library changes enable both remote logging e2e jobs",
+            )
+        ),
+        (
+            pytest.param(
+                ("shared/timezones/src/airflow_shared/timezones/timezone.py",),
+                {
+                    "ci-image-build": "true",
+                    "run-unit-tests": "true",
+                },
+                id="Shared library python changes trigger unit tests",
+            )
+        ),
+        (
+            pytest.param(
+                ("shared/logging/src/airflow_shared/logging/remote.py",),
+                {
+                    "skip-prek-hooks": (
+                        "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                        "mypy-airflow-core,mypy-airflow-ctl,mypy-airflow-ctl-tests,"
+                        "mypy-airflow-e2e-tests,mypy-dev,mypy-devel-common,mypy-docker-tests,"
+                        "mypy-helm-tests,mypy-kubernetes-tests,mypy-scripts,"
+                        "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,"
+                        "mypy-shared-module_loading,mypy-shared-observability,"
+                        "mypy-shared-plugins_manager,mypy-shared-providers_discovery,"
+                        "mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                        "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,"
+                        "mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                        "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                    ),
+                },
+                id=("Shared logging change keeps only mypy-shared-logging among the mypy-shared-* hooks"),
             )
         ),
     ],
@@ -1173,12 +1811,118 @@ def test_expected_output_pull_request_main(
     assert_outputs_are_printed(expected_outputs, str(stderr))
 
 
+@pytest.mark.parametrize(
+    ("files", "ktlint_skipped"),
+    [
+        pytest.param(
+            ("java-sdk/sdk/build.gradle.kts",),
+            False,
+            id="ktlint runs when java-sdk files change",
+        ),
+        pytest.param(
+            ("SECURITY.md",),
+            True,
+            id="ktlint skipped when no java-sdk files change",
+        ),
+        pytest.param(
+            ("java-sdk/README.md",),
+            True,
+            id="ktlint skipped when only java-sdk docs change",
+        ),
+    ],
+)
+def test_ktlint_hook_only_runs_for_java_sdk_changes(files: tuple[str, ...], ktlint_skipped: bool):
+    # ktlint downloads the Gradle distribution, so it must be skipped unless java-sdk changed.
+    stderr = SelectiveChecks(
+        files=files,
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        pr_labels=tuple(),
+        default_branch="main",
+    )
+    skipped_hooks = get_outputs_from_stderr(str(stderr))["skip-prek-hooks"].split(",")
+    assert ("ktlint" in skipped_hooks) is ktlint_skipped
+
+
+@pytest.mark.parametrize(
+    ("files", "hook_skipped"),
+    [
+        pytest.param(
+            ("ts-sdk/src/generated/supervisor.ts",),
+            False,
+            id="runs when ts-sdk files change",
+        ),
+        pytest.param(
+            ("task-sdk/src/airflow/sdk/execution_time/schema/schema.json",),
+            True,
+            id="skipped when only the supervisor schema changes",
+        ),
+        pytest.param(
+            ("SECURITY.md",),
+            True,
+            id="skipped when no ts-sdk files change",
+        ),
+        pytest.param(
+            ("ts-sdk/README.md",),
+            True,
+            id="skipped when only ts-sdk docs change",
+        ),
+        pytest.param(
+            ("ts-sdk/example/README.md",),
+            True,
+            id="skipped when only nested ts-sdk docs change",
+        ),
+        pytest.param(
+            ("ts-sdk/docs/package.json",),
+            True,
+            id="skipped when only the docs toolchain's package.json changes",
+        ),
+        pytest.param(
+            ("ts-sdk/docs/package-lock.json",),
+            True,
+            id="skipped when only the docs toolchain's lock file changes",
+        ),
+        pytest.param(
+            ("ts-sdk/api-docs/dag-authoring-api.ts",),
+            True,
+            id="skipped when only a TypeDoc category entry point changes",
+        ),
+    ],
+)
+def test_check_ts_sdk_supervisor_schema_hook_only_runs_for_relevant_changes(
+    files: tuple[str, ...], hook_skipped: bool
+):
+    # This hook regenerates and diffs ts-sdk/src/generated/supervisor.ts. Only ts-sdk changes
+    # trigger it; regenerating after a wire-schema bump is the ts-sdk follow-up PR's job.
+    stderr = SelectiveChecks(
+        files=files,
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        pr_labels=tuple(),
+        default_branch="main",
+    )
+    skipped_hooks = get_outputs_from_stderr(str(stderr))["skip-prek-hooks"].split(",")
+    assert ("check-ts-sdk-supervisor-schema" in skipped_hooks) is hook_skipped
+
+
+def test_java_sdk_version_is_emitted_as_output():
+    # The lang-SDK k8s job reads this to pick the JDK for the native Java build via actions/setup-java.
+    stderr = SelectiveChecks(
+        files=("README.md",),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        pr_labels=tuple(),
+        default_branch="main",
+    )
+    assert get_outputs_from_stderr(str(stderr))["java-sdk-version"] == JAVA_SDK_VERSION
+
+
 @pytest.mark.skipif(
     not (AIRFLOW_ROOT_PATH / ".git").exists(),
     reason="This test should not run if .git folder is missing (for example by default in breeze container)",
 )
 @pytest.mark.parametrize(
-    "files, commit_ref, expected_outputs",
+    ("files", "commit_ref", "expected_outputs"),
     [
         (
             pytest.param(
@@ -1200,6 +1944,53 @@ def test_full_test_needed_when_pyproject_toml_changes(
         files=files,
         github_event=GithubEvents.PULL_REQUEST,
         commit_ref=commit_ref,
+        default_branch="main",
+    )
+    assert_outputs_are_printed(expected_outputs, str(stderr))
+
+
+@pytest.mark.parametrize(
+    ("files", "github_event", "expected_outputs"),
+    [
+        pytest.param(
+            ("README.md",),
+            GithubEvents.PULL_REQUEST,
+            {
+                "run-unit-tests": "false",
+                "ci-image-build": "false",
+                "docs-build": "false",
+            },
+            id="Only .md file changed in PR - no tests needed",
+        ),
+        pytest.param(
+            ("requirements.txt", "NOTICE.txt"),
+            GithubEvents.PULL_REQUEST,
+            {
+                "run-unit-tests": "false",
+                "ci-image-build": "false",
+                "docs-build": "false",
+            },
+            id="Only .txt files changed in PR - no tests needed",
+        ),
+        pytest.param(
+            ("README.md", "airflow-core/src/airflow/api.py"),
+            GithubEvents.PULL_REQUEST,
+            {
+                "run-unit-tests": "true",
+                "ci-image-build": "true",
+            },
+            id="Mixed .md and source file changed - tests needed",
+        ),
+    ],
+)
+def test_text_non_doc_files_do_not_trigger_tests(
+    files: tuple[str, ...], github_event: str, expected_outputs: dict[str, str]
+):
+    stderr = SelectiveChecks(
+        files=files,
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=github_event,
+        pr_labels=(),
         default_branch="main",
     )
     assert_outputs_are_printed(expected_outputs, str(stderr))
@@ -1234,7 +2025,9 @@ def test_excluded_providers():
         {
             "excluded-providers-as-string": json.dumps(
                 {
-                    "3.13": ["apache.beam", "apache.kafka", "fab", "yandex", "ydb"],
+                    "3.14": [
+                        "apache.cassandra",  # Enable when the next release after 3.29.3 is available
+                    ],
                 }
             ),
         },
@@ -1243,15 +2036,19 @@ def test_excluded_providers():
 
 
 @pytest.mark.parametrize(
-    "files, expected_outputs",
+    ("files", "expected_outputs"),
     [
         (
             pytest.param(
                 ("scripts/ci/prek/file.sh",),
                 {
+                    # prek hooks are static checks, not tests: they must not force the full
+                    # test matrix, but they still build the CI image so mypy-scripts and the
+                    # image-based static checks run.
                     "full-tests-needed": "false",
+                    "ci-image-build": "true",
                 },
-                id="No full tests needed when prek scripts change",
+                id="prek scripts build the CI image but do not force full tests",
             )
         ),
         (
@@ -1294,7 +2091,105 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
 
 
 @pytest.mark.parametrize(
-    "files, pr_labels, default_branch, expected_outputs,",
+    "files",
+    [
+        pytest.param(
+            ("scripts/ci/prek/check_provider_yaml_files.py",),
+            id="provider yaml check script changed",
+        ),
+        pytest.param(
+            ("providers/.pre-commit-config.yaml",),
+            id="providers prek config changed",
+        ),
+        pytest.param(
+            (
+                "scripts/ci/prek/check_provider_yaml_files.py",
+                "providers/.pre-commit-config.yaml",
+            ),
+            id="provider yaml check script and providers prek config changed together",
+        ),
+    ],
+)
+def test_provider_yaml_check_not_skipped_when_check_scripts_change(files: tuple[str, ...]):
+    stderr = SelectiveChecks(
+        files=files,
+        github_event=GithubEvents.PULL_REQUEST,
+        commit_ref=NEUTRAL_COMMIT,
+        default_branch="main",
+    )
+    skip_prek_hooks = str(stderr).split("skip-prek-hooks=")[1].split("\n")[0]
+    assert "check-provider-yaml-valid" not in skip_prek_hooks.split(",")
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        pytest.param(
+            ("airflow-core/src/airflow/api_fastapi/core_api/openapi/_private_ui.yaml",),
+            id="private UI spec changed",
+        ),
+        pytest.param(
+            (
+                "airflow-core/src/airflow/api_fastapi/auth/managers/simple/openapi/v2-simple-auth-manager-generated.yaml",
+            ),
+            id="simple auth manager spec changed",
+        ),
+    ],
+)
+def test_ui_compile_hooks_not_skipped_when_ui_openapi_spec_changes(files: tuple[str, ...]):
+    stderr = SelectiveChecks(
+        files=files,
+        github_event=GithubEvents.PULL_REQUEST,
+        commit_ref=NEUTRAL_COMMIT,
+        default_branch="main",
+    )
+    skip_prek_hooks = str(stderr).split("skip-prek-hooks=")[1].split("\n")[0]
+    assert "ts-compile-lint-ui" not in skip_prek_hooks.split(",")
+    assert "ts-compile-lint-simple-auth-manager-ui" not in skip_prek_hooks.split(",")
+
+
+@pytest.mark.parametrize(
+    ("files", "expected_outputs"),
+    [
+        pytest.param(
+            (".github/workflows/ci-amd.yml",),
+            {"full-tests-needed": "true"},
+            id="Test workflow (ci-amd) forces full tests",
+        ),
+        pytest.param(
+            (".github/workflows/run-unit-tests.yml",),
+            {"full-tests-needed": "true"},
+            id="Test workflow (run-unit-tests) forces full tests",
+        ),
+        pytest.param(
+            (".github/workflows/codeql-analysis.yml",),
+            {"full-tests-needed": "false"},
+            id="Non-test workflow (codeql) does not force full tests",
+        ),
+        pytest.param(
+            (".github/workflows/publish-docs-to-s3.yml",),
+            {"full-tests-needed": "false"},
+            id="Non-test workflow (publish-docs-to-s3) does not force full tests",
+        ),
+        pytest.param(
+            (".github/workflows/ci-notification.yml",),
+            {"full-tests-needed": "false"},
+            id="Non-test workflow (ci-notification) does not force full tests",
+        ),
+    ],
+)
+def test_non_test_workflows_do_not_force_full_tests(files: tuple[str, ...], expected_outputs: dict[str, str]):
+    stderr = SelectiveChecks(
+        files=files,
+        github_event=GithubEvents.PULL_REQUEST,
+        commit_ref=NEUTRAL_COMMIT,
+        default_branch="main",
+    )
+    assert_outputs_are_printed(expected_outputs, str(stderr))
+
+
+@pytest.mark.parametrize(
+    ("files", "pr_labels", "default_branch", "expected_outputs"),
     [
         (
             pytest.param(
@@ -1307,7 +2202,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "all-versions": "false",
                     "mysql-versions": "['8.0']",
-                    "postgres-versions": "['13']",
+                    "postgres-versions": "['14']",
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "kubernetes-versions": f"['{DEFAULT_KUBERNETES_VERSION}']",
@@ -1324,8 +2219,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="Everything should run including all providers when git provider is changed"
                 "(special case for now)",
@@ -1342,7 +2236,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "all-python-versions": ALL_PYTHON_VERSIONS_AS_LIST,
                     "all-python-versions-list-as-string": ALL_PYTHON_VERSIONS_AS_STRING,
                     "mysql-versions": "['8.0', '8.4']",
-                    "postgres-versions": "['13', '14', '15', '16', '17']",
+                    "postgres-versions": "['14', '15', '16', '17', '18']",
                     "python-versions": ALL_PYTHON_VERSIONS_AS_LIST,
                     "python-versions-list-as-string": ALL_PYTHON_VERSIONS_AS_STRING,
                     "kubernetes-versions": ALL_KUBERNETES_VERSIONS_AS_LIST,
@@ -1359,8 +2253,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="Everything should run including all providers when full tests are needed, "
                 "and all versions are required.",
@@ -1377,7 +2270,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "all-versions": "false",
                     "mysql-versions": "['8.0']",
-                    "postgres-versions": "['13']",
+                    "postgres-versions": "['14']",
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "kubernetes-versions": f"['{DEFAULT_KUBERNETES_VERSION}']",
@@ -1394,8 +2287,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="Everything should run including all providers when full tests are needed "
                 "but with single python and kubernetes if `default versions only` label is set",
@@ -1412,7 +2304,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "all-versions": "false",
                     "mysql-versions": "['8.0']",
-                    "postgres-versions": "['13']",
+                    "postgres-versions": "['14']",
                     "python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                     "python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                     "kubernetes-versions": f"['{DEFAULT_KUBERNETES_VERSION}']",
@@ -1429,8 +2321,9 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
+                    "run-ui-e2e-tests": "true",
+                    "run-openlineage-e2e-compat-tests": "true",
                 },
                 id="Everything should run including all providers when full tests are needed "
                 "but with single python and kubernetes if no version label is set",
@@ -1448,7 +2341,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "all-versions": "false",
                     "default-python-version": f"{ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS[-1]}",
                     "mysql-versions": "['8.4']",
-                    "postgres-versions": "['17']",
+                    "postgres-versions": "['18']",
                     "python-versions": f"['{ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS[-1]}']",
                     "python-versions-list-as-string": f"{ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS[-1]}",
                     "kubernetes-versions": f"['{ALLOWED_KUBERNETES_VERSIONS[-1]}']",
@@ -1465,8 +2358,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="Everything should run including all providers when full tests are needed "
                 "but with single python and kubernetes if `latest versions only` label is set",
@@ -1501,8 +2393,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="Everything should run including full providers when full "
                 "tests are needed even with different label set as well",
@@ -1535,8 +2426,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
                     "providers-test-types-list-as-strings-in-json": ALL_PROVIDERS_SELECTIVE_TEST_TYPES_AS_JSON,
                     "individual-providers-test-types-list-as-strings-in-json": LIST_OF_ALL_PROVIDER_TESTS_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS,
+                    "run-mypy-providers": "true",
                 },
                 id="Everything should run including full providers when "
                 "full tests are needed even if no files are changed",
@@ -1563,8 +2453,7 @@ def test_full_test_needed_when_scripts_changes(files: tuple[str, ...], expected_
                     "skip-prek-hooks": All_SKIPPED_COMMITS_IF_NON_MAIN_BRANCH,
                     "upgrade-to-newer-dependencies": "false",
                     "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                    "run-mypy": "true",
-                    "mypy-checks": ALL_MYPY_CHECKS_EXCEPT_PROVIDERS,
+                    "run-mypy-providers": "false",
                 },
                 id="Everything should run except Providers and lint prek "
                 "when full tests are needed for non-main branch",
@@ -1589,7 +2478,7 @@ def test_expected_output_full_tests_needed(
 
 
 @pytest.mark.parametrize(
-    "files, expected_outputs,",
+    ("files", "expected_outputs"),
     [
         pytest.param(
             ("INTHEWILD.md",),
@@ -1606,8 +2495,7 @@ def test_expected_output_full_tests_needed(
                 "full-tests-needed": "false",
                 "upgrade-to-newer-dependencies": "false",
                 "core-test-types-list-as-strings-in-json": None,
-                "run-mypy": "false",
-                "mypy-checks": "[]",
+                "run-mypy-providers": "false",
             },
             id="Nothing should run if only non-important files changed",
         ),
@@ -1632,8 +2520,7 @@ def test_expected_output_full_tests_needed(
                 "core-test-types-list-as-strings-in-json": json.dumps(
                     [{"description": "Always", "test_types": "Always"}]
                 ),
-                "run-mypy": "false",
-                "mypy-checks": "[]",
+                "run-mypy-providers": "false",
             },
             id="No Helm tests, No providers no lint charts, should run if "
             "only chart/providers changed in non-main but PROD image should be built",
@@ -1660,8 +2547,7 @@ def test_expected_output_full_tests_needed(
                 "core-test-types-list-as-strings-in-json": json.dumps(
                     [{"description": "Always...CLI", "test_types": "Always CLI"}]
                 ),
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-airflow-core']",
+                "run-mypy-providers": "false",
             },
             id="Only CLI tests and Kubernetes tests should run if cli/chart files changed in non-main branch",
         ),
@@ -1684,8 +2570,7 @@ def test_expected_output_full_tests_needed(
                 "run-kubernetes-tests": "false",
                 "upgrade-to-newer-dependencies": "false",
                 "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-airflow-core']",
+                "run-mypy-providers": "false",
             },
             id="All tests except Providers and helm lint prek "
             "should run if core file changed in non-main branch",
@@ -1707,51 +2592,49 @@ def test_expected_output_pull_request_v2_7(
 
 
 @pytest.mark.parametrize(
-    "files, pr_labels, default_branch, expected_outputs,",
+    ("files", "pr_labels", "default_branch", "expected_outputs"),
     [
         pytest.param(
             ("INTHEWILD.md",),
             (),
             "main",
             {
-                "selected-providers-list-as-string": ALL_PROVIDERS_AFFECTED,
-                "all-python-versions": ALL_PYTHON_VERSIONS_AS_LIST,
-                "all-python-versions-list-as-string": ALL_PYTHON_VERSIONS_AS_STRING,
-                "ci-image-build": "true",
-                "prod-image-build": "true",
-                "run-helm-tests": "true",
-                "run-unit-tests": "true",
-                "docs-build": "true",
-                "docs-list-as-string": ALL_DOCS_SELECTED_FOR_BUILD,
-                "skip-prek-hooks": ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED,
-                "upgrade-to-newer-dependencies": "true",
-                "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                "run-mypy": "true",
-                "mypy-checks": ALL_MYPY_CHECKS,
+                "selected-providers-list-as-string": None,
+                "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
+                "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
+                "ci-image-build": "false",
+                "prod-image-build": "false",
+                "run-helm-tests": "false",
+                "run-unit-tests": "false",
+                "skip-providers-tests": "true",
+                "docs-build": "false",
+                "docs-list-as-string": None,
+                "upgrade-to-newer-dependencies": "false",
+                "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NOT_IMPORTANT_FILES_CHANGED,
+                "core-test-types-list-as-strings-in-json": None,
+                "run-mypy-providers": "false",
             },
-            id="All tests run on push even if unimportant file changed",
+            id="No tests run on push if only text non-doc files changed",
         ),
         pytest.param(
             ("INTHEWILD.md",),
             (),
             "v2-3-stable",
             {
-                "all-python-versions": ALL_PYTHON_VERSIONS_AS_LIST,
-                "all-python-versions-list-as-string": ALL_PYTHON_VERSIONS_AS_STRING,
-                "ci-image-build": "true",
-                "prod-image-build": "true",
+                "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
+                "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
+                "ci-image-build": "false",
+                "prod-image-build": "false",
                 "run-helm-tests": "false",
-                "run-unit-tests": "true",
-                "docs-build": "true",
-                "skip-prek-hooks": All_SKIPPED_COMMITS_IF_NON_MAIN_BRANCH,
-                "docs-list-as-string": "apache-airflow docker-stack",
-                "upgrade-to-newer-dependencies": "true",
-                "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                "run-mypy": "true",
-                "mypy-checks": ALL_MYPY_CHECKS_EXCEPT_PROVIDERS,
+                "run-unit-tests": "false",
+                "skip-providers-tests": "true",
+                "docs-build": "false",
+                "docs-list-as-string": None,
+                "upgrade-to-newer-dependencies": "false",
+                "core-test-types-list-as-strings-in-json": None,
+                "run-mypy-providers": "false",
             },
-            id="All tests except Providers and Helm run on push"
-            " even if unimportant file changed in non-main branch",
+            id="No tests run on push if only text non-doc files changed in non-main branch",
         ),
         pytest.param(
             ("airflow-core/src/airflow/api.py",),
@@ -1768,10 +2651,10 @@ def test_expected_output_pull_request_v2_7(
                 "docs-build": "true",
                 "skip-prek-hooks": ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED,
                 "docs-list-as-string": ALL_DOCS_SELECTED_FOR_BUILD,
-                "upgrade-to-newer-dependencies": "true",
+                "upgrade-to-newer-dependencies": "false",
                 "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                "run-mypy": "true",
-                "mypy-checks": ALL_MYPY_CHECKS,
+                "run-mypy-providers": "true",
+                "run-ui-e2e-tests": "false",
             },
             id="All tests run on push if core file changed",
         ),
@@ -1794,7 +2677,7 @@ def test_expected_output_push(
 
 
 @pytest.mark.parametrize(
-    "files, expected_outputs,",
+    ("files", "expected_outputs"),
     [
         pytest.param(
             ("INTHEWILD.md",),
@@ -1811,8 +2694,7 @@ def test_expected_output_push(
                 "upgrade-to-newer-dependencies": "false",
                 "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NOT_IMPORTANT_FILES_CHANGED,
                 "core-test-types-list-as-strings-in-json": None,
-                "run-mypy": "false",
-                "mypy-checks": "[]",
+                "run-mypy-providers": "false",
             },
             id="Nothing should run if only non-important files changed",
         ),
@@ -1829,13 +2711,22 @@ def test_expected_output_push(
                 "skip-providers-tests": "true",
                 "docs-build": "true",
                 "docs-list-as-string": ALL_DOCS_SELECTED_FOR_BUILD,
-                "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_PROVIDERS,
+                "skip-prek-hooks": (
+                    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                    "mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                    "mypy-scripts,"
+                    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                ),
                 "upgrade-to-newer-dependencies": "false",
                 "core-test-types-list-as-strings-in-json": json.dumps(
                     [{"description": "Always", "test_types": "Always"}]
                 ),
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-airflow-core']",
+                "run-mypy-providers": "false",
             },
             id="Only Always and docs build should run if only system tests changed",
         ),
@@ -1846,10 +2737,10 @@ def test_expected_output_push(
                 "providers/google/tests/unit/google/file.py",
             ),
             {
-                "selected-providers-list-as-string": "amazon apache.beam apache.cassandra apache.kafka "
-                "cncf.kubernetes common.compat common.sql "
-                "facebook google hashicorp http microsoft.azure microsoft.mssql mysql "
-                "openlineage oracle postgres presto salesforce samba sftp ssh trino",
+                "selected-providers-list-as-string": "amazon apache.cassandra apache.kafka "
+                "cncf.kubernetes common.compat common.messaging common.sql databricks "
+                "facebook google hashicorp http microsoft.azure microsoft.mssql mongo mysql "
+                "openlineage oracle postgres presto salesforce samba sftp ssh standard trino",
                 "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                 "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                 "ci-image-build": "true",
@@ -1858,11 +2749,20 @@ def test_expected_output_push(
                 "run-unit-tests": "true",
                 "skip-providers-tests": "false",
                 "docs-build": "true",
-                "docs-list-as-string": "apache-airflow helm-chart amazon apache.beam apache.cassandra "
-                "apache.kafka cncf.kubernetes common.compat common.sql facebook google hashicorp http microsoft.azure "
-                "microsoft.mssql mysql openlineage oracle postgres "
-                "presto salesforce samba sftp ssh trino",
-                "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_UI,
+                "docs-list-as-string": "apache-airflow helm-chart amazon apache.cassandra "
+                "apache.kafka cncf.kubernetes common.compat common.messaging common.sql databricks facebook google hashicorp http microsoft.azure "
+                "microsoft.mssql mongo mysql openlineage oracle postgres "
+                "presto salesforce samba sftp ssh standard trino",
+                "skip-prek-hooks": (
+                    "check-ts-sdk-supervisor-schema,identity,ktlint,mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                    "mypy-scripts,"
+                    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                ),
                 "run-kubernetes-tests": "true",
                 "upgrade-to-newer-dependencies": "false",
                 "core-test-types-list-as-strings-in-json": json.dumps(
@@ -1871,17 +2771,17 @@ def test_expected_output_push(
                 "providers-test-types-list-as-strings-in-json": json.dumps(
                     [
                         {
-                            "description": "amazon...google",
-                            "test_types": "Providers[amazon] Providers[apache.beam,apache.cassandra,"
-                            "apache.kafka,cncf.kubernetes,common.compat,common.sql,facebook,"
-                            "hashicorp,http,microsoft.azure,microsoft.mssql,mysql,"
+                            "description": "amazon...standard",
+                            "test_types": "Providers[amazon] Providers[apache.cassandra,"
+                            "apache.kafka,cncf.kubernetes,common.compat,common.messaging,common.sql,databricks,facebook,"
+                            "hashicorp,http,microsoft.azure,microsoft.mssql,mongo,mysql,"
                             "openlineage,oracle,postgres,presto,salesforce,samba,sftp,ssh,trino] "
-                            "Providers[google]",
+                            "Providers[google] "
+                            "Providers[standard]",
                         }
                     ]
                 ),
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-airflow-core', 'mypy-providers']",
+                "run-mypy-providers": "true",
             },
             id="CLI tests and Google-related provider tests should run if cli/chart files changed but "
             "prod image should be build too and k8s tests too",
@@ -1898,18 +2798,30 @@ def test_expected_output_push(
                 "skip-providers-tests": "true",
                 "docs-build": "true",
                 "docs-list-as-string": "apache-airflow",
-                "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_NO_PROVIDERS_UI_AND_HELM_TESTS,
+                "skip-prek-hooks": (
+                    "check-provider-yaml-valid,check-ts-sdk-supervisor-schema,identity,ktlint,lint-helm-chart,"
+                    "mypy-airflow-ctl,mypy-airflow-ctl-tests,mypy-airflow-e2e-tests,"
+                    "mypy-dev,mypy-devel-common,mypy-docker-tests,mypy-helm-tests,mypy-kubernetes-tests,"
+                    "mypy-scripts,"
+                    "mypy-shared-configuration,mypy-shared-dagnode,mypy-shared-listeners,mypy-shared-logging,"
+                    "mypy-shared-module_loading,mypy-shared-observability,mypy-shared-plugins_manager,"
+                    "mypy-shared-providers_discovery,mypy-shared-secrets_backend,mypy-shared-secrets_masker,"
+                    "mypy-shared-serialization,mypy-shared-state,mypy-shared-template_rendering,mypy-shared-timezones,mypy-task-sdk,mypy-task-sdk-integration-tests,"
+                    "ts-compile-lint-simple-auth-manager-ui,ts-compile-lint-ui,update-uv-lock"
+                ),
                 "run-kubernetes-tests": "false",
                 "upgrade-to-newer-dependencies": "false",
                 "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-airflow-core']",
+                "run-mypy-providers": "false",
             },
             id="Tests for all airflow core types except providers should run if model file changed",
         ),
         pytest.param(
             ("airflow-core/src/airflow/api_fastapi/core_api/openapi/v2-rest-api-generated.yaml",),
             {
+                # The OpenAPI spec IS the API contract — changing it ripples to the UI
+                # codegen and generated clients, so it still forces the full matrix.
+                "full-tests-needed": "true",
                 "selected-providers-list-as-string": "",
                 "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                 "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
@@ -1922,10 +2834,30 @@ def test_expected_output_push(
                 "upgrade-to-newer-dependencies": "false",
                 "skip-prek-hooks": ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED,
                 "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-                "run-mypy": "true",
-                "mypy-checks": ALL_MYPY_CHECKS,
+                "run-mypy-providers": "true",
             },
-            id="pre commit ts-compile-format-lint should not be ignored if openapi spec changed.",
+            id="OpenAPI spec change still forces the full matrix",
+        ),
+        pytest.param(
+            ("airflow-core/src/airflow/api_fastapi/core_api/openapi/_private_ui.yaml",),
+            {
+                # Rationale on the UI_OPENAPI_FILES group in selective_checks.py. One param per
+                # spec directory so each pattern of the group is pinned individually - with both
+                # files in one param, dropping either pattern would still pass via the other file.
+                "full-tests-needed": "false",
+                "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_ONLY_UI_OPENAPI_CHANGED,
+            },
+            id="Private UI OpenAPI spec change runs the UI compile hooks without the full matrix",
+        ),
+        pytest.param(
+            (
+                "airflow-core/src/airflow/api_fastapi/auth/managers/simple/openapi/v2-simple-auth-manager-generated.yaml",
+            ),
+            {
+                "full-tests-needed": "false",
+                "skip-prek-hooks": ALL_SKIPPED_COMMITS_IF_ONLY_UI_OPENAPI_CHANGED,
+            },
+            id="Simple auth manager OpenAPI spec change runs the UI compile hooks",
         ),
         pytest.param(
             (
@@ -1936,8 +2868,8 @@ def test_expected_output_push(
             ),
             {
                 "selected-providers-list-as-string": "amazon common.compat common.io common.sql "
-                "databricks dbt.cloud ftp google microsoft.mssql mysql "
-                "openlineage oracle postgres sftp snowflake trino",
+                "databricks dbt.cloud ftp google jdbc microsoft.azure microsoft.mssql mysql "
+                "openlineage oracle postgres sftp snowflake standard trino",
                 "all-python-versions": f"['{DEFAULT_PYTHON_MAJOR_MINOR_VERSION}']",
                 "all-python-versions-list-as-string": DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
                 "ci-image-build": "true",
@@ -1945,10 +2877,7 @@ def test_expected_output_push(
                 "run-helm-tests": "false",
                 "run-unit-tests": "true",
                 "skip-providers-tests": "false",
-                "docs-build": "true",
-                "docs-list-as-string": "apache-airflow task-sdk amazon common.compat common.io common.sql "
-                "databricks dbt.cloud ftp google microsoft.mssql mysql "
-                "openlineage oracle postgres sftp snowflake trino",
+                "docs-build": "false",
                 "skip-prek-hooks": ALL_SKIPPED_COMMITS_ON_NO_CI_IMAGE,
                 "run-kubernetes-tests": "false",
                 "upgrade-to-newer-dependencies": "false",
@@ -1956,15 +2885,14 @@ def test_expected_output_push(
                 "providers-test-types-list-as-strings-in-json": json.dumps(
                     [
                         {
-                            "description": "amazon...google",
+                            "description": "amazon...standard",
                             "test_types": "Providers[amazon] Providers[common.compat,common.io,common.sql,"
-                            "databricks,dbt.cloud,ftp,microsoft.mssql,mysql,openlineage,oracle,"
-                            "postgres,sftp,snowflake,trino] Providers[google]",
+                            "databricks,dbt.cloud,ftp,jdbc,microsoft.azure,microsoft.mssql,mysql,openlineage,oracle,"
+                            "postgres,sftp,snowflake,trino] Providers[google] Providers[standard]",
                         }
                     ]
                 ),
-                "run-mypy": "false",
-                "mypy-checks": "[]",
+                "run-mypy-providers": "false",
             },
             id="Trigger openlineage and related providers tests when Assets files changed",
         ),
@@ -2012,15 +2940,29 @@ def test_no_commit_provided_trigger_full_build_for_any_event_type(github_event):
             "run-unit-tests": "true",
             "docs-build": "true",
             "skip-prek-hooks": ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED,
-            "upgrade-to-newer-dependencies": (
-                "true" if github_event in [GithubEvents.PUSH, GithubEvents.SCHEDULE] else "false"
-            ),
+            "upgrade-to-newer-dependencies": ("true" if github_event == GithubEvents.SCHEDULE else "false"),
             "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-            "run-mypy": "true",
-            "mypy-checks": ALL_MYPY_CHECKS,
+            "run-mypy-providers": "true",
         },
         str(stderr),
     )
+
+
+# The image cache is pushed for `python-versions`, so a narrowed list leaves the remaining
+# versions with no cache and they build from scratch on every run. `refresh-image-registry-cache.yml`
+# forces the label below for exactly that reason; this pins the behaviour it relies on.
+
+
+def test_all_python_versions_with_all_versions_label():
+    """Set on the event that would otherwise narrow: a text-only push."""
+    stderr = SelectiveChecks(
+        files=("INTHEWILD.md",),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PUSH,
+        pr_labels=("all versions",),
+        default_branch="main",
+    )
+    assert_outputs_are_printed({"python-versions": CURRENT_PYTHON_VERSIONS_AS_LIST}, str(stderr))
 
 
 @pytest.mark.parametrize(
@@ -2051,19 +2993,16 @@ def test_files_provided_trigger_full_build_for_any_event_type(github_event):
             "run-unit-tests": "true",
             "docs-build": "true",
             "skip-prek-hooks": ALL_SKIPPED_COMMITS_BY_DEFAULT_ON_ALL_TESTS_NEEDED,
-            "upgrade-to-newer-dependencies": (
-                "true" if github_event in [GithubEvents.PUSH, GithubEvents.SCHEDULE] else "false"
-            ),
+            "upgrade-to-newer-dependencies": ("true" if github_event == GithubEvents.SCHEDULE else "false"),
             "core-test-types-list-as-strings-in-json": ALL_CI_SELECTIVE_TEST_TYPES_AS_JSON,
-            "run-mypy": "true",
-            "mypy-checks": ALL_MYPY_CHECKS,
+            "run-mypy-providers": "true",
         },
         str(stderr),
     )
 
 
 @pytest.mark.parametrize(
-    "files, expected_outputs, pr_labels, commit_ref",
+    ("files", "expected_outputs", "pr_labels", "commit_ref"),
     [
         pytest.param(
             ("airflow-core/src/airflow/models/dag.py",),
@@ -2111,24 +3050,24 @@ def test_upgrade_to_newer_dependencies(
 
 
 @pytest.mark.parametrize(
-    "files, expected_outputs,",
+    ("files", "expected_outputs"),
     [
         pytest.param(
             ("providers/google/docs/some_file.rst",),
             {
-                "docs-list-as-string": "amazon apache.beam apache.cassandra apache.kafka "
-                "cncf.kubernetes common.compat common.sql facebook google hashicorp http "
-                "microsoft.azure microsoft.mssql mysql openlineage oracle "
-                "postgres presto salesforce samba sftp ssh trino",
+                "docs-list-as-string": "amazon apache.cassandra apache.kafka "
+                "cncf.kubernetes common.compat common.messaging common.sql databricks facebook google hashicorp http "
+                "microsoft.azure microsoft.mssql mongo mysql openlineage oracle "
+                "postgres presto salesforce samba sftp ssh standard trino",
             },
             id="Google provider docs changed",
         ),
         pytest.param(
             ("providers/common/sql/src/airflow/providers/common/sql/common_sql_python.py",),
             {
-                "docs-list-as-string": "amazon apache.drill apache.druid apache.hive "
-                "apache.impala apache.pinot common.sql databricks elasticsearch "
-                "exasol google jdbc microsoft.mssql mysql odbc openlineage "
+                "docs-list-as-string": "amazon apache.drill apache.druid apache.hive apache.iceberg "
+                "apache.impala apache.pinot clickhousedb common.ai common.compat common.sql databricks elasticsearch "
+                "exasol google informatica jdbc microsoft.mssql mysql odbc openlineage "
                 "oracle pgvector postgres presto slack snowflake sqlite teradata trino vertica ydb",
             },
             id="Common SQL provider package python files changed",
@@ -2136,14 +3075,14 @@ def test_upgrade_to_newer_dependencies(
         pytest.param(
             ("providers/airbyte/docs/some_file.rst",),
             {
-                "docs-list-as-string": "airbyte",
+                "docs-list-as-string": "airbyte common.compat",
             },
             id="Airbyte provider docs changed",
         ),
         pytest.param(
             ("providers/airbyte/docs/some_file.rst", "airflow-core/docs/docs.rst"),
             {
-                "docs-list-as-string": "apache-airflow airbyte",
+                "docs-list-as-string": "apache-airflow airbyte common.compat",
             },
             id="Airbyte provider and airflow core docs changed",
         ),
@@ -2154,7 +3093,7 @@ def test_upgrade_to_newer_dependencies(
                 "providers-summary-docs/docs.rst",
             ),
             {
-                "docs-list-as-string": "apache-airflow apache-airflow-providers airbyte",
+                "docs-list-as-string": "apache-airflow apache-airflow-providers airbyte common.compat",
             },
             id="Airbyte provider and airflow core and common provider docs changed",
         ),
@@ -2166,8 +3105,15 @@ def test_upgrade_to_newer_dependencies(
             id="Only Airflow docs changed",
         ),
         pytest.param(
+            ("dev/mypy/docs/index.rst",),
+            {
+                "docs-list-as-string": "apache-airflow-mypy",
+            },
+            id="Only Apache Airflow Mypy docs changed",
+        ),
+        pytest.param(
             ("providers/celery/src/airflow/providers/celery/file.py",),
-            {"docs-list-as-string": "celery cncf.kubernetes"},
+            {"docs-list-as-string": "celery cncf.kubernetes common.compat"},
             id="Celery python files changed",
         ),
         pytest.param(
@@ -2224,10 +3170,10 @@ def test_docs_filter(files: tuple[str, ...], expected_outputs: dict[str, str]):
 
 
 @pytest.mark.parametrize(
-    "files, expected_outputs,",
+    ("files", "expected_outputs"),
     [
         pytest.param(
-            ("helm-tests/tests/helm_tests/random_helm_test.py",),
+            ("chart/tests/helm_tests/random_helm_test.py",),
             {
                 "ci-image-build": "true",
                 "prod-image-build": "true",
@@ -2249,7 +3195,7 @@ def test_helm_tests_trigger_ci_build(files: tuple[str, ...], expected_outputs: d
 
 
 @pytest.mark.parametrize(
-    "files, expected_outputs,",
+    ("files", "expected_outputs"),
     [
         pytest.param(
             ("providers/amazon/provider.yaml",),
@@ -2303,7 +3249,7 @@ def test_provider_yaml_or_pyproject_toml_changes_trigger_ci_build(
 
 
 @pytest.mark.parametrize(
-    "files, has_migrations",
+    ("files", "has_migrations"),
     [
         pytest.param(
             ("airflow-core/src/airflow/test.py",),
@@ -2330,7 +3276,7 @@ def test_has_migrations(files: tuple[str, ...], has_migrations: bool):
 
 
 @pytest.mark.parametrize(
-    "labels, expected_outputs,",
+    ("labels", "expected_outputs"),
     [
         pytest.param(
             (),
@@ -2364,13 +3310,12 @@ def test_provider_compatibility_checks(labels: tuple[str, ...], expected_outputs
 
 
 @pytest.mark.parametrize(
-    "files, expected_outputs, default_branch, pr_labels",
+    ("files", "expected_outputs", "default_branch", "pr_labels"),
     [
         pytest.param(
             ("README.md",),
             {
-                "run-mypy": "false",
-                "mypy-checks": "[]",
+                "run-mypy-providers": "false",
             },
             "main",
             (),
@@ -2379,8 +3324,7 @@ def test_provider_compatibility_checks(labels: tuple[str, ...], expected_outputs
         pytest.param(
             ("airflow-core/src/airflow/cli/file.py",),
             {
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-airflow-core']",
+                "run-mypy-providers": "false",
             },
             "main",
             (),
@@ -2389,8 +3333,7 @@ def test_provider_compatibility_checks(labels: tuple[str, ...], expected_outputs
         pytest.param(
             ("airflow-core/src/airflow/models/file.py",),
             {
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-airflow-core']",
+                "run-mypy-providers": "false",
             },
             "main",
             (),
@@ -2399,8 +3342,7 @@ def test_provider_compatibility_checks(labels: tuple[str, ...], expected_outputs
         pytest.param(
             ("task-sdk/src/airflow/sdk/a_file.py",),
             {
-                "run-mypy": "true",
-                "mypy-checks": "['mypy-providers', 'mypy-task-sdk']",
+                "run-mypy-providers": "true",
             },
             "main",
             (),
@@ -2409,8 +3351,7 @@ def test_provider_compatibility_checks(labels: tuple[str, ...], expected_outputs
         pytest.param(
             ("dev/a_package/a_file.py",),
             {
-                "run-mypy": "true",
-                "mypy-checks": ALL_MYPY_CHECKS,
+                "run-mypy-providers": "true",
             },
             "main",
             (),
@@ -2419,8 +3360,7 @@ def test_provider_compatibility_checks(labels: tuple[str, ...], expected_outputs
         pytest.param(
             ("readme.md",),
             {
-                "run-mypy": "true",
-                "mypy-checks": ALL_MYPY_CHECKS,
+                "run-mypy-providers": "true",
             },
             "main",
             ("full tests needed",),
@@ -2441,38 +3381,831 @@ def test_mypy_matches(
     assert_outputs_are_printed(expected_outputs, str(stderr))
 
 
-@patch("airflow_breeze.utils.selective_checks.FAIL_WHEN_ENGLISH_TRANSLATION_CHANGED", True)
-def test_ui_english_translation_changed_fail_on_change():
-    translation_file = "airflow-core/src/airflow/ui/public/i18n/locales/en/some_file.json"
+@pytest.mark.parametrize(
+    ("integration", "platform", "expected_result"),
+    [
+        # Test integrations disabled for all CI environments
+        pytest.param(
+            "mssql",
+            CI_AMD_PLATFORM,
+            True,
+            id="mssql_disabled_on_amd",
+        ),
+        pytest.param(
+            "localstack",
+            CI_ARM_PLATFORM,
+            True,
+            id="localstack_disabled_on_arm",
+        ),
+        # Test integrations disabled only for ARM runners
+        pytest.param(
+            "kerberos",
+            CI_ARM_PLATFORM,
+            True,
+            id="kerberos_disabled_on_arm",
+        ),
+        pytest.param(
+            "drill",
+            CI_ARM_PLATFORM,
+            True,
+            id="drill_disabled_on_arm",
+        ),
+        pytest.param(
+            "tinkerpop",
+            CI_ARM_PLATFORM,
+            True,
+            id="tinkerpop_disabled_on_arm",
+        ),
+        pytest.param(
+            "pinot",
+            CI_ARM_PLATFORM,
+            True,
+            id="pinot_disabled_on_arm",
+        ),
+        pytest.param(
+            "trino",
+            CI_ARM_PLATFORM,
+            True,
+            id="trino_disabled_on_arm",
+        ),
+        pytest.param(
+            "ydb",
+            CI_ARM_PLATFORM,
+            True,
+            id="ydb_disabled_on_arm",
+        ),
+        # Test integrations that are NOT disabled on AMD runners
+        pytest.param(
+            "kerberos",
+            CI_AMD_PLATFORM,
+            False,
+            id="kerberos_enabled_on_amd",
+        ),
+        pytest.param(
+            "drill",
+            CI_AMD_PLATFORM,
+            False,
+            id="drill_enabled_on_amd",
+        ),
+        pytest.param(
+            "tinkerpop",
+            CI_AMD_PLATFORM,
+            False,
+            id="tinkerpop_enabled_on_amd",
+        ),
+        # Test an integration that is not in any disabled list
+        pytest.param(
+            "postgres",
+            CI_AMD_PLATFORM,
+            False,
+            id="postgres_enabled_on_amd",
+        ),
+        pytest.param(
+            "postgres",
+            CI_ARM_PLATFORM,
+            False,
+            id="postgres_enabled_on_arm",
+        ),
+        pytest.param(
+            "redis",
+            CI_AMD_PLATFORM,
+            False,
+            id="redis_enabled_on_amd",
+        ),
+        pytest.param(
+            "redis",
+            CI_ARM_PLATFORM,
+            False,
+            id="redis_enabled_on_arm",
+        ),
+    ],
+)
+def test_is_disabled_integration(integration: str, platform: str, expected_result: bool):
+    """Test that _is_disabled_integration correctly identifies disabled integrations."""
+    selective_checks = SelectiveChecks(
+        files=(),
+        github_event=GithubEvents.PULL_REQUEST,
+        github_repository="apache/airflow",
+        github_context_dict={},
+        platform=platform,
+    )
+
+    assert selective_checks._is_disabled_integration(integration) == expected_result
+
+
+def test_testable_core_integrations_excludes_disabled():
+    """Test that testable_core_integrations excludes disabled integrations."""
+    with patch(
+        "airflow_breeze.utils.selective_checks.TESTABLE_CORE_INTEGRATIONS",
+        ["postgres", "kerberos"],
+    ):
+        # Test with AMD runner
+        selective_checks_amd = SelectiveChecks(
+            files=("airflow-core/tests/test_example.py",),
+            commit_ref=NEUTRAL_COMMIT,
+            github_event=GithubEvents.PULL_REQUEST,
+            platform=CI_AMD_PLATFORM,
+        )
+        with patch.object(
+            SelectiveChecks, "full_tests_needed", new_callable=lambda: property(lambda self: True)
+        ):
+            result = selective_checks_amd.testable_core_integrations
+            assert "postgres" in result
+            assert "kerberos" in result
+
+
+def test_testable_core_integrations_excludes_arm_disabled_on_arm():
+    """Test that testable_core_integrations excludes ARM-disabled integrations on ARM runners."""
+    with patch(
+        "airflow_breeze.utils.selective_checks.TESTABLE_CORE_INTEGRATIONS", ["postgres", "kerberos", "drill"]
+    ):
+        selective_checks_arm = SelectiveChecks(
+            files=("airflow-core/tests/test_example.py",),
+            commit_ref=NEUTRAL_COMMIT,
+            github_event=GithubEvents.SCHEDULE,
+            github_context_dict={"ref_name": "main"},
+            platform=CI_ARM_PLATFORM,
+        )
+        with patch.object(
+            SelectiveChecks, "full_tests_needed", new_callable=lambda: property(lambda self: True)
+        ):
+            result = selective_checks_arm.testable_core_integrations
+            assert "postgres" in result
+            assert "kerberos" not in result
+            assert "drill" not in result
+
+
+def test_testable_providers_integrations_excludes_disabled():
+    """Test that testable_providers_integrations excludes disabled integrations."""
+    with patch(
+        "airflow_breeze.utils.selective_checks.TESTABLE_PROVIDERS_INTEGRATIONS",
+        ["postgres", "mssql", "trino"],
+    ):
+        # Test with AMD runner - should exclude mssql (disabled for all CI)
+        selective_checks_amd = SelectiveChecks(
+            files=("providers/amazon/tests/test_example.py",),
+            commit_ref=NEUTRAL_COMMIT,
+            github_event=GithubEvents.PULL_REQUEST,
+            platform=CI_AMD_PLATFORM,
+        )
+        with patch.object(
+            SelectiveChecks, "full_tests_needed", new_callable=lambda: property(lambda self: True)
+        ):
+            result = selective_checks_amd.testable_providers_integrations
+            assert "postgres" in result
+            assert "trino" in result
+            assert "mssql" not in result
+
+
+def test_testable_providers_integrations_excludes_arm_disabled_on_arm():
+    """Test that testable_providers_integrations excludes ARM-disabled integrations on ARM runners."""
+    with patch(
+        "airflow_breeze.utils.selective_checks.TESTABLE_PROVIDERS_INTEGRATIONS", ["postgres", "trino", "ydb"]
+    ):
+        selective_checks_arm = SelectiveChecks(
+            files=("providers/tests/test_example.py",),
+            commit_ref=NEUTRAL_COMMIT,
+            github_event=GithubEvents.SCHEDULE,
+            github_context_dict={"ref_name": "main"},
+            platform=CI_ARM_PLATFORM,
+        )
+        with patch.object(
+            SelectiveChecks, "full_tests_needed", new_callable=lambda: property(lambda self: True)
+        ):
+            result = selective_checks_arm.testable_providers_integrations
+            assert "postgres" in result
+            assert "trino" not in result
+            assert "ydb" not in result
+
+
+@pytest.mark.parametrize(
+    ("changed_file", "expected_integration"),
+    [
+        pytest.param("airflow-core/src/airflow/security/kerberos.py", "kerberos", id="kerberos-source"),
+        pytest.param("airflow-core/src/airflow/observability/stats.py", "otel", id="otel-source"),
+        pytest.param("airflow-core/tests/integration/otel/test_otel.py", "otel", id="otel-integration-tests"),
+        pytest.param("task-sdk/src/airflow/sdk/execution_time/task_runner.py", "otel", id="otel-task-runner"),
+        pytest.param("airflow-core/src/airflow/executors/executor_loader.py", "redis", id="celery-source"),
+    ],
+)
+def test_testable_core_integrations_gated_by_source(changed_file, expected_integration):
+    """A core integration is only emitted when its corresponding core source group changed."""
+    selective_checks = SelectiveChecks(
+        files=(changed_file,),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        platform=CI_AMD_PLATFORM,
+    )
+    assert selective_checks.testable_core_integrations == [expected_integration]
+
+
+def test_testable_core_integrations_empty_when_unrelated_source():
+    """Unrelated core changes emit no core integrations (no full-tests / canary trigger)."""
+    selective_checks = SelectiveChecks(
+        files=("airflow-core/src/airflow/models/taskinstance.py",),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        platform=CI_AMD_PLATFORM,
+    )
+    assert selective_checks.testable_core_integrations == []
+
+
+def test_testable_providers_integrations_gated_by_affected_provider():
+    """A provider integration is only emitted when its owning provider is affected."""
+    selective_checks = SelectiveChecks(
+        files=("providers/apache/cassandra/src/airflow/providers/apache/cassandra/hooks/cassandra.py",),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        platform=CI_AMD_PLATFORM,
+    )
+    result = selective_checks.testable_providers_integrations
+    assert "cassandra" in result
+    # Unrelated integrations whose providers are not affected must be absent.
+    assert "mongo" not in result
+    assert "ydb" not in result
+
+
+def test_individual_providers_excludes_platform_excluded_on_arm():
+    """ibm.mq declares `excluded-platforms: [linux/arm64]`, so it must be absent from
+    the ARM individual-providers matrix (used by the Low-dep ARM canary job) and
+    present on AMD."""
+    arm_checks = SelectiveChecks(
+        files=("airflow-core/tests/test_example.py",),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.SCHEDULE,
+        github_context_dict={"ref_name": "main"},
+        default_branch="main",
+        pr_labels=("full tests needed",),
+        platform=CI_ARM_PLATFORM,
+    )
+    arm_output = arm_checks.individual_providers_test_types_list_as_strings_in_json
+    assert arm_output is not None
+    assert "Providers[ibm.mq]" not in arm_output
+
+    amd_checks = SelectiveChecks(
+        files=("airflow-core/tests/test_example.py",),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.SCHEDULE,
+        github_context_dict={"ref_name": "main"},
+        default_branch="main",
+        pr_labels=("full tests needed",),
+        platform=CI_AMD_PLATFORM,
+    )
+    amd_output = amd_checks.individual_providers_test_types_list_as_strings_in_json
+    assert amd_output is not None
+    assert "Providers[ibm.mq]" in amd_output
+
+
+def test_run_kubernetes_tests_forced_by_label():
+    """`area:kubernetes-tests` forces the Kubernetes tests job without pulling in
+    the full test matrix, unlike `full tests needed`."""
+    checks = SelectiveChecks(
+        files=("INTHEWILD.md",),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+        pr_labels=("area:kubernetes-tests",),
+    )
+    assert checks.run_kubernetes_tests is True
+    assert checks.full_tests_needed is False
+
+
+def test_run_kubernetes_tests_forced_by_label_with_no_changed_files():
+    """The label still forces the Kubernetes tests job even when no files changed."""
+    checks = SelectiveChecks(
+        files=(),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+        pr_labels=("area:kubernetes-tests",),
+    )
+    assert checks.run_kubernetes_tests is True
+    assert checks.full_tests_needed is False
+
+
+@pytest.mark.parametrize("files", [("INTHEWILD.md",), ()], ids=["unrelated-file", "no-files"])
+def test_prod_image_build_forced_by_e2e_tests_label(files):
+    checks = SelectiveChecks(
+        files=files,
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+        pr_labels=("area:e2e-tests",),
+    )
+    assert checks.prod_image_build is True
+    assert checks.full_tests_needed is False
+
+
+def test_filter_platform_excluded_test_types_handles_all_shapes():
+    """Direct unit check of the in-place filter for the three Providers[...] shapes."""
+    checks = SelectiveChecks(
+        files=(),
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.SCHEDULE,
+        github_context_dict={"ref_name": "main"},
+        default_branch="main",
+    )
+    with patch.object(
+        SelectiveChecks,
+        "_platform_excluded_providers",
+        new_callable=lambda: property(lambda self: {"ibm.mq"}),
+    ):
+        # Bare match drops entry.
+        ts = {"Providers[ibm.mq]"}
+        checks._filter_platform_excluded_test_types(ts)
+        assert ts == set()
+
+        # Combined positive form drops just the excluded id.
+        ts = {"Providers[amazon,ibm.mq,google]"}
+        checks._filter_platform_excluded_test_types(ts)
+        assert ts == {"Providers[amazon,google]"}
+
+        # Negative form gets the excluded id appended.
+        ts = {"Providers[-amazon,celery,google,standard]"}
+        checks._filter_platform_excluded_test_types(ts)
+        assert ts == {"Providers[-amazon,celery,google,ibm.mq,standard]"}
+
+        # Non-Providers entries are untouched.
+        ts = {"Core", "Always"}
+        checks._filter_platform_excluded_test_types(ts)
+        assert ts == {"Core", "Always"}
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_provider_dependency_bump_check_no_changes(mock_run_command):
+    """Test that provider dependency bump check passes when no pyproject.toml files are changed."""
+    selective_checks = SelectiveChecks(
+        files=("some_other_file.py",),
+        commit_ref=NEUTRAL_COMMIT,
+        pr_labels=(),
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+    )
+    result = selective_checks.provider_dependency_bump
+    assert result is False
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_provider_dependency_bump_check_fails_on_provider_version_bump(mock_run_command):
+    """Test that provider dependency bump check fails when provider version is bumped without label."""
+    old_toml = """
+[project]
+dependencies = [
+    "apache-airflow-providers-common-sql>=1.0.0",
+]
+"""
+    new_toml = """
+[project]
+dependencies = [
+    "apache-airflow-providers-common-sql>=1.1.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        if "^:" in args[0][2]:
+            result.stdout = old_toml
+        else:
+            result.stdout = new_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
     with pytest.raises(SystemExit):
         SelectiveChecks(
-            files=(translation_file,),
+            files=("providers/amazon/pyproject.toml",),
             commit_ref=NEUTRAL_COMMIT,
             pr_labels=(),
             github_event=GithubEvents.PULL_REQUEST,
             default_branch="main",
-        ).ui_english_translation_changed
+        ).provider_dependency_bump
 
 
-def test_ui_english_translation_changed_allowed_in_canary_run():
-    translation_file = "airflow-core/src/airflow/ui/public/i18n/locales/en/some_file.json"
-    selective_checks = SelectiveChecks(
-        files=(translation_file,),
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_provider_dependency_bump_check_works_on_provider_version_bump_when_pushed(mock_run_command):
+    """Test that provider dependency bump check fails when provider version is bumped without label."""
+    old_toml = """
+[project]
+dependencies = [
+    "apache-airflow-providers-common-sql>=1.0.0",
+]
+"""
+    new_toml = """
+[project]
+dependencies = [
+    "apache-airflow-providers-common-sql>=1.1.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        if "^:" in args[0][2]:
+            result.stdout = old_toml
+        else:
+            result.stdout = new_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+    assert not SelectiveChecks(
+        files=("providers/amazon/pyproject.toml",),
         commit_ref=NEUTRAL_COMMIT,
         pr_labels=(),
         github_event=GithubEvents.PUSH,
         default_branch="main",
-    )
-    assert selective_checks.ui_english_translation_changed
+    ).provider_dependency_bump
 
 
-def test_ui_english_translation_changed_allowed_with_label():
-    translation_file = "airflow-core/src/airflow/ui/public/i18n/locales/en/some_file.json"
-    selective_checks = SelectiveChecks(
-        files=(translation_file,),
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_provider_dependency_bump_check_skipped_on_release_branch(mock_run_command):
+    """Test that provider dependency bump check is a no-op on release branches (v3-X-test)."""
+    old_toml = """
+[project]
+dependencies = [
+    "apache-airflow-providers-common-sql>=1.0.0",
+]
+"""
+    new_toml = """
+[project]
+dependencies = [
+    "apache-airflow-providers-common-sql>=1.1.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        if "^:" in args[0][2]:
+            result.stdout = old_toml
+        else:
+            result.stdout = new_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
+    assert not SelectiveChecks(
+        files=("providers/amazon/pyproject.toml",),
         commit_ref=NEUTRAL_COMMIT,
-        pr_labels=("allow translation change",),
+        pr_labels=(),
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="v3-2-test",
+    ).provider_dependency_bump
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_provider_dependency_bump_check_passes_with_label(mock_run_command):
+    """Test that provider dependency bump check passes when label is set."""
+    old_toml = """
+[project]
+dependencies = [
+    "apache-airflow-providers-common-sql>=1.0.0",
+]
+"""
+    new_toml = """
+[project]
+dependencies = [
+    "apache-airflow-providers-common-sql>=1.1.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        if "^:" in args[0][2]:
+            result.stdout = old_toml
+        else:
+            result.stdout = new_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
+    selective_checks = SelectiveChecks(
+        files=("providers/amazon/pyproject.toml",),
+        commit_ref=NEUTRAL_COMMIT,
+        pr_labels=("allow provider dependency bump",),
         github_event=GithubEvents.PULL_REQUEST,
         default_branch="main",
     )
-    assert selective_checks.ui_english_translation_changed is True
+    result = selective_checks.provider_dependency_bump
+    assert result is True
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_provider_dependency_bump_check_passes_on_non_provider_dependency_changes(mock_run_command):
+    """Test that provider dependency bump check passes when non-provider dependencies change."""
+    old_toml = """
+[project]
+dependencies = [
+    "apache-airflow>=2.11.0",
+    "boto3>=1.37.0",
+]
+"""
+    new_toml = """
+[project]
+dependencies = [
+    "apache-airflow>=2.11.0",
+    "boto3>=1.38.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        if "^:" in args[0][2]:
+            result.stdout = old_toml
+        else:
+            result.stdout = new_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
+    selective_checks = SelectiveChecks(
+        files=("providers/amazon/pyproject.toml",),
+        commit_ref=NEUTRAL_COMMIT,
+        pr_labels=(),
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+    )
+    result = selective_checks.provider_dependency_bump
+    assert result is False
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_provider_dependency_bump_check_in_optional_dependencies(mock_run_command):
+    """Test that provider dependency bump check works for optional-dependencies section."""
+    old_toml = """
+[project.optional-dependencies]
+"cncf.kubernetes" = [
+    "apache-airflow-providers-cncf-kubernetes>=7.0.0",
+]
+"""
+    new_toml = """
+[project.optional-dependencies]
+"cncf.kubernetes" = [
+    "apache-airflow-providers-cncf-kubernetes>=7.2.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        if "^:" in args[0][2]:
+            result.stdout = old_toml
+        else:
+            result.stdout = new_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
+    with pytest.raises(SystemExit):
+        _ = SelectiveChecks(
+            files=("providers/amazon/pyproject.toml",),
+            commit_ref=NEUTRAL_COMMIT,
+            pr_labels=(),
+            github_event=GithubEvents.PULL_REQUEST,
+            default_branch="main",
+        ).provider_dependency_bump
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_common_compat_changed_with_next_version_passes(mock_run_command):
+    """Test that check passes when common.compat changes and other provider has '# use next version'."""
+    provider_toml = """
+[project]
+dependencies = [
+    "apache-airflow>=2.11.0",
+    "apache-airflow-providers-common-compat>=1.8.0",  # use next version
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        result.stdout = provider_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
+    selective_checks = SelectiveChecks(
+        files=(
+            "providers/common/compat/src/airflow/providers/common/compat/file.py",
+            "providers/ftp/src/airflow/providers/ftp/hooks/ftp.py",
+        ),
+        commit_ref=NEUTRAL_COMMIT,
+        pr_labels=(),
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+    )
+    result = selective_checks.common_compat_changed_without_next_version
+    assert result is False
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_common_compat_changed_without_next_version_fails(mock_run_command):
+    """Test that check fails when common.compat changes and other provider doesn't have '# use next version'."""
+    provider_toml = """
+[project]
+dependencies = [
+    "apache-airflow>=2.11.0",
+    "apache-airflow-providers-common-compat>=1.8.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        result.stdout = provider_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
+    with pytest.raises(SystemExit):
+        _ = SelectiveChecks(
+            files=(
+                "providers/common/compat/src/airflow/providers/common/compat/file.py",
+                "providers/ftp/src/airflow/providers/ftp/hooks/ftp.py",
+            ),
+            commit_ref=NEUTRAL_COMMIT,
+            pr_labels=(),
+            github_event=GithubEvents.PULL_REQUEST,
+            default_branch="main",
+        ).common_compat_changed_without_next_version
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_common_compat_only_changed_passes(mock_run_command):
+    """Test that check passes when only common.compat provider changes."""
+    selective_checks = SelectiveChecks(
+        files=("providers/common/compat/src/airflow/providers/common/compat/file.py",),
+        commit_ref=NEUTRAL_COMMIT,
+        pr_labels=(),
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+    )
+    result = selective_checks.common_compat_changed_without_next_version
+    assert result is False
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_common_compat_not_changed_passes(mock_run_command):
+    """Test that check passes when common.compat provider doesn't change."""
+    selective_checks = SelectiveChecks(
+        files=("providers/ftp/src/airflow/providers/ftp/hooks/ftp.py",),
+        commit_ref=NEUTRAL_COMMIT,
+        pr_labels=(),
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+    )
+    result = selective_checks.common_compat_changed_without_next_version
+    assert result is False
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_common_compat_changed_with_provider_without_dependency_passes(mock_run_command):
+    """Test that check passes when other provider doesn't depend on common-compat."""
+    provider_toml = """
+[project]
+dependencies = [
+    "apache-airflow>=2.11.0",
+    "some-other-package>=1.0.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        result.stdout = provider_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
+    selective_checks = SelectiveChecks(
+        files=(
+            "providers/common/compat/src/airflow/providers/common/compat/file.py",
+            "providers/ftp/src/airflow/providers/ftp/hooks/ftp.py",
+        ),
+        commit_ref=NEUTRAL_COMMIT,
+        pr_labels=(),
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+    )
+    result = selective_checks.common_compat_changed_without_next_version
+    assert result is False
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_common_compat_changed_without_next_version_skipped_on_release_branch(mock_run_command):
+    """Test that common.compat next-version check is a no-op on release branches (v3-X-test)."""
+    provider_toml = """
+[project]
+dependencies = [
+    "apache-airflow>=2.11.0",
+    "apache-airflow-providers-common-compat>=1.8.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        result.stdout = provider_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
+    assert not SelectiveChecks(
+        files=(
+            "providers/common/compat/src/airflow/providers/common/compat/file.py",
+            "providers/ftp/src/airflow/providers/ftp/hooks/ftp.py",
+        ),
+        commit_ref=NEUTRAL_COMMIT,
+        pr_labels=(),
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="v3-2-test",
+    ).common_compat_changed_without_next_version
+
+
+@patch("airflow_breeze.utils.selective_checks.run_command")
+def test_common_compat_changed_without_next_version_bypassed_with_label(mock_run_command):
+    """Test that check can be bypassed with 'skip common compat check' label."""
+    provider_toml = """
+[project]
+dependencies = [
+    "apache-airflow>=2.11.0",
+    "apache-airflow-providers-common-compat>=1.8.0",
+]
+"""
+
+    def side_effect(*args, **kwargs):
+        result = Mock()
+        result.returncode = 0
+        result.stdout = provider_toml
+        return result
+
+    mock_run_command.side_effect = side_effect
+
+    selective_checks = SelectiveChecks(
+        files=(
+            "providers/common/compat/src/airflow/providers/common/compat/file.py",
+            "providers/ftp/src/airflow/providers/ftp/hooks/ftp.py",
+        ),
+        commit_ref=NEUTRAL_COMMIT,
+        pr_labels=("skip common compat check",),
+        github_event=GithubEvents.PULL_REQUEST,
+        default_branch="main",
+    )
+    # Should pass with the skip label
+    result = selective_checks.common_compat_changed_without_next_version
+    assert result is True
+
+
+@pytest.mark.parametrize(
+    ("files", "pr_labels", "expected_outputs"),
+    [
+        pytest.param(
+            ("chart/tests/helm_tests/random_helm_test.py",),
+            (),
+            {
+                "helm-test-kubernetes-versions": DEFAULT_HELM_K8S_VERSIONS_JSON,
+            },
+            id="Default K8s version when no all-versions label",
+        ),
+        pytest.param(
+            ("chart/tests/helm_tests/random_helm_test.py",),
+            ("all versions",),
+            {
+                "helm-test-kubernetes-versions": ALL_HELM_K8S_VERSIONS_JSON,
+            },
+            id="First and last K8s versions when all-versions label is set",
+        ),
+        pytest.param(
+            ("INTHEWILD.md",),
+            ("full tests needed", "all versions"),
+            {
+                "helm-test-kubernetes-versions": ALL_HELM_K8S_VERSIONS_JSON,
+                "all-versions": "true",
+            },
+            id="First and last K8s versions when full tests needed with all versions",
+        ),
+        pytest.param(
+            ("INTHEWILD.md",),
+            ("full tests needed",),
+            {
+                "helm-test-kubernetes-versions": DEFAULT_HELM_K8S_VERSIONS_JSON,
+                "all-versions": "false",
+            },
+            id="Default K8s version when full tests needed but no all-versions label",
+        ),
+    ],
+)
+def test_helm_test_kubernetes_versions(
+    files: tuple[str, ...], pr_labels: tuple[str, ...], expected_outputs: dict[str, str]
+):
+    stderr = SelectiveChecks(
+        files=files,
+        commit_ref=NEUTRAL_COMMIT,
+        github_event=GithubEvents.PULL_REQUEST,
+        pr_labels=pr_labels,
+        default_branch="main",
+    )
+    assert_outputs_are_printed(expected_outputs, str(stderr))

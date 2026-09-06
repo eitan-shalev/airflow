@@ -26,11 +26,12 @@ import boto3
 import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
+from moto.core import DEFAULT_ACCOUNT_ID
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
 from airflow.providers.amazon.aws.hooks.glue import GlueDataQualityHook, GlueJobHook
 from airflow.providers.amazon.aws.hooks.logs import AwsLogsHook
+from airflow.providers.common.compat.sdk import AirflowException
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -309,6 +310,74 @@ class TestGlueJobHook:
             },
         )
         assert result == job_name
+
+    @mock_aws
+    @pytest.mark.parametrize(
+        ("current_tags", "desired_tags", "expected_tags", "expected_changed"),
+        [
+            pytest.param(
+                {"env": "dev"},
+                {"env": "dev", "team": "data"},
+                {"env": "dev", "team": "data"},
+                True,
+                id="add-new-tag",
+            ),
+            pytest.param({"env": "dev"}, {"env": "prod"}, {"env": "prod"}, True, id="replace-value"),
+            pytest.param(
+                {"env": "dev", "team": "data"}, {"env": "dev"}, {"env": "dev"}, True, id="remove-tag"
+            ),
+            pytest.param({"env": "dev"}, {}, {}, True, id="remove-all-tags"),
+            pytest.param({"env": "dev"}, {"env": "dev"}, {"env": "dev"}, False, id="no-change"),
+        ],
+    )
+    def test_update_tags(self, current_tags, desired_tags, expected_tags, expected_changed):
+        """Tags are reconciled through the tag API because Glue ``update_job`` cannot modify them."""
+        job_name = "aws_test_glue_job_with_tags"
+        boto3.client("glue", region_name=self.some_aws_region).create_job(
+            Name=job_name,
+            Role="test-role",
+            Command={"Name": "glueetl", "ScriptLocation": "s3://glue-examples/script.py"},
+            Tags=current_tags,
+        )
+        hook = GlueJobHook(job_name=job_name, region_name=self.some_aws_region)
+
+        assert hook.update_tags(job_name, desired_tags) is expected_changed
+
+        job_arn = f"arn:aws:glue:{self.some_aws_region}:{DEFAULT_ACCOUNT_ID}:job/{job_name}"
+        assert hook.conn.get_tags(ResourceArn=job_arn)["Tags"] == expected_tags
+
+    @mock.patch.object(GlueJobHook, "update_tags")
+    @mock.patch.object(AwsBaseHook, "conn")
+    def test_update_job_keeps_tags_out_of_job_update(self, mock_conn, mock_update_tags):
+        """``Tags`` must be stripped from ``JobUpdate`` and reconciled separately."""
+        job_name = "aws_test_glue_job"
+        mock_conn.get_job.return_value = {"Job": {"Name": job_name, "Description": "old"}}
+        mock_update_tags.return_value = False
+        hook = GlueJobHook(job_name=job_name, region_name=self.some_aws_region)
+
+        updated = hook.update_job(Name=job_name, Description="new", Tags={"env": "prod"})
+
+        mock_update_tags.assert_called_once_with(job_name, {"env": "prod"})
+        mock_conn.update_job.assert_called_once_with(JobName=job_name, JobUpdate={"Description": "new"})
+        assert updated is True
+
+    @pytest.mark.parametrize("tags_changed", [True, False])
+    @mock.patch.object(GlueJobHook, "update_tags")
+    @mock.patch.object(AwsBaseHook, "conn")
+    def test_update_job_returns_tag_result_when_config_unchanged(
+        self, mock_conn, mock_update_tags, tags_changed
+    ):
+        """With no config diff, the result reflects whether only the tags changed."""
+        job_name = "aws_test_glue_job"
+        mock_conn.get_job.return_value = {"Job": {"Name": job_name, "Description": "same"}}
+        mock_update_tags.return_value = tags_changed
+        hook = GlueJobHook(job_name=job_name, region_name=self.some_aws_region)
+
+        updated = hook.update_job(Name=job_name, Description="same", Tags={"env": "prod"})
+
+        mock_update_tags.assert_called_once_with(job_name, {"env": "prod"})
+        mock_conn.update_job.assert_not_called()
+        assert updated is tags_changed
 
     @mock_aws
     @mock.patch.object(GlueJobHook, "get_iam_execution_role")
@@ -682,6 +751,90 @@ class TestGlueDataQualityHook:
 
         assert caplog.messages == [
             "AWS Glue data quality ruleset evaluation run, total number of rules failed: 0"
+        ]
+
+    @mock.patch.object(AwsBaseHook, "conn")
+    def test_validate_evaluation_results_show_results_True(self, mock_conn, caplog):
+        response_evaluation_run = {"RunId": self.RUN_ID, "ResultIds": ["resultId1"]}
+
+        response_batch_result = {
+            "RunId": self.RUN_ID,
+            "ResultIds": ["resultId1"],
+            "Results": [
+                {
+                    "ResultId": "resultId1",
+                    "RulesetName": "rulesetOne",
+                    "RuleResults": [
+                        {
+                            "Name": "Rule_1",
+                            "Description": "RowCount between 150000 and 600000",
+                            "EvaluatedMetrics": {"Dataset.*.RowCount": 300000.0},
+                            "Result": "PASS",
+                        }
+                    ],
+                }
+            ],
+        }
+        mock_conn.get_data_quality_ruleset_evaluation_run.return_value = response_evaluation_run
+
+        mock_conn.batch_get_data_quality_result.return_value = response_batch_result
+
+        with caplog.at_level(logging.INFO, logger=self.glue.log.name):
+            caplog.clear()
+            self.glue.validate_evaluation_run_results(evaluation_run_id=self.RUN_ID, show_results=True)
+
+        mock_conn.get_data_quality_ruleset_evaluation_run.assert_called_once_with(RunId=self.RUN_ID)
+        mock_conn.batch_get_data_quality_result.assert_called_once_with(
+            ResultIds=response_evaluation_run["ResultIds"]
+        )
+        # The messages have extra spaces to create spacing in the output, the number of consecutive spaces
+        # may vary. Remove any sequence of spaces greater than 1 before asserting.
+        messages = [" ".join(msg.split()) for msg in caplog.messages]
+        assert messages == [
+            "AWS Glue data quality ruleset evaluation result for RulesetName: rulesetOne RulesetEvaluationRunId: None Score: None",
+            "Name Description EvaluatedMetrics Result 0 Rule_1 RowCount between 150000 and 600000 {'Dataset.*.RowCount': 300000.0} PASS",
+            "AWS Glue data quality ruleset evaluation run, total number of rules failed: 0",
+        ]
+
+    @mock.patch.object(AwsBaseHook, "conn")
+    def test_validate_evaluation_results_show_results_True_no_pandas(self, mock_conn, caplog):
+        response_evaluation_run = {"RunId": self.RUN_ID, "ResultIds": ["resultId1"]}
+
+        response_batch_result = {
+            "RunId": self.RUN_ID,
+            "ResultIds": ["resultId1"],
+            "Results": [
+                {
+                    "ResultId": "resultId1",
+                    "RulesetName": "rulesetOne",
+                    "RuleResults": [
+                        {
+                            "Name": "Rule_1",
+                            "Description": "RowCount between 150000 and 600000",
+                            "EvaluatedMetrics": {"Dataset.*.RowCount": 300000.0},
+                            "Result": "PASS",
+                        }
+                    ],
+                }
+            ],
+        }
+        mock_conn.get_data_quality_ruleset_evaluation_run.return_value = response_evaluation_run
+
+        mock_conn.batch_get_data_quality_result.return_value = response_batch_result
+
+        # Emulate/mock the import of pandas failing with ModlueNotFoundError
+        with mock.patch.dict("sys.modules", {"pandas": None}):
+            with caplog.at_level(logging.INFO, logger=self.glue.log.name):
+                caplog.clear()
+                self.glue.validate_evaluation_run_results(evaluation_run_id=self.RUN_ID, show_results=True)
+
+        mock_conn.get_data_quality_ruleset_evaluation_run.assert_called_once_with(RunId=self.RUN_ID)
+        mock_conn.batch_get_data_quality_result.assert_called_once_with(
+            ResultIds=response_evaluation_run["ResultIds"]
+        )
+        assert caplog.messages == [
+            "Pandas is not installed. Please install pandas to see the detailed Data Quality results.",
+            "AWS Glue data quality ruleset evaluation run, total number of rules failed: 0",
         ]
 
     @mock.patch.object(AwsBaseHook, "conn")

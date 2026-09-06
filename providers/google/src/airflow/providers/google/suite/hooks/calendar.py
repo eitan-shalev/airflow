@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from googleapiclient.discovery import build
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.common.hooks.base_google import GoogleBaseHook
 
 if TYPE_CHECKING:
@@ -70,7 +70,13 @@ class GoogleCalendarHook(GoogleBaseHook):
         """
         if not self._conn:
             http_authorized = self._authorize()
-            self._conn = build("calendar", self.api_version, http=http_authorized, cache_discovery=False)
+            self._conn = build(
+                "calendar",
+                self.api_version,
+                http=http_authorized,
+                cache_discovery=False,
+                client_options=self.get_client_options(),
+            )
 
         return self._conn
 
@@ -104,7 +110,7 @@ class GoogleCalendarHook(GoogleBaseHook):
             only the participant is returned.
         :param max_results: Optional. Maximum number of events returned on one result page.
             Incomplete pages can be detected by a non-empty ``nextPageToken`` field in the response.
-            By default the value is 250 events. The page size can never be larger than 2500 events
+            By default, the value is 250 events. The page size can never be larger than 2500 events
         :param order_by: Optional. Acceptable values are ``"startTime"`` or "updated"
         :param private_extended_property: Optional. Extended properties constraint specified as
             ``propertyName=value``. Matches only private properties. This parameter might be repeated

@@ -25,6 +25,7 @@ import json
 import os
 import pathlib
 import platform
+import subprocess
 import sys
 import textwrap
 import warnings
@@ -36,6 +37,11 @@ from typing import Any
 
 import jsonschema
 import yaml
+from in_container_utils import (
+    AIRFLOW_CORE_SOURCES_PATH,
+    AIRFLOW_PROVIDERS_PATH,
+    AIRFLOW_ROOT_PATH,
+)
 from jsonpath_ng.ext import parse
 from rich.console import Console
 from tabulate import tabulate
@@ -44,13 +50,10 @@ from airflow.cli.commands.info_command import Architecture
 from airflow.exceptions import AirflowOptionalProviderFeatureException, AirflowProviderDeprecationWarning
 from airflow.providers_manager import ProvidersManager
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent.resolve()))
-from in_container_utils import (
-    AIRFLOW_CORE_SOURCES_PATH,
-    AIRFLOW_DOCS_PATH,
-    AIRFLOW_PROVIDERS_PATH,
-    AIRFLOW_ROOT_PATH,
-)
+# check_provider_conn_fields lives in scripts/ci/prek/ which is not on sys.path when
+# this script runs inside Breeze; resolve it relative to this file.
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "ci" / "prek"))
+from check_provider_conn_fields import check_conn_fields_for_entry
 
 # Those are deprecated modules that contain removed Hooks/Sensors/Operators that we left in the code
 # so that users can get a very specific error message when they try to use them.
@@ -61,9 +64,6 @@ DEPRECATED_MODULES = [
     "airflow.providers.tabular.hooks.tabular",
     "airflow.providers.yandex.hooks.yandexcloud_dataproc",
     "airflow.providers.yandex.operators.yandexcloud_dataproc",
-    "airflow.providers.google.cloud.hooks.datacatalog",
-    "airflow.providers.google.cloud.operators.datacatalog",
-    "airflow.providers.google.cloud.links.datacatalog",
 ]
 
 KNOWN_DEPRECATED_CLASSES = [
@@ -72,7 +72,19 @@ KNOWN_DEPRECATED_CLASSES = [
     "airflow.providers.google.cloud.operators.automl.AutoMLTablesListTableSpecsOperator",
     "airflow.providers.google.cloud.operators.automl.AutoMLTablesUpdateDatasetOperator",
     "airflow.providers.google.cloud.operators.automl.AutoMLDeployModelOperator",
+    "airflow.providers.amazon.aws.hooks.kinesis.FirehoseHook",
 ]
+
+# AbstractToolset subclasses that are internal implementation detail -- auto-applied by
+# a provider's own runtime rather than constructed by users -- and are intentionally not
+# part of the registry's public "toolsets" module category, so they are exempt from
+# check_all_provider_classes_are_registered's registration requirement. Contrast with
+# e.g. LoggingToolset, which is documented in the toolsets how-to guide and is registered.
+INTERNAL_UNREGISTERED_TOOLSET_CLASSES = {
+    # Wraps a toolset with per-step result caching for durable execution; applied
+    # automatically by AgentOperator, not part of the public toolsets how-to guide.
+    "airflow.providers.common.ai.durable.caching_toolset.CachingToolset",
+}
 
 if __name__ != "__main__":
     raise SystemExit(
@@ -81,7 +93,7 @@ if __name__ != "__main__":
 
 PROVIDER_DATA_SCHEMA_PATH = AIRFLOW_CORE_SOURCES_PATH.joinpath("airflow", "provider.yaml.schema.json")
 PROVIDER_ISSUE_TEMPLATE_PATH = AIRFLOW_ROOT_PATH.joinpath(
-    ".github", "ISSUE_TEMPLATE", "3-airflow_providers_bug_report.yml"
+    ".github", "ISSUE_TEMPLATE", "1-airflow_bug_report.yml"
 )
 CORE_INTEGRATIONS = ["SQL", "Local"]
 
@@ -99,6 +111,31 @@ if os.environ.get("PYTHONWARNINGS") != "default":
 suspended_providers: set[str] = set()
 suspended_logos: set[str] = set()
 suspended_integrations: set[str] = set()
+
+
+def sync_dependencies_without_dev() -> None:
+    """
+    Run uv sync --no-dev to strip development dependencies.
+
+    This ensures validation runs in an environment closer to production,
+    which helps detect cases where providers have unhandled optional
+    cross-provider dependencies.
+    """
+    console.print("[magenta]Running uv sync --no-dev to strip development dependencies...[/]")
+    result = subprocess.run(
+        ["uv", "sync", "--no-dev", "--all-packages", "--no-python-downloads", "--no-managed-python"],
+        capture_output=True,
+        text=True,
+        cwd=AIRFLOW_ROOT_PATH,
+        check=False,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]Failed to remove dev dependencies: {result.stderr}[/]")
+        sys.exit(1)
+
+    console.print("[green]Successfully synchronized without dev dependencies[/]")
+    if result.stdout:
+        console.print(result.stdout)
 
 
 def _filepath_to_module(filepath: pathlib.Path | str) -> str:
@@ -342,14 +379,47 @@ def check_integration_duplicates(yaml_files: dict[str, dict]) -> tuple[int, int]
     return num_integrations, num_errors
 
 
-@run_check("Checking completeness of list of {sensors, hooks, operators, triggers}")
+@run_check("Checking remote-logging scheme duplicates")
+def check_remote_logging_scheme_duplicates(yaml_files: dict[str, dict]) -> tuple[int, int]:
+    """Remote-logging ``scheme`` values must be globally unique across providers.
+
+    The scheme in ``[logging] remote_base_log_folder`` selects which provider's
+    ``RemoteLogIO`` handler serves a user's task logs. ``ProvidersManager`` resolves a
+    collision silently — the first provider in alphabetical order wins and the rest are
+    dropped — so a duplicate scheme can quietly shadow another provider's log handler.
+    Fail here so the clash is caught before it ships instead of at runtime.
+    """
+    num_errors = 0
+    packages_by_scheme: dict[str, set[str]] = {}
+    for provider_data in yaml_files.values():
+        package_name = provider_data["package-name"]
+        for entry in provider_data.get("remote-logging", []):
+            packages_by_scheme.setdefault(entry["scheme"], set()).add(package_name)
+    num_schemes = len(packages_by_scheme)
+    duplicates = [
+        (scheme, ", ".join(sorted(packages)))
+        for scheme, packages in sorted(packages_by_scheme.items())
+        if len(packages) > 1
+    ]
+    if duplicates:
+        console.print(
+            "Duplicate remote-logging schemes found. Each scheme may be registered by only "
+            "one provider; otherwise ProvidersManager silently keeps the first provider "
+            "alphabetically and shadows the others. Please give each handler a unique scheme."
+        )
+        errors.append(tabulate(duplicates, headers=["Remote-logging scheme", "Registered by"]))
+        num_errors += 1
+    return num_schemes, num_errors
+
+
+@run_check("Checking completeness of list of {sensors, hooks, operators, triggers, bundles, toolsets}")
 def check_correctness_of_list_of_sensors_operators_hook_trigger_modules(
     yaml_files: dict[str, dict],
 ) -> tuple[int, int]:
     num_errors = 0
     num_modules = 0
     for (yaml_file_path, provider_data), resource_type in itertools.product(
-        yaml_files.items(), ["sensors", "operators", "hooks", "triggers"]
+        yaml_files.items(), ["sensors", "operators", "hooks", "triggers", "bundles", "toolsets"]
     ):
         expected_modules, provider_package, resource_data = parse_module_data(
             provider_data, resource_type, yaml_file_path
@@ -381,14 +451,18 @@ def check_correctness_of_list_of_sensors_operators_hook_trigger_modules(
     return num_modules, num_errors
 
 
-@run_check("Checking for duplicates in list of {sensors, hooks, operators, triggers}")
+@run_check(
+    "Checking for duplicates in list of "
+    "{sensors, hooks, operators, triggers, bundles, toolsets, retry-policies}"
+)
 def check_duplicates_in_integrations_names_of_hooks_sensors_operators(
     yaml_files: dict[str, dict],
 ) -> tuple[int, int]:
     num_errors = 0
     num_integrations = 0
     for (yaml_file_path, provider_data), resource_type in itertools.product(
-        yaml_files.items(), ["sensors", "operators", "hooks", "triggers"]
+        yaml_files.items(),
+        ["sensors", "operators", "hooks", "triggers", "bundles", "toolsets", "retry-policies"],
     ):
         resource_data = provider_data.get(resource_type, [])
         count_integrations = Counter(r.get("integration-name", "") for r in resource_data)
@@ -452,6 +526,348 @@ def check_hook_class_name_entries_in_connection_types(yaml_files: dict[str, dict
     return num_connection_types, num_errors
 
 
+@run_check("Checking that python-modules in retry-policies exist and belong to provider package")
+def check_retry_policy_modules_exist_and_belong_to_package(yaml_files: dict[str, dict]) -> tuple[int, int]:
+    # parse_module_data's glob-based completeness check assumes a category's modules live in a
+    # directory named after its yaml key. Retry policies intentionally live under policies/ instead,
+    # so that check cannot be reused and this existence-only check stands in for it.
+    resource_type = "retry-policies"
+    num_errors = 0
+    num_retry_policy_modules = 0
+    for yaml_file_path, provider_data in yaml_files.items():
+        provider_package = _filepath_to_module(yaml_file_path)
+        resource_data = provider_data.get(resource_type)
+        if resource_data:
+            current_modules = {str(i) for r in resource_data for i in r.get("python-modules", [])}
+            num_retry_policy_modules += len(current_modules)
+            num_errors += check_if_objects_exist_and_belong_to_package(
+                current_modules, provider_package, yaml_file_path, resource_type, ObjectType.MODULE
+            )
+    return num_retry_policy_modules, num_errors
+
+
+@run_check("Checking that conn-fields in provider.yaml match get_connection_form_widgets() of the hook class")
+def check_conn_fields_match_form_widgets(yaml_files: dict[str, dict]) -> tuple[int, int]:
+    """
+    For every connection-type entry that both declares ``conn-fields`` and whose
+    hook overrides ``get_connection_form_widgets()``, verify the two sets are
+    identical — stale YAML keys (in ``conn-fields`` but not in the hook) and
+    missing YAML keys (in the hook but absent from ``conn-fields``) are both
+    reported as errors.
+    """
+    num_checks = 0
+    num_errors = 0
+
+    for yaml_file_path, provider_data in yaml_files.items():
+        for conn_type_entry in provider_data.get("connection-types", []):
+            num_checks += 1
+            for error in check_conn_fields_for_entry(conn_type_entry, yaml_file_path, _get_widget_keys):
+                errors.append(error)
+                num_errors += 1
+
+    return num_checks, num_errors
+
+
+def _get_widget_keys(hook_class_name: str) -> set[str] | None:
+    """
+    Import *hook_class_name* and return the keys of ``get_connection_form_widgets()``.
+
+    Returns ``None`` when the hook or its UI dependencies cannot be imported,
+    or when the hook does not override ``get_connection_form_widgets()`` (meaning it
+    has no custom connection fields and the conn-fields check should be skipped).
+    Raises for unexpected errors so ``check_conn_fields_for_entry`` can convert them
+    to an error string.
+    """
+    try:
+        module_name, class_name = hook_class_name.rsplit(".", maxsplit=1)
+        with warnings.catch_warnings(record=True):
+            hook_class = getattr(importlib.import_module(module_name), class_name)
+    except (ImportError, AirflowOptionalProviderFeatureException, AttributeError):
+        return None
+
+    # Only validate hooks that override get_connection_form_widgets() in their own __dict__,
+    # because that method is the source-of-truth for what conn-fields should be declared.
+    # Hooks that inherit it without overriding have no provider-specific widget definition
+    # to diff against, so the check is intentionally skipped for them.  As of writing this
+    # includes HttpHook, the common/ai hooks, and AzureComputeHook — any provider whose hook
+    # falls into this category will NOT be validated here, even if it declares conn-fields.
+    if "get_connection_form_widgets" not in hook_class.__dict__:
+        return None
+
+    with warnings.catch_warnings(record=True):
+        try:
+            form_widgets: dict[str, Any] = hook_class.get_connection_form_widgets()
+            return set(form_widgets.keys())
+        except (ImportError, AirflowOptionalProviderFeatureException, AttributeError):
+            return None
+
+
+@run_check("Checking that hook classes defining conn_type are registered in connection-types")
+def check_hook_classes_with_conn_type_are_registered(yaml_files: dict[str, dict]) -> tuple[int, int]:
+    """Find Hook subclasses that define conn_type but are not listed in connection-types."""
+    from airflow.sdk.bases.hook import BaseHook
+
+    num_checks = 0
+    num_errors = 0
+    for yaml_file_path, provider_data in yaml_files.items():
+        connection_types = provider_data.get("connection-types", [])
+        registered_hook_classes = {ct["hook-class-name"] for ct in connection_types}
+        # Collect conn_type values that are already covered by a registered hook class
+        registered_conn_types = {ct["connection-type"] for ct in connection_types}
+        hook_modules = [
+            mod for entry in provider_data.get("hooks", []) for mod in entry.get("python-modules", [])
+        ]
+        for module_name in hook_modules:
+            try:
+                with warnings.catch_warnings(record=True):
+                    module = importlib.import_module(module_name)
+            except (ImportError, AirflowOptionalProviderFeatureException):
+                continue  # Import errors are caught by other checks
+
+            for attr_name in dir(module):
+                if attr_name.startswith("_"):
+                    continue
+                obj = getattr(module, attr_name, None)
+                if not (inspect.isclass(obj) and issubclass(obj, BaseHook) and obj is not BaseHook):
+                    continue
+                # Only check classes defined in this module, not re-exported ones
+                if obj.__module__ != module_name:
+                    continue
+                # Skip abstract classes — they are base classes, not concrete hooks
+                if inspect.isabstract(obj):
+                    continue
+                num_checks += 1
+                # Check conn_type defined directly on the class, not inherited
+                if "conn_type" not in obj.__dict__:
+                    continue
+                conn_type = obj.__dict__["conn_type"]
+                if not conn_type:
+                    continue
+                full_class_name = f"{module_name}.{attr_name}"
+                if full_class_name in registered_hook_classes:
+                    continue
+                # If another hook class already registered the same conn_type, this is fine
+                # (e.g. async variants sharing conn_type with sync hooks)
+                if conn_type in registered_conn_types:
+                    continue
+                errors.append(
+                    f"Hook class `{full_class_name}` defines conn_type='{conn_type}' "
+                    f"but no hook class is registered for this connection type "
+                    f"in 'connection-types' in {yaml_file_path}.\n"
+                    f"[yellow]How to fix it[/]: Add an entry with "
+                    f"hook-class-name: {full_class_name} to the connection-types "
+                    f"section of {yaml_file_path}."
+                )
+                num_errors += 1
+    return num_checks, num_errors
+
+
+@run_check(
+    "Checking that all provider Hook/Operator/Sensor/Trigger/Executor/Notifier/Toolset/RetryPolicy"
+    " classes are registered in provider.yaml"
+)
+def check_all_provider_classes_are_registered(yaml_files: dict[str, dict]) -> tuple[int, int]:
+    """
+    Walk all provider source files, find Hook/Operator/Sensor/Trigger/Executor/Notifier/
+    SecretsBackend/AuthManager/LoggingHandler/DagBundle/DBManager/Toolset/RetryPolicy subclasses, and
+    verify they are registered in the appropriate provider.yaml section.
+
+    This catches classes placed in non-standard directories or modules that were missed
+    when updating provider.yaml.
+    """
+    from pydantic_ai.toolsets.abstract import AbstractToolset
+
+    from airflow.api_fastapi.auth.managers.base_auth_manager import BaseAuthManager
+    from airflow.dag_processing.bundles.base import BaseDagBundle
+    from airflow.executors.base_executor import BaseExecutor
+    from airflow.models.baseoperator import BaseOperator
+    from airflow.sdk.bases.hook import BaseHook
+    from airflow.sdk.bases.notifier import BaseNotifier
+    from airflow.sdk.definitions.retry_policy import RetryPolicy
+    from airflow.secrets.base_secrets import BaseSecretsBackend
+    from airflow.sensors.base import BaseSensorOperator
+    from airflow.triggers.base import BaseTrigger
+    from airflow.utils.db_manager import BaseDBManager
+    from airflow.utils.log.file_task_handler import FileTaskHandler
+
+    # Most specific first — BaseSensorOperator is a BaseOperator subclass
+    base_class_resource_map: list[tuple[type, str]] = [
+        (BaseSensorOperator, "sensors"),
+        (BaseHook, "hooks"),
+        (BaseTrigger, "triggers"),
+        (BaseNotifier, "notifications"),
+        (BaseExecutor, "executors"),
+        (BaseOperator, "operators"),
+        (BaseSecretsBackend, "secrets-backends"),
+        (BaseAuthManager, "auth-managers"),
+        (FileTaskHandler, "logging"),
+        (BaseDagBundle, "bundles"),
+        (BaseDBManager, "db-managers"),
+        (AbstractToolset, "toolsets"),
+        (RetryPolicy, "retry-policies"),
+    ]
+
+    # Resource types where registration is by class path (not module)
+    class_level_resource_types = {
+        "executors",
+        "notifications",
+        "secrets-backends",
+        "auth-managers",
+        "logging",
+        "db-managers",
+    }
+
+    num_checks = 0
+    num_errors = 0
+
+    # Directories that are not expected to contain registered provider classes
+    skip_dirs = {"tests", "example_dags", "decorators"}
+
+    for yaml_file_path, provider_data in yaml_files.items():
+        provider_dir = pathlib.Path(yaml_file_path).parent
+        package_dir = AIRFLOW_ROOT_PATH.joinpath(provider_dir)
+
+        # Collect all modules registered in provider.yaml across all resource types
+        registered_modules: set[str] = set()
+        for resource_type in (
+            "hooks",
+            "operators",
+            "sensors",
+            "triggers",
+            "bundles",
+            "toolsets",
+            "retry-policies",
+        ):
+            for entry in provider_data.get(resource_type, []):
+                registered_modules.update(entry.get("python-modules", []))
+        for entry in provider_data.get("transfers", []):
+            python_module = entry.get("python-module")
+            if python_module:
+                registered_modules.add(python_module)
+
+        # Collect class paths for class-level registrations
+        registered_classes: set[str] = set()
+        for resource_type in (
+            "executors",
+            "notifications",
+            "secrets-backends",
+            "auth-managers",
+            "logging",
+            "db-managers",
+        ):
+            for class_path in provider_data.get(resource_type, []):
+                registered_classes.add(class_path)
+
+        # Find the src directory for the provider
+        src_dir = package_dir / "src"
+        if not src_dir.exists():
+            src_dir = package_dir
+
+        # Track unregistered modules and their classes
+        # module_name -> [(class_name, suggested_resource_type)]
+        unregistered: dict[str, list[tuple[str, str]]] = {}
+
+        for py_file in sorted(src_dir.rglob("*.py")):
+            if py_file.name == "__init__.py":
+                continue
+            if skip_dirs & set(py_file.parts):
+                continue
+
+            try:
+                module_name = _filepath_to_module(py_file)
+            except ValueError:
+                continue
+
+            if module_name in DEPRECATED_MODULES:
+                continue
+
+            is_registered = module_name in registered_modules
+
+            try:
+                with warnings.catch_warnings(record=True):
+                    module = importlib.import_module(module_name)
+            except (ImportError, AirflowOptionalProviderFeatureException):
+                continue
+            except Exception:
+                continue
+
+            # Track seen classes by identity to skip aliases
+            # (e.g. send_chime_notification = ChimeNotifier)
+            seen_classes: set[int] = set()
+
+            for attr_name in dir(module):
+                if attr_name.startswith("_"):
+                    continue
+                obj = getattr(module, attr_name, None)
+                if not inspect.isclass(obj):
+                    continue
+                # Only check classes defined in this module, not re-exported ones
+                if obj.__module__ != module_name:
+                    continue
+                # Skip if this is an alias for a class we already checked
+                if id(obj) in seen_classes:
+                    continue
+                seen_classes.add(id(obj))
+                # Skip abstract classes — they are base classes, not concrete implementations
+                if inspect.isabstract(obj):
+                    continue
+
+                for base_class, resource_type in base_class_resource_map:
+                    if issubclass(obj, base_class) and obj is not base_class:
+                        full_class_name = f"{module_name}.{attr_name}"
+                        if full_class_name in INTERNAL_UNREGISTERED_TOOLSET_CLASSES:
+                            break
+                        num_checks += 1
+                        # Executors and notifications are registered by class path;
+                        # other types are registered by module path.
+                        if resource_type in class_level_resource_types:
+                            # Check both the full path and any registered path
+                            # that ends with the class name (handles __init__.py
+                            # re-exports like airflow.providers.edge3.executors.EdgeExecutor)
+                            is_ok = full_class_name in registered_classes or any(
+                                rc.endswith(f".{attr_name}") for rc in registered_classes
+                            )
+                        else:
+                            is_ok = is_registered
+                        if is_ok:
+                            console.print(
+                                f"  [green]OK[/] {full_class_name} ({resource_type}, {base_class.__name__})"
+                            )
+                        else:
+                            unregistered.setdefault(module_name, []).append((attr_name, resource_type))
+                            console.print(
+                                f"  [red]MISSING[/] {full_class_name} "
+                                f"({resource_type}, {base_class.__name__})"
+                            )
+                        break  # Most specific match wins, don't double-report
+
+        # Report one error per unregistered module
+        for module_name, class_info in unregistered.items():
+            class_names = ", ".join(f"`{name}`" for name, _ in class_info)
+            suggested_type = class_info[0][1]
+            if suggested_type in class_level_resource_types:
+                full_paths = ", ".join(f"`{module_name}.{name}`" for name, _ in class_info)
+                errors.append(
+                    f"Class(es) {full_paths} not registered in the "
+                    f"{suggested_type} section of {yaml_file_path}.\n"
+                    f"[yellow]How to fix it[/]: Add the class path(s) to the "
+                    f"{suggested_type} list in {yaml_file_path}."
+                )
+            else:
+                errors.append(
+                    f"Module `{module_name}` contains {suggested_type} "
+                    f"class(es) ({class_names}) but is not registered in any "
+                    f"resource section of {yaml_file_path}.\n"
+                    f"[yellow]How to fix it[/]: Add `{module_name}` to the "
+                    f"python-modules list in the {suggested_type} section "
+                    f"of {yaml_file_path}, or to the transfers section "
+                    f"if it is a transfer operator."
+                )
+            num_errors += 1
+
+    return num_checks, num_errors
+
+
 @run_check("Checking plugin classes belong to package are importable and belong to package")
 def check_plugin_classes(yaml_files: dict[str, dict]) -> tuple[int, int]:
     resource_type = "plugins"
@@ -506,6 +922,26 @@ def check_queue_classes(yaml_files: dict[str, dict]) -> tuple[int, int]:
     return _check_simple_class_list("queues", yaml_files)
 
 
+@run_check("Checking secrets-backends belong to package, exist and are classes")
+def check_secrets_backend_classes(yaml_files: dict[str, dict]) -> tuple[int, int]:
+    return _check_simple_class_list("secrets-backends", yaml_files)
+
+
+@run_check("Checking auth-managers belong to package, exist and are classes")
+def check_auth_manager_classes(yaml_files: dict[str, dict]) -> tuple[int, int]:
+    return _check_simple_class_list("auth-managers", yaml_files)
+
+
+@run_check("Checking logging handlers belong to package, exist and are classes")
+def check_logging_classes(yaml_files: dict[str, dict]) -> tuple[int, int]:
+    return _check_simple_class_list("logging", yaml_files)
+
+
+@run_check("Checking db-managers belong to package, exist and are classes")
+def check_db_manager_classes(yaml_files: dict[str, dict]) -> tuple[int, int]:
+    return _check_simple_class_list("db-managers", yaml_files)
+
+
 @run_check("Checking for duplicates in list of transfers")
 def check_duplicates_in_list_of_transfers(yaml_files: dict[str, dict]) -> tuple[int, int]:
     resource_type = "transfers"
@@ -536,7 +972,8 @@ def check_invalid_integration(yaml_files: dict[str, dict]) -> tuple[int, int]:
     num_errors = 0
     num_integrations = len(all_integration_names)
     for (yaml_file_path, provider_data), resource_type in itertools.product(
-        yaml_files.items(), ["sensors", "operators", "hooks", "triggers"]
+        yaml_files.items(),
+        ["sensors", "operators", "hooks", "triggers", "bundles", "toolsets", "retry-policies"],
     ):
         resource_data = provider_data.get(resource_type, [])
         current_names = {r["integration-name"] for r in resource_data}
@@ -589,32 +1026,45 @@ def check_doc_files(yaml_files: dict[str, dict]) -> tuple[int, int]:
         console.print(suspended_providers)
 
     expected_doc_files = itertools.chain(
-        AIRFLOW_DOCS_PATH.glob("apache-airflow-providers-*/operators/**/*.rst"),
-        AIRFLOW_DOCS_PATH.glob("apache-airflow-providers-*/transfer/**/*.rst"),
+        AIRFLOW_PROVIDERS_PATH.glob("**/docs/operators/**/*.rst"),
+        AIRFLOW_PROVIDERS_PATH.glob("**/docs/operators.rst"),
+        AIRFLOW_PROVIDERS_PATH.glob("**/docs/sensors/**/*.rst"),
+        AIRFLOW_PROVIDERS_PATH.glob("**/docs/sensors.rst"),
+        AIRFLOW_PROVIDERS_PATH.glob("**/docs/transfer/**/*.rst"),
+        AIRFLOW_PROVIDERS_PATH.glob("**/docs/transfer.rst"),
     )
+    expected_relative_doc_files = sorted([f.relative_to(AIRFLOW_PROVIDERS_PATH) for f in expected_doc_files])
+    console.print("Expected relative doc files:")
+    console.print(expected_relative_doc_files)
+    expected_doc_urls = {
+        f"/docs/apache-airflow-providers-{f.parts[0]}/{'/'.join(f.parts[2:])}"
+        for f in expected_relative_doc_files
+        if f.name != "index.rst" and "_partials" not in f.parts and f.parts[1] == "docs"
+    } | {
+        f"/docs/apache-airflow-providers-{f.parts[0]}-{f.parts[1]}/{'/'.join(f.parts[3:])}"
+        for f in expected_relative_doc_files
+        if f.name != "index.rst" and "_partials" not in f.parts and f.parts[2] == "docs"
+    }
 
     expected_doc_urls = {
-        f"/docs/{f.relative_to(AIRFLOW_DOCS_PATH).as_posix()}"
-        for f in expected_doc_files
-        if f.name != "index.rst"
-        and "_partials" not in f.parts
-        and not f.relative_to(AIRFLOW_DOCS_PATH).as_posix().startswith(tuple(suspended_providers))
-    } | {
-        f"/docs/{f.relative_to(AIRFLOW_DOCS_PATH).as_posix()}"
-        for f in AIRFLOW_DOCS_PATH.glob("apache-airflow-providers-*/operators.rst")
-        if not f.relative_to(AIRFLOW_DOCS_PATH).as_posix().startswith(tuple(suspended_providers))
+        doc_url
+        for doc_url in expected_doc_urls
+        for suspend_provider in suspended_providers
+        if suspend_provider not in doc_url
     }
+
     if suspended_logos:
         console.print("[yellow]Suspended logos:[/]")
         console.print(suspended_logos)
         console.print()
-    expected_logo_urls = {
-        f"/{f.relative_to(AIRFLOW_DOCS_PATH).as_posix()}"
-        for f in (AIRFLOW_DOCS_PATH / "integration-logos").rglob("*")
-        if f.is_file()
-        and not f"/{f.relative_to(AIRFLOW_DOCS_PATH).as_posix()}".startswith(tuple(suspended_logos))
-    }
-
+    found_logos = itertools.chain(
+        AIRFLOW_PROVIDERS_PATH.glob("**/integration-logos/*.png"),
+        AIRFLOW_PROVIDERS_PATH.glob("**/integration-logos/*.svg"),
+    )
+    expected_logo_urls = list({f"/docs/integration-logos/{f.name}" for f in found_logos if f.is_file()})
+    expected_logo_urls = sorted(set(expected_logo_urls) - suspended_logos)
+    console.print("Expected logo urls:")
+    console.print(expected_logo_urls)
     try:
         console.print("Checking document urls")
         assert_sets_equal(
@@ -713,36 +1163,48 @@ def check_providers_have_all_documentation_files(yaml_files: dict[str, dict]):
 
 
 if __name__ == "__main__":
+    sync_dependencies_without_dev()
     ProvidersManager().initialize_providers_configuration()
     architecture = Architecture.get_current()
     console.print(f"Verifying packages on {architecture} architecture. Platform: {platform.machine()}.")
-    provider_files_pattern = [
+    provider_files_found = [
         path
-        for path in pathlib.Path(AIRFLOW_ROOT_PATH, "providers", "src", "airflow", "providers").rglob(
-            "provider.yaml"
-        )
+        for path in pathlib.Path(AIRFLOW_ROOT_PATH, "providers").rglob("provider.yaml")
         if "/.venv/" not in path.as_posix()
     ]
-    all_provider_files = sorted(str(path) for path in provider_files_pattern)
+    console.print(f"Found {len(provider_files_found)} provider.yaml files:")
+    all_provider_files = sorted(str(path) for path in provider_files_found)
     if len(sys.argv) > 1:
-        paths = [os.fspath(AIRFLOW_ROOT_PATH / f) for f in sorted(sys.argv[1:])]
+        paths = [os.fspath(AIRFLOW_ROOT_PATH / "providers" / f) for f in sorted(sys.argv[1:])]
+        console.print("Provider.yaml files were specified explicitly")
     else:
         paths = all_provider_files
+        console.print("Provider.yaml files were found in all providers")
+    console.print(paths)
 
     all_parsed_yaml_files: dict[str, dict] = _load_package_data(paths)
 
     all_files_loaded = len(all_provider_files) == len(paths)
     check_integration_duplicates(all_parsed_yaml_files)
+    check_remote_logging_scheme_duplicates(all_parsed_yaml_files)
     check_duplicates_in_list_of_transfers(all_parsed_yaml_files)
     check_duplicates_in_integrations_names_of_hooks_sensors_operators(all_parsed_yaml_files)
 
     check_completeness_of_list_of_transfers(all_parsed_yaml_files)
     check_hook_class_name_entries_in_connection_types(all_parsed_yaml_files)
+    check_retry_policy_modules_exist_and_belong_to_package(all_parsed_yaml_files)
+    check_conn_fields_match_form_widgets(all_parsed_yaml_files)
+    check_hook_classes_with_conn_type_are_registered(all_parsed_yaml_files)
     check_executor_classes(all_parsed_yaml_files)
     check_queue_classes(all_parsed_yaml_files)
     check_plugin_classes(all_parsed_yaml_files)
     check_extra_link_classes(all_parsed_yaml_files)
+    check_secrets_backend_classes(all_parsed_yaml_files)
+    check_auth_manager_classes(all_parsed_yaml_files)
+    check_logging_classes(all_parsed_yaml_files)
+    check_db_manager_classes(all_parsed_yaml_files)
     check_correctness_of_list_of_sensors_operators_hook_trigger_modules(all_parsed_yaml_files)
+    check_all_provider_classes_are_registered(all_parsed_yaml_files)
     check_notification_classes(all_parsed_yaml_files)
     check_unique_provider_name(all_parsed_yaml_files)
     check_providers_have_all_documentation_files(all_parsed_yaml_files)
@@ -752,6 +1214,16 @@ if __name__ == "__main__":
         check_doc_files(all_parsed_yaml_files)
         check_invalid_integration(all_parsed_yaml_files)
         check_providers_are_mentioned_in_issue_template(all_parsed_yaml_files)
+
+    # remove errors related to suspended module imports.
+    print("suspended_providers ", suspended_providers)
+    if suspended_providers and errors:
+        errors = [
+            error
+            for error in errors
+            for module in suspended_providers
+            if f"No module named '{module.replace('apache-', '', 1).replace('-', '.')}'" not in error
+        ]
 
     if errors:
         error_num = len(errors)

@@ -54,14 +54,14 @@ In Airflow 3, direct metadata database access from task code is now restricted. 
 
 - **No Direct Database Access**: Task code can no longer directly import and use Airflow database sessions or models.
 - **API-Based Resource Access**: All runtime interactions (state transitions, heartbeats, XComs, and resource fetching) are handled through a dedicated Task Execution API.
-- **Enhanced Security**: This ensures isolation and security by preventing malicious task code from accessing or modifying the Airflow metadata database.
+- **Enhanced Security**: This improves isolation and security by preventing worker task code from directly accessing or modifying the Airflow metadata database. Note that Dag author code potentially still executes with direct database access in the Dag File Processor and Triggerer — see :doc:`/security/security_model` for details.
 - **Stable Interface**: The Task SDK provides a stable, forward-compatible interface for accessing Airflow resources without direct database dependencies.
 
 Step 1: Take care of prerequisites
 ----------------------------------
 
 - Make sure that you are on Airflow 2.7 or later. It is recommended to upgrade to latest 2.x and then to Airflow 3.
-- Make sure that your Python version is in the supported list. Airflow 3.0.0 supports the following Python versions: Python 3.9, 3.10, 3.11 and 3.12.
+- Make sure that your Python version is in the supported list.
 - Ensure that you are not using any features or functionality that have been :ref:`removed in Airflow 3<breaking-changes>`.
 
 
@@ -118,14 +118,15 @@ To trigger these fixes, run the following command:
 
 .. note::
 
-    In AIR rules, unsafe fixes involve changing import paths while keeping the name of the imported member the same. For instance, changing the import from ``from airflow.sensors.base_sensor_operator import BaseSensorOperator`` to ``from airflow.sdk.bases.sensor import BaseSensorOperator`` requires ruff to remove the original import before adding the new one. In contrast, safe fixes include changes to both the member name and the import path, such as changing ``from airflow.datasets import Dataset`` to `from airflow.sdk import Asset``. These adjustments do not require ruff to remove the old import. To remove unused legacy imports, it is necessary to enable the `unused-import` rule (F401) <https://docs.astral.sh/ruff/rules/unused-import/#unused-import-f401>.
+    In AIR rules, unsafe fixes involve changing import paths while keeping the name of the imported member the same. For instance, changing the import from ``from airflow.sensors.base_sensor_operator import BaseSensorOperator`` to ``from airflow.sdk.bases.sensor import BaseSensorOperator`` requires ruff to remove the original import before adding the new one. In contrast, safe fixes include changes to both the member name and the import path, such as changing ``from airflow.datasets import Dataset`` to ``from airflow.sdk import Asset``.
+    These adjustments do not require ruff to remove the old import. To remove unused legacy imports, it is necessary to enable the ``unused-import`` rule (F401) <https://docs.astral.sh/ruff/rules/unused-import/#unused-import-f401>`_
 
 You can also configure these flags through configuration files. See `Configuring Ruff <https://docs.astral.sh/ruff/configuration/>`_ for details.
 
 Key Import Updates
 ^^^^^^^^^^^^^^^^^^
 
-While ruff can automatically fix many import issues, here are the key import changes you'll need to make to ensure your DAGs and other
+While ruff can automatically fix many import issues, here are the key import changes you'll need to make to ensure your Dags and other
 code import Airflow components correctly in Airflow 3. The older paths are deprecated and will be removed in a future Airflow version.
 
 .. list-table::
@@ -162,6 +163,8 @@ code import Airflow components correctly in Airflow 3. The older paths are depre
      - ``airflow.sdk.BaseNotifier``
    * - ``airflow.utils.task_group.TaskGroup``
      - ``airflow.sdk.TaskGroup``
+   * - ``airflow.utils.context.Context``
+     - ``airflow.sdk.Context``
    * - ``airflow.datasets.Dataset``
      - ``airflow.sdk.Asset``
    * - ``airflow.datasets.DatasetAlias``
@@ -172,8 +175,6 @@ code import Airflow components correctly in Airflow 3. The older paths are depre
      - ``airflow.sdk.AssetAny``
    * - ``airflow.models.connection.Connection``
      - ``airflow.sdk.Connection``
-   * - ``airflow.models.context.Context``
-     - ``airflow.sdk.Context``
    * - ``airflow.models.variable.Variable``
      - ``airflow.sdk.Variable``
    * - ``airflow.io.*``
@@ -187,17 +188,100 @@ code import Airflow components correctly in Airflow 3. The older paths are depre
 Step 4: Install the Standard Provider
 --------------------------------------
 
-- Some of the commonly used Operators which were bundled as part of the ``airflow-core`` package (for example ``BashOperator`` and ``PythonOperator``)
+- Some of the commonly used Operators, Sensors, and Triggers which were bundled as part of the ``airflow-core`` package (for example ``BashOperator``, ``PythonOperator``, ``ExternalTaskSensor``, ``FileSensor``, etc.)
   have now been split out into a separate package: ``apache-airflow-providers-standard``.
 - For convenience, this package can also be installed on Airflow 2.x versions, so that Dags can be modified to reference these Operators from the standard provider
   package instead of Airflow Core.
 
-Step 5: Review custom operators for direct db access
-----------------------------------------------------
+Step 5: Review custom written tasks for direct DB access
+--------------------------------------------------------
 
-- In Airflow 3 operators can not access the Airflow metadata database directly using database sessions.
-  If you have custom operators, review the code to make sure there are no direct db access.
-  You can follow examples in https://github.com/apache/airflow/issues/49187 to find how to modify your code if needed.
+In Airflow 3, operators cannot access the Airflow metadata database directly using database sessions.
+If you have custom operators, review your code to ensure there are no direct database access calls.
+You can follow examples in https://github.com/apache/airflow/issues/49187 to learn how to modify your code if needed.
+
+If you have custom operators or task code that previously accessed the metadata database directly, you must migrate to one of the following approaches:
+
+Recommended Approach: Use Airflow Python Client
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Use the official `Airflow Python Client <https://github.com/apache/airflow-client-python>`_ to interact with
+Airflow metadata database via REST API. The Python Client has APIs defined for most use cases, including DagRuns,
+TaskInstances, Variables, Connections, XComs, and more.
+
+**Pros:**
+- No direct database network access required from workers
+- Most aligned with Airflow 3's API-first architecture
+- No database credentials needed in worker environment (uses API tokens)
+- Workers don't need database drivers installed
+- Centralized access control and authentication via API server
+
+**Cons:**
+- Requires installing ``apache-airflow-client`` package
+- Requires acquisition of access tokens by performing API call to ``/auth/token`` and rotating them as needed
+- Requires API server availability and network access to API server
+- Not all database operations may be exposed via API endpoints
+
+.. note::
+   If you need functionality that is not available via the Airflow Python Client, consider requesting new API endpoints or Task SDK features. The Airflow community prioritizes adding missing API capabilities over enabling direct database access.
+
+Known Workaround: Use DbApiHook (PostgresHook or MySqlHook)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. warning::
+   This approach is **NOT recommended** and is documented only as a known workaround for users who cannot use the Airflow Python Client. This approach has significant limitations and **will** break in future Airflow versions.
+
+   **Important considerations:**
+
+   - **Will break in future versions**: This approach will break in Airflow 3.2+ and beyond. You are responsible for adapting your code when schema changes occur.
+   - **Database schema is NOT a public API**: The Airflow metadata database schema can change at any time without notice. Schema changes will break your queries without warning.
+   - **Breaks task isolation**: This contradicts one of Airflow 3's core features - task isolation. Tasks should not directly access the metadata database.
+   - **Performance implications**: This reintroduces Airflow 2 behavior where each task opens separate database connections, dramatically changing performance characteristics and scalability.
+
+If your use case cannot be addressed using the Python Client and you understand the risks above, you may use database hooks to query your metadata database directly. Create a database
+connection (PostgreSQL or MySQL, matching your metadata database type) pointing to your metadata database
+and use Database Hooks in Airflow.
+
+**Note:** These hooks connect directly to the database (not via
+the API server) using database drivers like psycopg2 or mysqlclient.
+
+**Example using PostgresHook (MySql has similar interface too)**
+
+.. code-block:: python
+
+   from airflow.sdk import task
+   from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+
+   @task
+   def get_connections_from_db():
+       hook = PostgresHook(postgres_conn_id="metadata_postgres")
+       records = hook.get_records(sql="""
+           SELECT conn_id, conn_type, host, schema, login
+           FROM connection
+           WHERE conn_type = 'postgres'
+           LIMIT 10;
+           """)
+
+       return records
+
+**Example using SQLExecuteQueryOperator**
+
+You can also use ``SQLExecuteQueryOperator`` if you prefer to use operators instead of hooks:
+
+.. code-block:: python
+
+   from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+
+   query_task = SQLExecuteQueryOperator(
+       task_id="query_metadata",
+       conn_id="metadata_postgres",
+       sql="SELECT conn_id, conn_type FROM connection WHERE conn_type = 'postgres'",
+       do_xcom_push=True,
+   )
+
+.. note::
+   Always use **read-only database credentials** for metadata database connections and it is recommended to use temporary credentials.
 
 Step 6: Deployment Managers - Upgrade your Airflow Instance
 ------------------------------------------------------------
@@ -231,6 +315,10 @@ them to FastAPI apps or ensure you install the FAB provider which provides a bac
 Ideally, you should convert your plugins to the Airflow 3 Plugin interface i.e External Views (``external_views``), Fast API apps (``fastapi_apps``)
 and FastAPI middlewares (``fastapi_root_middlewares``).
 
+If you use the Airflow Helm Chart to deploy Airflow, please check your defined values against configuration options available in Airflow 3.
+All configuration options below ``webserver`` need to be changed to ``apiServer``. Consider that many parameters have been renamed or removed.
+For the full chart-specific upgrade checklist (``values.yaml`` changes, the standalone Dag processor, JWT secret, FAB defaults, minimum Kubernetes version, and renamed keys across chart ``1.16.0``..``1.18.0``), see :doc:`helm-chart:upgrading-to-airflow-3`.
+
 Step 7: Changes to your startup scripts
 ---------------------------------------
 
@@ -247,6 +335,15 @@ The Dag processor must now be started independently, even for local or developme
     airflow dag-processor
 
 You should now be able to start up your Airflow 3 instance.
+
+Step 8: Things to check
+-----------------------
+
+Please consider checking the following things after upgrading your Airflow instance:
+
+- If you configured Single-Sign-On (SSO) using OAuth, OIDC, or LDAP, make sure that the authentication is working as expected.
+  If you use a custom ``webserver_config.py`` you need to replace ``from airflow.www.security import AirflowSecurityManager``
+  with ``from airflow.providers.fab.auth_manager.security_manager.override import FabAirflowSecurityManagerOverride``.
 
 .. _breaking-changes:
 
@@ -276,10 +373,82 @@ These include:
   - ``next_ds``
   - ``execution_date``
 - The ``catchup_by_default`` Dag parameter is now ``False`` by default.
-- The ``create_cron_data_intervals`` configuration is now ``False`` by default. This means that the ``CronTriggerTimetable`` will be used by default instead of the ``CronDataIntervalTimetable``
+- The ``create_cron_data_intervals`` configuration is now ``False`` by default. This means that the ``CronTriggerTimetable`` will be used by default instead of the ``CronDataIntervalTimetable``.
+
+  This only affects Dags that pass a **bare cron string** to ``schedule=`` (e.g.
+  ``schedule="0 0 * * *"``); Dags that pass an explicit timetable instance are
+  unaffected. Decide whether you rely on ``data_interval_start`` /
+  ``data_interval_end`` (and on the related templated values like ``ds`` /
+  ``ts`` in your tasks, which are derived from ``logical_date`` and shift
+  between the two timetables). If you do, set
+  ``create_cron_data_intervals=True`` explicitly to keep ``CronDataIntervalTimetable``.
+  If you don't, the new ``False`` default is fine.
+
+  Set this **before** the upgrade. If you instead change the flag after some
+  Airflow 3 dagruns already exist (going
+  ``CronTriggerTimetable`` -> ``CronDataIntervalTimetable``), one scheduled run
+  is skipped to avoid colliding with the previous run's ``logical_date``.
+- **Manual Dag runs and data intervals**: In Airflow 3, do not assume that a manually triggered Dag run's ``data_interval`` is derived from, or equal to, the supplied ``logical_date``. If your Dag logic needs the user-specified trigger date, use ``logical_date`` explicitly. This especially affects workflows that read ``data_interval_start`` or ``data_interval_end`` during manual triggering or when using ``TriggerDagRunOperator``. For detailed migration guidance, see :ref:`data-interval-manual-triggering`.
 - **Simple Auth** is now default ``auth_manager``. To continue using FAB as the Auth Manager, please install the FAB provider and set ``auth_manager`` to ``FabAuthManager``:
 
   .. code-block:: ini
 
       airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
 - **AUTH API** api routes defined in the auth manager are prefixed with the ``/auth`` route. Urls consumed outside of the application such as oauth redirect urls will have to updated accordingly. For example an oauth redirect url that was ``https://<your-airflow-url.com>/oauth-authorized/google`` in Airflow 2.x will be ``https://<your-airflow-url.com>/auth/oauth-authorized/google`` in Airflow 3.x
+- **XCom Pull Default Behavior**: Calling ``xcom_pull()`` without a ``task_ids`` argument now pulls only from the current task. In Airflow 2, omitting ``task_ids`` would search all tasks in the Dag run and return the most recently pushed value for the given key. You must now explicitly pass ``task_ids`` to pull XComs from other tasks:
+
+  .. code-block:: python
+
+      # Airflow 2 - pulls most recent value from any task
+      value = ti.xcom_pull(key="shared_state")
+
+      # Airflow 3 - same call only checks the current task
+      value = ti.xcom_pull(key="shared_state")
+
+      # Airflow 3 - specify task_ids to pull from other tasks
+      value = ti.xcom_pull(task_ids="upstream_task", key="shared_state")
+
+.. _data-interval-manual-triggering:
+
+Manual Dag Runs and ``logical_date``
+====================================
+
+For scheduled runs, ``logical_date`` and ``data_interval`` are both derived from
+the Dag's timetable.
+
+For manually triggered runs in Airflow 3, do not assume that
+``data_interval_start`` or ``data_interval_end`` are derived from, or equal to,
+the supplied ``logical_date``. The resulting ``data_interval`` depends on the
+timetable and the trigger path, and some APIs also allow the data interval to
+be provided explicitly.
+
+This matters most for Dags that:
+
+- use ``data_interval_start`` or ``data_interval_end`` during manual runs
+- trigger downstream Dags with ``TriggerDagRunOperator``
+- migrated from Airflow 2 and treated ``data_interval_start`` as the requested
+  manual run date
+
+Migration guidance
+------------------
+
+If your Dag logic needs the user-specified date for a manual run, use
+``logical_date`` explicitly.
+
+.. code-block:: python
+
+   from airflow.decorators import get_current_context, task
+
+
+   @task
+   def process_data():
+       context = get_current_context()
+       processing_date = context["logical_date"]
+       return f"Processing data for {processing_date}"
+
+Keep using ``data_interval_start`` and ``data_interval_end`` when you need the
+run's resolved interval semantics instead of the user-supplied trigger date.
+
+When upgrading from Airflow 2, review any manual-triggered workflows that read
+``data_interval_start`` or ``data_interval_end`` and confirm whether they
+really wanted the interval semantics or the requested logical date.

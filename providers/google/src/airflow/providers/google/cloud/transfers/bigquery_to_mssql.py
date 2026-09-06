@@ -30,7 +30,7 @@ from airflow.providers.google.cloud.transfers.bigquery_to_sql import BigQueryToS
 from airflow.providers.microsoft.mssql.hooks.mssql import MsSqlHook
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class BigQueryToMsSqlOperator(BigQueryToSqlBaseOperator):
@@ -68,7 +68,7 @@ class BigQueryToMsSqlOperator(BigQueryToSqlBaseOperator):
     ) -> None:
         if mssql_table is not None:
             warnings.warn(
-                "The `mssql_table` parameter has been deprecated. Use `target_table_name` instead.",
+                "The `mssql_table` parameter has been deprecated. Use `target_table_name` instead. Planned removal date: October 5, 2026.",
                 AirflowProviderDeprecationWarning,
                 stacklevel=2,
             )
@@ -81,15 +81,8 @@ class BigQueryToMsSqlOperator(BigQueryToSqlBaseOperator):
 
             target_table_name = mssql_table
 
-        try:
-            _, dataset_id, table_id = source_project_dataset_table.split(".")
-        except ValueError:
-            raise ValueError(
-                f"Could not parse {source_project_dataset_table} as <project>.<dataset>.<table>"
-            ) from None
         super().__init__(
             target_table_name=target_table_name,
-            dataset_table=f"{dataset_id}.{table_id}",
             **kwargs,
         )
         self.mssql_conn_id = mssql_conn_id
@@ -102,8 +95,21 @@ class BigQueryToMsSqlOperator(BigQueryToSqlBaseOperator):
     def get_sql_hook(self) -> MsSqlHook:
         return self.mssql_hook
 
+    def execute(self, context: Context) -> None:
+        _, self.dataset_id, self.table_id = self._get_source_project_dataset_table_parts()
+        super().execute(context)
+
+    def _get_source_project_dataset_table_parts(self) -> tuple[str, str, str]:
+        try:
+            project_id, dataset_id, table_id = self.source_project_dataset_table.split(".")
+        except ValueError:
+            raise ValueError(
+                f"Could not parse {self.source_project_dataset_table} as <project>.<dataset>.<table>"
+            ) from None
+        return project_id, dataset_id, table_id
+
     def persist_links(self, context: Context) -> None:
-        project_id, dataset_id, table_id = self.source_project_dataset_table.split(".")
+        project_id, dataset_id, table_id = self._get_source_project_dataset_table_parts()
         BigQueryTableLink.persist(
             context=context,
             dataset_id=dataset_id,

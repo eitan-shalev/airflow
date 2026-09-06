@@ -18,34 +18,44 @@
 from __future__ import annotations
 
 import datetime
+import inspect
 import json
 import time
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping, Sequence
+from json import JSONDecodeError
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from sqlalchemy import select
 from sqlalchemy.orm.exc import NoResultFound
 
 from airflow.api.common.trigger_dag import trigger_dag
-from airflow.configuration import conf
-from airflow.exceptions import (
-    AirflowException,
-    AirflowSkipException,
-    DagNotFound,
-    DagRunAlreadyExists,
-)
+from airflow.exceptions import DagNotFound, DagRunAlreadyExists
 from airflow.models.dag import DagModel
 from airflow.models.dagrun import DagRun
 from airflow.models.serialized_dag import SerializedDagModel
-from airflow.providers.standard.triggers.external_task import DagStateTrigger
-from airflow.providers.standard.version_compat import (
-    AIRFLOW_V_3_0_PLUS,
-    BaseOperator,
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowSkipException,
     BaseOperatorLink,
+    XCom,
+    conf,
     timezone,
 )
+from airflow.providers.standard.triggers.external_task import DagStateTrigger
+from airflow.providers.standard.utils.openlineage import safe_inject_openlineage_properties_into_dagrun_conf
+from airflow.providers.standard.version_compat import (
+    AIRFLOW_V_3_0_PLUS,
+    AIRFLOW_V_3_2_PLUS,
+    BaseOperator,
+    is_arg_set,
+)
 from airflow.utils.state import DagRunState
-from airflow.utils.types import NOTSET, ArgNotSet, DagRunType
+from airflow.utils.types import DagRunType
+
+try:
+    from airflow.sdk.definitions._internal.types import NOTSET, ArgNotSet
+except ImportError:
+    from airflow.utils.types import NOTSET, ArgNotSet  # type: ignore[attr-defined,no-redef]
 
 XCOM_LOGICAL_DATE_ISO = "trigger_logical_date_iso"
 XCOM_RUN_ID = "trigger_run_id"
@@ -54,18 +64,7 @@ XCOM_RUN_ID = "trigger_run_id"
 if TYPE_CHECKING:
     from sqlalchemy.orm.session import Session
 
-    from airflow.models.taskinstancekey import TaskInstanceKey
-
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.sdk.execution_time.xcom import XCom
-else:
-    from airflow.models import XCom
+    from airflow.providers.common.compat.sdk import Context, TaskInstanceKey
 
 
 class DagIsPaused(AirflowException):
@@ -95,8 +94,17 @@ class TriggerDagRunLink(BaseOperatorLink):
         trigger_dag_id = operator.trigger_dag_id
         if not AIRFLOW_V_3_0_PLUS:
             from airflow.models.renderedtifields import RenderedTaskInstanceFields
+            from airflow.models.taskinstancekey import TaskInstanceKey as CoreTaskInstanceKey
 
-            if template_fields := RenderedTaskInstanceFields.get_templated_fields(ti_key):
+            core_ti_key = CoreTaskInstanceKey(
+                dag_id=ti_key.dag_id,
+                task_id=ti_key.task_id,
+                run_id=ti_key.run_id,
+                try_number=ti_key.try_number,
+                map_index=ti_key.map_index,
+            )
+
+            if template_fields := RenderedTaskInstanceFields.get_templated_fields(core_ti_key):
                 trigger_dag_id: str = template_fields.get("trigger_dag_id", operator.trigger_dag_id)  # type: ignore[no-redef]
 
         # Fetch the correct dag_run_id for the triggerED dag which is
@@ -124,6 +132,7 @@ class TriggerDagRunOperator(BaseOperator):
         If not provided, a run ID will be automatically generated.
     :param conf: Configuration for the DAG run (templated).
     :param logical_date: Logical date for the triggered DAG (templated).
+    :param run_after: The date before which the triggered DAG should not run.
     :param reset_dag_run: Whether clear existing DAG run if already exists.
         This is useful when backfill or rerun an existing DAG run.
         This only resets (not recreates) the DAG run.
@@ -141,9 +150,16 @@ class TriggerDagRunOperator(BaseOperator):
         Default is ``[DagRunState.FAILED]``.
     :param skip_when_already_exists: Set to true to mark the task as SKIPPED if a DAG run of the triggered
         DAG for the same logical date already exists.
-    :param fail_when_dag_is_paused: If the dag to trigger is paused, DagIsPaused will be raised.
-    :param deferrable: If waiting for completion, whether or not to defer the task until done,
-        default is ``False``.
+    :param fail_when_dag_is_paused: If the dag to trigger is paused, DagIsPaused will be raised. On
+        Airflow 3.x this requires Airflow 3.2.0+ (it relies on the task-SDK DAG state endpoint added then);
+        on Airflow 3.0/3.1 setting this raises ``NotImplementedError``.
+    :param deferrable: If waiting for completion, whether to defer the task until done, default is ``False``.
+    :param openlineage_inject_parent_info: whether to include OpenLineage metadata about the parent task
+        in the triggered DAG run's conf, enabling improved lineage tracking. The metadata is only injected
+        if OpenLineage is enabled and running. This option does not modify any other part of the conf,
+        and existing OpenLineage-related settings in the conf will not be overwritten. The injection process
+        is safeguarded against exceptions - if any error occurs during metadata injection, it is gracefully
+        handled and the conf remains unchanged - so it's safe to use. Default is ``True``
     """
 
     template_fields: Sequence[str] = (
@@ -154,6 +170,13 @@ class TriggerDagRunOperator(BaseOperator):
         "wait_for_completion",
         "skip_when_already_exists",
     )
+
+    attributes_not_supported_in_airflow_2 = {
+        # `run_after` uses NOTSET here so we can detect whether the user
+        # explicitly provided it and warn in Airflow 2.
+        "run_after": NOTSET,
+        "note": None,
+    }
     template_fields_renderers = {"conf": "py"}
     ui_color = "#ffefeb"
     operator_extra_links = [TriggerDagRunLink()]
@@ -165,6 +188,7 @@ class TriggerDagRunOperator(BaseOperator):
         trigger_run_id: str | None = None,
         conf: dict | None = None,
         logical_date: str | datetime.datetime | None | ArgNotSet = NOTSET,
+        run_after: str | datetime.datetime | None | ArgNotSet = NOTSET,
         reset_dag_run: bool = False,
         wait_for_completion: bool = False,
         poke_interval: int = 60,
@@ -172,7 +196,9 @@ class TriggerDagRunOperator(BaseOperator):
         failed_states: list[str | DagRunState] | None = None,
         skip_when_already_exists: bool = False,
         fail_when_dag_is_paused: bool = False,
+        note: str | None = None,
         deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
+        openlineage_inject_parent_info: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -192,30 +218,48 @@ class TriggerDagRunOperator(BaseOperator):
             self.failed_states = [DagRunState.FAILED]
         self.skip_when_already_exists = skip_when_already_exists
         self.fail_when_dag_is_paused = fail_when_dag_is_paused
-        self._defer = deferrable
+        self.openlineage_inject_parent_info = openlineage_inject_parent_info
+        self.note = note
+        self.deferrable = deferrable
+        run_after = _validate_datetime_param("run_after", run_after)
         self.logical_date = logical_date
-        if logical_date is NOTSET:
-            self.logical_date = NOTSET
-        elif logical_date is None or isinstance(logical_date, (str, datetime.datetime)):
-            self.logical_date = logical_date
-        else:
-            raise TypeError(
-                f"Expected str, datetime.datetime, or None for parameter 'logical_date'. Got {type(logical_date).__name__}"
+        self.run_after = run_after
+        if fail_when_dag_is_paused and AIRFLOW_V_3_0_PLUS and not AIRFLOW_V_3_2_PLUS:
+            raise NotImplementedError(
+                "Setting `fail_when_dag_is_paused` requires Airflow 3.2.0+ on Airflow 3.x "
+                "(it relies on the task-SDK DAG state endpoint added in 3.2.0)."
             )
 
     def execute(self, context: Context):
+        _validate_datetime_param("logical_date", self.logical_date)
         if self.logical_date is NOTSET:
-            # If no logical_date is provided we will set utcnow()
-            parsed_logical_date = timezone.utcnow()
-        elif self.logical_date is None or isinstance(self.logical_date, datetime.datetime):
-            parsed_logical_date = self.logical_date  # type: ignore
-        elif isinstance(self.logical_date, str):
-            parsed_logical_date = timezone.parse(self.logical_date)
+            if self.run_after is not NOTSET:
+                parsed_logical_date = None
+            else:
+                # If no logical_date is provided we will set utcnow()
+                parsed_logical_date = timezone.utcnow()
+        else:
+            logical_date = cast("str | datetime.datetime | None", self.logical_date)
+            parsed_logical_date = _parse_datetime_param(logical_date)
+
+        if self.run_after is NOTSET:
+            parsed_run_after = parsed_logical_date
+        else:
+            run_after = cast("str | datetime.datetime | None", self.run_after)
+            parsed_run_after = _parse_datetime_param(run_after)
 
         try:
+            if self.conf and isinstance(self.conf, str):
+                self.conf = json.loads(self.conf)
             json.dumps(self.conf)
-        except TypeError:
-            raise ValueError("conf parameter should be JSON Serializable")
+        except (TypeError, JSONDecodeError):
+            raise ValueError("conf parameter should be JSON Serializable %s", self.conf)
+
+        if self.openlineage_inject_parent_info:
+            self.log.debug("Checking if OpenLineage information can be safely injected into dagrun conf.")
+            self.conf = safe_inject_openlineage_properties_into_dagrun_conf(
+                dr_conf=self.conf, ti=context.get("ti")
+            )
 
         if self.trigger_run_id:
             run_id = str(self.trigger_run_id)
@@ -224,27 +268,43 @@ class TriggerDagRunOperator(BaseOperator):
                 run_id = DagRun.generate_run_id(
                     run_type=DagRunType.MANUAL,
                     logical_date=parsed_logical_date,
-                    run_after=parsed_logical_date or timezone.utcnow(),
+                    run_after=parsed_run_after or timezone.utcnow(),
                 )
             else:
                 run_id = DagRun.generate_run_id(DagRunType.MANUAL, parsed_logical_date or timezone.utcnow())  # type: ignore[misc,call-arg]
 
+        # Save run_id as task attribute - to be used by listeners
+        self.trigger_run_id = run_id
+
         if self.fail_when_dag_is_paused:
-            dag_model = DagModel.get_current(self.trigger_dag_id)
-            if dag_model.is_paused:
-                if AIRFLOW_V_3_0_PLUS:
+            if AIRFLOW_V_3_0_PLUS:
+                # Tasks cannot access the ORM directly in Airflow 3.x; fetch the DAG state via the
+                # task-SDK supervisor (GetDag execution-API endpoint, available from Airflow 3.2.0).
+                if context["ti"].get_dag(self.trigger_dag_id).is_paused:
                     raise DagIsPaused(dag_id=self.trigger_dag_id)
-                raise AirflowException(f"Dag {self.trigger_dag_id} is paused")
+            else:
+                dag_model = DagModel.get_current(self.trigger_dag_id)
+                if not dag_model:
+                    raise ValueError(f"Dag {self.trigger_dag_id} is not found")
+                if dag_model.is_paused:
+                    raise AirflowException(f"Dag {self.trigger_dag_id} is paused")
 
         if AIRFLOW_V_3_0_PLUS:
-            self._trigger_dag_af_3(context=context, run_id=run_id, parsed_logical_date=parsed_logical_date)
+            self._trigger_dag_af_3(
+                context=context,
+                run_id=self.trigger_run_id,
+                parsed_logical_date=parsed_logical_date,
+                parsed_run_after=parsed_run_after if self.run_after is not NOTSET else None,
+            )
         else:
-            self._trigger_dag_af_2(context=context, run_id=run_id, parsed_logical_date=parsed_logical_date)
+            self._trigger_dag_af_2(
+                context=context, run_id=self.trigger_run_id, parsed_logical_date=parsed_logical_date
+            )
 
-    def _trigger_dag_af_3(self, context, run_id, parsed_logical_date):
-        from airflow.exceptions import DagRunTriggerException
+    def _trigger_dag_af_3(self, context, run_id, parsed_logical_date, parsed_run_after=None):
+        from airflow.providers.common.compat.sdk import DagRunTriggerException
 
-        raise DagRunTriggerException(
+        kwargs_accepted = dict(
             trigger_dag_id=self.trigger_dag_id,
             dag_run_id=run_id,
             conf=self.conf,
@@ -255,11 +315,48 @@ class TriggerDagRunOperator(BaseOperator):
             allowed_states=self.allowed_states,
             failed_states=self.failed_states,
             poke_interval=self.poke_interval,
-            deferrable=self._defer,
+            deferrable=self.deferrable,
         )
+
+        parameters = inspect.signature(DagRunTriggerException.__init__).parameters
+        if self.note and "note" in parameters:
+            kwargs_accepted["note"] = self.note
+
+        if parsed_run_after and "run_after" in parameters:
+            kwargs_accepted["run_after"] = parsed_run_after
+
+        if isinstance(context, Mapping):
+            from airflow.utils import helpers
+
+            try:
+                build_url_fn = getattr(helpers, "build_airflow_dagrun_url", None)
+                ti = context.get("task_instance") or context.get("ti")
+
+                if build_url_fn and ti and hasattr(ti, "xcom_push"):
+                    ti.xcom_push(
+                        key=TriggerDagRunLink().xcom_key,
+                        value=build_url_fn(dag_id=self.trigger_dag_id, run_id=run_id),
+                    )
+            except (AttributeError, KeyError, TypeError, AssertionError) as e:
+                self.log.debug(
+                    "Skipping TriggerDagRunLink XCom push due to mock or incomplete context: %s", e
+                )
+
+        raise DagRunTriggerException(**kwargs_accepted)
 
     def _trigger_dag_af_2(self, context, run_id, parsed_logical_date):
         try:
+            unsupported_parameters = []
+            for attr, default_value in self.attributes_not_supported_in_airflow_2.items():
+                value = getattr(self, attr, default_value)
+                if value is not default_value:
+                    unsupported_parameters.append(attr)
+
+            if unsupported_parameters:
+                self.log.warning(
+                    "The following parameters are not supported in Airflow 2.x and will be ignored: %s",
+                    ", ".join(unsupported_parameters),
+                )
             dag_run = trigger_dag(
                 dag_id=self.trigger_dag_id,
                 run_id=run_id,
@@ -296,7 +393,7 @@ class TriggerDagRunOperator(BaseOperator):
 
         if self.wait_for_completion:
             # Kick off the deferral process
-            if self._defer:
+            if self.deferrable:
                 self.defer(
                     trigger=DagStateTrigger(
                         dag_id=self.trigger_dag_id,
@@ -327,17 +424,40 @@ class TriggerDagRunOperator(BaseOperator):
                     return
 
     def execute_complete(self, context: Context, event: tuple[str, dict[str, Any]]):
-        if AIRFLOW_V_3_0_PLUS:
-            self._trigger_dag_run_af_3_execute_complete(event=event)
-        else:
-            self._trigger_dag_run_af_2_execute_complete(event=event)
+        """
+        Handle task completion after returning from a deferral.
 
-    def _trigger_dag_run_af_3_execute_complete(self, event: tuple[str, dict[str, Any]]):
-        run_ids = event[1]["run_ids"]
-        event_data = event[1]
+        Args:
+            context: The Airflow context dictionary.
+            event: A tuple containing the class path of the trigger and the trigger event data.
+        """
+        # Example event tuple content:
+        # (
+        #  "airflow.providers.standard.triggers.external_task.DagStateTrigger",
+        #  {
+        #   'dag_id': 'some_dag',
+        #   'states': ['success', 'failed'],
+        #   'poll_interval': 15,
+        #   'run_ids': ['manual__2025-11-19T17:49:20.907083+00:00'],
+        #   'execution_dates': [
+        #    DateTime(2025, 11, 19, 17, 49, 20, 907083, tzinfo=Timezone('UTC'))
+        #   ]
+        #  }
+        # )
+        _, event_data = event
+        run_ids = event_data["run_ids"]
+        # Re-set as attribute after coming back from deferral - to be used by listeners.
+        # Just a safety check on length, we should always have single run_id here.
+        self.trigger_run_id = run_ids[0] if len(run_ids) == 1 else None
+        if AIRFLOW_V_3_0_PLUS:
+            self._trigger_dag_run_af_3_execute_complete(event_data=event_data)
+        else:
+            self._trigger_dag_run_af_2_execute_complete(event_data=event_data)
+
+    def _trigger_dag_run_af_3_execute_complete(self, event_data: dict[str, Any]):
         failed_run_id_conditions = []
 
-        for run_id in run_ids:
+        for run_id in event_data["run_ids"]:
             state = event_data.get(run_id)
             if state in self.failed_states:
                 failed_run_id_conditions.append(run_id)
@@ -361,10 +481,10 @@ class TriggerDagRunOperator(BaseOperator):
 
         @provide_session
         def _trigger_dag_run_af_2_execute_complete(
-            self, event: tuple[str, dict[str, Any]], session: Session = NEW_SESSION
+            self, event_data: dict[str, Any], *, session: Session = NEW_SESSION
         ):
             # This logical_date is parsed from the return trigger event
-            provided_logical_date = event[1]["execution_dates"][0]
+            provided_logical_date = event_data["execution_dates"][0]
             try:
                 # Note: here execution fails on database isolation mode. Needs structural changes for AIP-72
                 dag_run = session.execute(
@@ -389,3 +509,42 @@ class TriggerDagRunOperator(BaseOperator):
                 f"{self.trigger_dag_id} return {state} which is not in {self.failed_states}"
                 f" or {self.allowed_states}"
             )
+
+
+@overload
+def _validate_datetime_param(name: str, value: ArgNotSet) -> ArgNotSet: ...
+@overload
+def _validate_datetime_param(name: str, value: None) -> None: ...
+@overload
+def _validate_datetime_param(name: str, value: str) -> str: ...
+@overload
+def _validate_datetime_param(name: str, value: datetime.datetime) -> datetime.datetime: ...
+
+
+def _validate_datetime_param(
+    name: str,
+    value: str | datetime.datetime | None | ArgNotSet,
+) -> str | datetime.datetime | None | ArgNotSet:
+    if not is_arg_set(value):
+        return NOTSET
+    if value is None or isinstance(value, (str, datetime.datetime)):
+        return value
+    raise TypeError(
+        f"Expected str, datetime.datetime, or None for parameter '{name}'. Got {type(value).__name__}"
+    )
+
+
+@overload
+def _parse_datetime_param(value: None) -> None: ...
+@overload
+def _parse_datetime_param(value: datetime.datetime) -> datetime.datetime: ...
+@overload
+def _parse_datetime_param(value: str) -> datetime.datetime: ...
+
+
+def _parse_datetime_param(
+    value: str | datetime.datetime | None,
+) -> datetime.datetime | None:
+    if value is None or isinstance(value, datetime.datetime):
+        return value
+    return timezone.parse(value)

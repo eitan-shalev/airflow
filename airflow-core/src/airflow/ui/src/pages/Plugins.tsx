@@ -16,49 +16,52 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading, HStack } from "@chakra-ui/react";
-import type { ColumnDef } from "@tanstack/react-table";
-import type { TFunction } from "i18next";
-import { useMemo } from "react";
+import { Box } from "@chakra-ui/react";
 import { useTranslation } from "react-i18next";
 
 import { usePluginServiceGetPlugins } from "openapi/queries";
-import type { PluginResponse } from "openapi/requests/types.gen";
 import { DataTable } from "src/components/DataTable";
+import { useTableURLState } from "src/components/DataTable/useTableUrlState";
 import { ErrorAlert } from "src/components/ErrorAlert";
+import { useDocumentTitle } from "src/utils";
 
 import { PluginImportErrors } from "./Dashboard/Stats/PluginImportErrors";
 
-const createColumns = (translate: TFunction): Array<ColumnDef<PluginResponse>> => [
-  {
-    accessorKey: "name",
-    enableSorting: false,
-    header: translate("columns.name"),
-  },
-  {
-    accessorKey: "source",
-    enableSorting: false,
-    header: translate("plugins.columns.source"),
-  },
-];
-
 export const Plugins = () => {
   const { t: translate } = useTranslation(["admin", "common"]);
-  const { data, error } = usePluginServiceGetPlugins();
 
-  const columns = useMemo(() => createColumns(translate), [translate]);
+  useDocumentTitle(translate("common:admin.Plugins"));
+
+  const { setTableURLState, tableURLState } = useTableURLState();
+  const { pagination } = tableURLState;
+  const { data, error } = usePluginServiceGetPlugins({
+    limit: pagination.pageSize,
+    offset: pagination.pageIndex * pagination.pageSize,
+  });
+
+  const columns = [
+    {
+      accessorKey: "name",
+      enableSorting: false,
+      header: translate("columns.name"),
+    },
+    {
+      accessorKey: "source",
+      enableSorting: false,
+      header: translate("plugins.columns.source"),
+    },
+  ];
 
   return (
-    <Box p={2}>
-      <HStack>
-        <Heading>{translate("common:admin.Plugins")}</Heading>
-        <PluginImportErrors iconOnly />
-      </HStack>
+    <Box px={2}>
+      <PluginImportErrors iconOnly />
       <DataTable
         columns={columns}
         data={data?.plugins ?? []}
         errorMessage={<ErrorAlert error={error} />}
-        modelName={translate("common:admin.Plugins")}
+        initialState={tableURLState}
+        modelName="admin:plugins.plugin"
+        onStateChange={setTableURLState}
         total={data?.total_entries}
       />
     </Box>

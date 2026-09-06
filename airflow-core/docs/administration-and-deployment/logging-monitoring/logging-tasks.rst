@@ -61,10 +61,13 @@ Airflow uses the standard Python `logging <https://docs.python.org/3/library/log
 write logs, and for the duration of a task, the root logger is configured to write to the task's log.
 
 Most operators will write logs to the task log automatically. This is because they
-have a ``log`` logger that you can use to write to the task log.
-This logger is created and configured by :class:`~airflow.utils.log.LoggingMixin` that all
-operators derive from. But also due to the root logger handling, any standard logger (using default settings) that
-propagates logging to the root will also write to the task log.
+have a ``log`` property (of type :class:`~airflow.sdk.types.Logger`) that you can use
+to write to the task log. This logger is automatically configured for all operators
+derived from :class:`~airflow.sdk.BaseOperator`.
+
+Additionally, due to the root logger configuration during task execution, any standard
+Python logger (using default settings) that propagates to the root logger will also write to
+the task log.
 
 So if you want to log to the task log from custom code of yours you can do any of the following:
 
@@ -147,7 +150,7 @@ the example below.
     version                | 2.9.0.dev0
     executor               | LocalExecutor
     task_logging_handler   | airflow.utils.log.file_task_handler.FileTaskHandler
-    sql_alchemy_conn       | postgresql+psycopg2://postgres:airflow@postgres/airflow
+    sql_alchemy_conn       | postgresql+psycopg://postgres:airflow@postgres/airflow
     dags_folder            | /files/dags
     plugins_folder         | /root/airflow/plugins
     base_log_folder        | /root/airflow/logs
@@ -177,7 +180,7 @@ Most task handlers send logs upon completion of a task. In order to view logs in
 
 In triggerer, logs are served unless the service is started with option ``--skip-serve-logs``.
 
-The server is running on the port specified by ``worker_log_server_port`` option in ``[logging]`` section, and option ``triggerer_log_server_port`` for triggerer.  Defaults are 8793 and 8794, respectively.
+The server is running on the port specified by ``worker_log_server_port`` option in ``[logging]`` section, and option ``trigger_log_server_port`` for triggerer.  Defaults are 8793 and 8794, respectively.
 Communication between the webserver and the worker is signed with the key specified by ``secret_key`` option  in ``[api]`` section. You must ensure that the key matches so that communication can take place without problems.
 
 We are using `Gunicorn <https://gunicorn.org/>`__ as a WSGI server. Its configuration options can be overridden with the ``GUNICORN_CMD_ARGS`` env variable. For details, see `Gunicorn settings <https://docs.gunicorn.org/en/latest/settings.html#settings>`__.

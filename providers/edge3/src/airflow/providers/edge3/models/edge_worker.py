@@ -17,24 +17,27 @@
 from __future__ import annotations
 
 import ast
-import json
 import logging
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Column, Integer, String, delete, select
+from sqlalchemy import JSON, Integer, String, delete, select
+from sqlalchemy.orm import Mapped
 
-from airflow.exceptions import AirflowException
-from airflow.models.base import Base
-from airflow.stats import Stats
-from airflow.utils import timezone
+from airflow.providers.common.compat.sdk import AirflowException, Stats, timezone
+from airflow.providers.common.compat.sqlalchemy.orm import mapped_column
+from airflow.providers.edge3.models.edge_base import Base
+from airflow.providers.edge3.version_compat import AIRFLOW_V_3_3_PLUS
+from airflow.utils.helpers import prune_dict
 from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.utils.providers_configuration_loader import providers_configuration_loaded
 from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.sqlalchemy import UtcDateTime
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,12 @@ logger = logging.getLogger(__name__)
 
 class EdgeWorkerVersionException(AirflowException):
     """Signal a version mismatch between core and Edge Site."""
+
+    pass
+
+
+class EdgeWorkerDuplicateException(AirflowException):
+    """Signal that a worker with the same name is already active."""
 
     pass
 
@@ -79,38 +88,35 @@ class EdgeWorkerModel(Base, LoggingMixin):
     """A Edge Worker instance which reports the state and health."""
 
     __tablename__ = "edge_worker"
-    worker_name = Column(String(64), primary_key=True, nullable=False)
-    state = Column(String(20))
-    maintenance_comment = Column(String(1024))
-    _queues = Column("queues", String(256))
-    first_online = Column(UtcDateTime)
-    last_update = Column(UtcDateTime)
-    jobs_active = Column(Integer, default=0)
-    jobs_taken = Column(Integer, default=0)
-    jobs_success = Column(Integer, default=0)
-    jobs_failed = Column(Integer, default=0)
-    sysinfo = Column(String(256))
+    worker_name: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
+    state: Mapped[EdgeWorkerState] = mapped_column(String(20))
+    maintenance_comment: Mapped[str | None] = mapped_column(String(1024))
+    _queues: Mapped[str | None] = mapped_column("queues", String(256))
+    first_online: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    last_update: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    jobs_active: Mapped[int] = mapped_column(Integer, default=0)
+    sysinfo: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    team_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     def __init__(
         self,
         worker_name: str,
-        state: str,
+        state: str | EdgeWorkerState,
         queues: list[str] | None,
         first_online: datetime | None = None,
         last_update: datetime | None = None,
         maintenance_comment: str | None = None,
+        team_name: str | None = None,
     ):
         self.worker_name = worker_name
-        self.state = state
+        self.state = EdgeWorkerState(state)
         self.queues = queues
         self.first_online = first_online or timezone.utcnow()
         self.last_update = last_update
         self.maintenance_comment = maintenance_comment
+        self.team_name = team_name
         super().__init__()
-
-    @property
-    def sysinfo_json(self) -> dict | None:
-        return json.loads(self.sysinfo) if self.sysinfo else None
 
     @property
     def queues(self) -> list[str] | None:
@@ -139,18 +145,20 @@ class EdgeWorkerModel(Base, LoggingMixin):
                 queues.remove(queue_name)
         self.queues = queues
 
-    def update_state(self, state: str) -> None:
+    def update_state(self, state: str | EdgeWorkerState) -> None:
         """Update state field."""
-        self.state = state
+        self.state = EdgeWorkerState(state)
 
 
 def set_metrics(
     worker_name: str,
-    state: EdgeWorkerState,
+    state: str | EdgeWorkerState,
     jobs_active: int,
     concurrency: int,
     free_concurrency: int,
     queues: list[str] | None,
+    sysinfo: dict[str, str | int | float | datetime],
+    team_name: str | None = None,
 ) -> None:
     """Set metric of edge worker."""
     queues = queues if queues else []
@@ -164,31 +172,54 @@ def set_metrics(
         EdgeWorkerState.MAINTENANCE_EXIT,
         EdgeWorkerState.OFFLINE_MAINTENANCE,
     )
+    additional_keys = set(sysinfo or ()) - {
+        "status",
+        "airflow_version",
+        "edge_provider_version",
+        "python_version",
+        "worker_start_time",
+        "concurrency",
+        "free_concurrency",
+    }
+    metric_tags = prune_dict({"worker_name": worker_name, "team_name": team_name})
+    status = sysinfo.get("status", logging.NOTSET)
+    if not isinstance(status, (int, float)):
+        status = logging.NOTSET
 
-    Stats.gauge(f"edge_worker.connected.{worker_name}", int(connected))
-    Stats.gauge("edge_worker.connected", int(connected), tags={"worker_name": worker_name})
-
-    Stats.gauge(f"edge_worker.maintenance.{worker_name}", int(maintenance))
-    Stats.gauge("edge_worker.maintenance", int(maintenance), tags={"worker_name": worker_name})
-
-    Stats.gauge(f"edge_worker.jobs_active.{worker_name}", jobs_active)
-    Stats.gauge("edge_worker.jobs_active", jobs_active, tags={"worker_name": worker_name})
-
-    Stats.gauge(f"edge_worker.concurrency.{worker_name}", concurrency)
-    Stats.gauge("edge_worker.concurrency", concurrency, tags={"worker_name": worker_name})
-
-    Stats.gauge(f"edge_worker.free_concurrency.{worker_name}", free_concurrency)
-    Stats.gauge("edge_worker.free_concurrency", free_concurrency, tags={"worker_name": worker_name})
-
-    Stats.gauge(f"edge_worker.num_queues.{worker_name}", len(queues))
+    Stats.gauge("edge_worker.status", status, tags=metric_tags)
+    Stats.gauge("edge_worker.connected", int(connected), tags=metric_tags)
+    Stats.gauge("edge_worker.maintenance", int(maintenance), tags=metric_tags)
+    Stats.gauge("edge_worker.jobs_active", jobs_active, tags=metric_tags)
+    Stats.gauge("edge_worker.concurrency", concurrency, tags=metric_tags)
+    Stats.gauge("edge_worker.free_concurrency", free_concurrency, tags=metric_tags)
     Stats.gauge(
         "edge_worker.num_queues",
         len(queues),
-        tags={"worker_name": worker_name, "queues": ",".join(queues)},
+        tags={**metric_tags, "queues": ",".join(queues)},
     )
 
+    for key in additional_keys:
+        value = sysinfo.get(key)
+        if isinstance(value, (int, float)):
+            Stats.gauge(f"edge_worker.{key}", value, tags=metric_tags)
 
-def reset_metrics(worker_name: str) -> None:
+    if not AIRFLOW_V_3_3_PLUS:
+        # Airflow < 3.3: export legacy per-worker metrics (no auto-tag expansion).
+        Stats.gauge(f"edge_worker.status.{worker_name}", int(status))
+        Stats.gauge(f"edge_worker.connected.{worker_name}", int(connected))
+        Stats.gauge(f"edge_worker.maintenance.{worker_name}", int(maintenance))
+        Stats.gauge(f"edge_worker.jobs_active.{worker_name}", jobs_active)
+        Stats.gauge(f"edge_worker.concurrency.{worker_name}", concurrency)
+        Stats.gauge(f"edge_worker.free_concurrency.{worker_name}", free_concurrency)
+        Stats.gauge(f"edge_worker.num_queues.{worker_name}", len(queues))
+
+        for key in additional_keys:
+            value = sysinfo.get(key)
+            if isinstance(value, (int, float)):
+                Stats.gauge(f"edge_worker.{key}.{worker_name}", value)
+
+
+def reset_metrics(worker_name: str, team_name: str | None = None) -> None:
     """Reset metrics of worker."""
     set_metrics(
         worker_name=worker_name,
@@ -197,54 +228,103 @@ def reset_metrics(worker_name: str) -> None:
         concurrency=0,
         free_concurrency=-1,
         queues=None,
+        sysinfo={
+            "status": logging.NOTSET,
+        },
+        team_name=team_name,
     )
+
+
+def get_query_filter_by_worker_name(worker_name: str):
+    return select(EdgeWorkerModel).where(EdgeWorkerModel.worker_name == worker_name)
+
+
+def _glob_to_like_pattern(pattern: str) -> str:
+    r"""
+    Convert a shell-style glob (``*``, ``?``) to a SQL ``LIKE`` pattern.
+
+    Literal ``LIKE`` metacharacters in the input are escaped with a backslash so
+    only glob wildcards are treated as special; the caller must pass ``escape="\"``.
+    """
+    escaped = pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped.replace("*", "%").replace("?", "_")
 
 
 @providers_configuration_loaded
 @provide_session
 def _fetch_edge_hosts_from_db(
-    hostname: str | None = None, states: list | None = None, session: Session = NEW_SESSION
-) -> list:
+    hostname: str | None = None,
+    states: list | None = None,
+    worker_name_pattern: str | None = None,
+    queues: list[str] | None = None,
+    *,
+    session: Session = NEW_SESSION,
+) -> Sequence[EdgeWorkerModel]:
     query = select(EdgeWorkerModel)
     if states:
         query = query.where(EdgeWorkerModel.state.in_(states))
     if hostname:
         query = query.where(EdgeWorkerModel.worker_name == hostname)
+    if worker_name_pattern:
+        query = query.where(
+            EdgeWorkerModel.worker_name.like(_glob_to_like_pattern(worker_name_pattern), escape="\\")
+        )
     query = query.order_by(EdgeWorkerModel.worker_name)
-    return session.scalars(query).all()
+    workers = session.scalars(query).all()
+    if queues:
+        # Queues are stored as a repr-encoded list in a single column, so exact
+        # membership is filtered in Python to avoid substring false positives. A
+        # worker matches if it serves any of the requested queues.
+        wanted = set(queues)
+        workers = [worker for worker in workers if worker.queues and wanted.intersection(worker.queues)]
+    return workers
 
 
 @providers_configuration_loaded
 @provide_session
-def get_registered_edge_hosts(states: list | None = None, session: Session = NEW_SESSION):
-    return _fetch_edge_hosts_from_db(states=states, session=session)
+def get_registered_edge_hosts(
+    *,
+    states: list | None = None,
+    worker_name_pattern: str | None = None,
+    queues: list[str] | None = None,
+    session: Session = NEW_SESSION,
+):
+    return _fetch_edge_hosts_from_db(
+        states=states, worker_name_pattern=worker_name_pattern, queues=queues, session=session
+    )
 
 
 @provide_session
 def request_maintenance(
-    worker_name: str, maintenance_comment: str | None, session: Session = NEW_SESSION
+    worker_name: str, maintenance_comment: str | None, *, session: Session = NEW_SESSION
 ) -> None:
     """Write maintenance request to the db."""
-    query = select(EdgeWorkerModel).where(EdgeWorkerModel.worker_name == worker_name)
-    worker: EdgeWorkerModel = session.scalar(query)
+    query = get_query_filter_by_worker_name(worker_name=worker_name)
+    worker = session.scalar(query)
+    if not worker:
+        raise ValueError(f"Edge Worker {worker_name} not found in list of registered workers")
     worker.state = EdgeWorkerState.MAINTENANCE_REQUEST
     worker.maintenance_comment = maintenance_comment
 
 
 @provide_session
-def exit_maintenance(worker_name: str, session: Session = NEW_SESSION) -> None:
+def exit_maintenance(worker_name: str, *, session: Session = NEW_SESSION) -> None:
     """Write maintenance exit to the db."""
-    query = select(EdgeWorkerModel).where(EdgeWorkerModel.worker_name == worker_name)
-    worker: EdgeWorkerModel = session.scalar(query)
+    query = get_query_filter_by_worker_name(worker_name)
+    worker: EdgeWorkerModel | None = session.scalar(query)
+    if not worker:
+        raise ValueError(f"Edge Worker {worker_name} not found in list of registered workers")
     worker.state = EdgeWorkerState.MAINTENANCE_EXIT
     worker.maintenance_comment = None
 
 
 @provide_session
-def remove_worker(worker_name: str, session: Session = NEW_SESSION) -> None:
+def remove_worker(worker_name: str, *, session: Session = NEW_SESSION) -> None:
     """Remove a worker that is offline or just gone from DB."""
-    query = select(EdgeWorkerModel).where(EdgeWorkerModel.worker_name == worker_name)
-    worker: EdgeWorkerModel = session.scalar(query)
+    query = get_query_filter_by_worker_name(worker_name)
+    worker: EdgeWorkerModel | None = session.scalar(query)
+    if not worker:
+        raise ValueError(f"Edge Worker {worker_name} not found in list of registered workers")
     if worker.state in (
         EdgeWorkerState.OFFLINE,
         EdgeWorkerState.OFFLINE_MAINTENANCE,
@@ -259,11 +339,13 @@ def remove_worker(worker_name: str, session: Session = NEW_SESSION) -> None:
 
 @provide_session
 def change_maintenance_comment(
-    worker_name: str, maintenance_comment: str | None, session: Session = NEW_SESSION
+    worker_name: str, maintenance_comment: str | None, *, session: Session = NEW_SESSION
 ) -> None:
     """Write maintenance comment in the db."""
-    query = select(EdgeWorkerModel).where(EdgeWorkerModel.worker_name == worker_name)
-    worker: EdgeWorkerModel = session.scalar(query)
+    query = get_query_filter_by_worker_name(worker_name)
+    worker: EdgeWorkerModel | None = session.scalar(query)
+    if not worker:
+        raise ValueError(f"Edge Worker {worker_name} not found in list of registered workers")
     if worker.state in (
         EdgeWorkerState.MAINTENANCE_MODE,
         EdgeWorkerState.MAINTENANCE_PENDING,
@@ -278,10 +360,12 @@ def change_maintenance_comment(
 
 
 @provide_session
-def request_shutdown(worker_name: str, session: Session = NEW_SESSION) -> None:
+def request_shutdown(worker_name: str, *, session: Session = NEW_SESSION) -> None:
     """Request to shutdown the edge worker."""
-    query = select(EdgeWorkerModel).where(EdgeWorkerModel.worker_name == worker_name)
-    worker: EdgeWorkerModel = session.scalar(query)
+    query = get_query_filter_by_worker_name(worker_name)
+    worker: EdgeWorkerModel | None = session.scalar(query)
+    if not worker:
+        raise ValueError(f"Edge Worker {worker_name} not found in list of registered workers")
     if worker.state not in (
         EdgeWorkerState.OFFLINE,
         EdgeWorkerState.OFFLINE_MAINTENANCE,
@@ -291,10 +375,12 @@ def request_shutdown(worker_name: str, session: Session = NEW_SESSION) -> None:
 
 
 @provide_session
-def add_worker_queues(worker_name: str, queues: list[str], session: Session = NEW_SESSION) -> None:
+def add_worker_queues(worker_name: str, queues: list[str], *, session: Session = NEW_SESSION) -> None:
     """Add queues to an edge worker."""
-    query = select(EdgeWorkerModel).where(EdgeWorkerModel.worker_name == worker_name)
-    worker: EdgeWorkerModel = session.scalar(query)
+    query = get_query_filter_by_worker_name(worker_name)
+    worker: EdgeWorkerModel | None = session.scalar(query)
+    if not worker:
+        raise ValueError(f"Edge Worker {worker_name} not found in list of registered workers")
     if worker.state in (
         EdgeWorkerState.OFFLINE,
         EdgeWorkerState.OFFLINE_MAINTENANCE,
@@ -307,10 +393,12 @@ def add_worker_queues(worker_name: str, queues: list[str], session: Session = NE
 
 
 @provide_session
-def remove_worker_queues(worker_name: str, queues: list[str], session: Session = NEW_SESSION) -> None:
+def remove_worker_queues(worker_name: str, queues: list[str], *, session: Session = NEW_SESSION) -> None:
     """Remove queues from an edge worker."""
-    query = select(EdgeWorkerModel).where(EdgeWorkerModel.worker_name == worker_name)
-    worker: EdgeWorkerModel = session.scalar(query)
+    query = get_query_filter_by_worker_name(worker_name)
+    worker: EdgeWorkerModel | None = session.scalar(query)
+    if not worker:
+        raise ValueError(f"Edge Worker {worker_name} not found in list of registered workers")
     if worker.state in (
         EdgeWorkerState.OFFLINE,
         EdgeWorkerState.OFFLINE_MAINTENANCE,
@@ -322,3 +410,23 @@ def remove_worker_queues(worker_name: str, queues: list[str], session: Session =
         logger.error(error_message)
         raise TypeError(error_message)
     worker.remove_queues(queues)
+
+
+@provide_session
+def set_worker_concurrency(worker_name: str, concurrency: int, *, session: Session = NEW_SESSION) -> None:
+    """Set the concurrency of an edge worker."""
+    query = select(EdgeWorkerModel).where(EdgeWorkerModel.worker_name == worker_name)
+    worker: EdgeWorkerModel | None = session.scalar(query)
+    if not worker:
+        raise ValueError(f"Edge Worker {worker_name} not found in list of registered workers")
+    if worker.state in (
+        EdgeWorkerState.OFFLINE,
+        EdgeWorkerState.OFFLINE_MAINTENANCE,
+        EdgeWorkerState.UNKNOWN,
+    ):
+        error_message = (
+            f"Cannot set concurrency for edge worker {worker_name} as it is in {worker.state} state!"
+        )
+        logger.error(error_message)
+        raise TypeError(error_message)
+    worker.concurrency = concurrency

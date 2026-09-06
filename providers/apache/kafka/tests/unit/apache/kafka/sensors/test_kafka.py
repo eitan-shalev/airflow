@@ -19,12 +19,13 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 
 import pytest
 
-from airflow.exceptions import TaskDeferred
 from airflow.models import Connection
 from airflow.providers.apache.kafka.sensors.kafka import AwaitMessageSensor, AwaitMessageTriggerFunctionSensor
+from airflow.providers.common.compat.sdk import TaskDeferred
 
 log = logging.getLogger(__name__)
 
@@ -91,3 +92,74 @@ class TestSensors:
         # task should immediately come out of deferred
         with pytest.raises(TaskDeferred):
             sensor.execute_complete(context={})
+
+    def test_await_message_with_timeout_parameter(self):
+        """Test that AwaitMessageSensor accepts timeout parameter."""
+        sensor = AwaitMessageSensor(
+            kafka_config_id="kafka_d",
+            topics=["test"],
+            task_id="test",
+            apply_function=_return_true,
+            timeout=600,  # This should now work without errors
+        )
+
+        assert sensor.timeout == 600
+
+    def test_await_message_with_soft_fail_parameter(self):
+        """Test that AwaitMessageSensor accepts soft_fail parameter."""
+        sensor = AwaitMessageSensor(
+            kafka_config_id="kafka_d",
+            topics=["test"],
+            task_id="test",
+            apply_function=_return_true,
+            soft_fail=True,  # This should now work without errors
+        )
+
+        assert sensor.soft_fail is True
+
+    def test_await_message_trigger_function_with_timeout_parameter(self):
+        """Test that AwaitMessageTriggerFunctionSensor accepts timeout parameter."""
+        sensor = AwaitMessageTriggerFunctionSensor(
+            kafka_config_id="kafka_d",
+            topics=["test"],
+            task_id="test",
+            apply_function=_return_true,
+            event_triggered_function=_return_true,
+            timeout=600,
+        )
+
+        assert sensor.timeout == 600
+
+    def test_await_message_trigger_function_forwards_timeout_to_deferral(self):
+        """The timeout must be forwarded to every deferral, not silently ignored."""
+        sensor = AwaitMessageTriggerFunctionSensor(
+            kafka_config_id="kafka_d",
+            topics=["test"],
+            task_id="test",
+            apply_function=_return_true,
+            event_triggered_function=_return_true,
+            timeout=600,
+        )
+
+        with pytest.raises(TaskDeferred) as exc_info:
+            sensor.execute(context={})
+        assert exc_info.value.timeout == timedelta(seconds=600)
+
+        # The sensor re-defers after every processed event, so the timeout must be
+        # applied to that deferral as well.
+        with pytest.raises(TaskDeferred) as exc_info:
+            sensor.execute_complete(context={})
+        assert exc_info.value.timeout == timedelta(seconds=600)
+
+    def test_await_message_trigger_function_with_soft_fail_parameter(self):
+        """Test that AwaitMessageTriggerFunctionSensor accepts soft_fail parameter."""
+        sensor = AwaitMessageTriggerFunctionSensor(
+            kafka_config_id="kafka_d",
+            topics=["test"],
+            task_id="test",
+            apply_function=_return_true,
+            event_triggered_function=_return_true,
+            soft_fail=True,
+        )
+
+        assert sensor.soft_fail is True

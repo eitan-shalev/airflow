@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
 from airflow.api_fastapi.auth.managers.models.resource_details import DagAccessEntity
 from airflow.api_fastapi.common.db.common import SessionDep
@@ -26,10 +27,6 @@ from airflow.api_fastapi.common.router import AirflowRouter
 from airflow.api_fastapi.core_api.datamodels.ui.structure import StructureDataResponse
 from airflow.api_fastapi.core_api.openapi.exceptions import create_openapi_http_exception_doc
 from airflow.api_fastapi.core_api.security import requires_access_dag
-from airflow.api_fastapi.core_api.services.ui.structure import (
-    bind_output_assets_to_tasks,
-    get_upstream_assets,
-)
 from airflow.api_fastapi.core_api.services.ui.task_group import task_group_to_dict
 from airflow.models.dag_version import DagVersion
 from airflow.models.serialized_dag import SerializedDagModel
@@ -40,10 +37,13 @@ structure_router = AirflowRouter(tags=["Structure"], prefix="/structure")
 
 @structure_router.get(
     "/structure_data",
-    responses=create_openapi_http_exception_doc([status.HTTP_404_NOT_FOUND]),
+    responses=create_openapi_http_exception_doc(
+        [
+            status.HTTP_404_NOT_FOUND,
+        ]
+    ),
     dependencies=[
         Depends(requires_access_dag("GET")),
-        Depends(requires_access_dag("GET", DagAccessEntity.DEPENDENCIES)),
         Depends(requires_access_dag("GET", DagAccessEntity.TASK_INSTANCE)),
     ],
 )
@@ -52,8 +52,8 @@ def structure_data(
     dag_id: str,
     include_upstream: QueryIncludeUpstream = False,
     include_downstream: QueryIncludeDownstream = False,
+    depth: int | None = None,
     root: str | None = None,
-    external_dependencies: bool = False,
     version_number: int | None = None,
 ) -> StructureDataResponse:
     """Get Structure Data."""
@@ -66,10 +66,11 @@ def structure_data(
             )
         version_number = dag_version_model.version_number
 
-    serialized_dag: SerializedDagModel = session.scalar(
+    serialized_dag: SerializedDagModel | None = session.scalar(
         select(SerializedDagModel)
         .join(DagVersion)
         .where(SerializedDagModel.dag_id == dag_id, DagVersion.version_number == version_number)
+        .options(joinedload(SerializedDagModel.dag_model)),
     )
     if serialized_dag is None:
         raise HTTPException(
@@ -80,76 +81,22 @@ def structure_data(
 
     if root:
         dag = dag.partial_subset(
-            task_ids=root, include_upstream=include_upstream, include_downstream=include_downstream
+            task_ids=root,
+            include_upstream=include_upstream,
+            include_downstream=include_downstream,
+            depth=depth,
         )
 
-    nodes = [task_group_to_dict(child) for child in dag.task_group.topological_sort()]
+    group_dict = dag.task_group.get_task_group_dict()
+    nodes = [
+        task_group_to_dict(child, group_dict=group_dict)
+        for child in dag.task_group.topological_sort(group_dict=group_dict)
+    ]
     edges = dag_edges(dag)
 
     data = {
         "nodes": nodes,
         "edges": edges,
     }
-
-    if external_dependencies:
-        entry_node_ref = nodes[0] if nodes else None
-        exit_node_ref = nodes[-1] if nodes else None
-
-        start_edges: list[dict] = []
-        end_edges: list[dict] = []
-
-        for dependency_dag_id, dependencies in sorted(SerializedDagModel.get_dag_dependencies().items()):
-            for dependency in dependencies:
-                # Dependencies not related to `dag_id` are ignored
-                if dependency_dag_id != dag_id and dependency.target != dag_id:
-                    continue
-
-                # upstream assets are handled by the `get_upstream_assets` function.
-                if dependency.target != dependency.dependency_type and dependency.dependency_type in [
-                    "asset-alias",
-                    "asset",
-                ]:
-                    continue
-
-                # Add edges
-                # start dependency
-                if (
-                    dependency.source == dependency.dependency_type or dependency.target == dag_id
-                ) and entry_node_ref:
-                    start_edges.append({"source_id": dependency.node_id, "target_id": entry_node_ref["id"]})
-
-                # end dependency
-                elif (
-                    dependency.target == dependency.dependency_type or dependency.source == dag_id
-                ) and exit_node_ref:
-                    end_edges.append(
-                        {
-                            "source_id": exit_node_ref["id"],
-                            "target_id": dependency.node_id,
-                            "resolved_from_alias": dependency.source.replace("asset-alias:", "", 1)
-                            if dependency.source.startswith("asset-alias:")
-                            else None,
-                        }
-                    )
-
-                # Add nodes
-                nodes.append(
-                    {
-                        "id": dependency.node_id,
-                        "label": dependency.label,
-                        "type": dependency.dependency_type,
-                    }
-                )
-
-        if (asset_expression := serialized_dag.dag_model.asset_expression) and entry_node_ref:
-            upstream_asset_nodes, upstream_asset_edges = get_upstream_assets(
-                asset_expression, entry_node_ref["id"]
-            )
-            data["nodes"] += upstream_asset_nodes
-            data["edges"] += upstream_asset_edges
-
-        data["edges"] += start_edges + end_edges
-
-    bind_output_assets_to_tasks(data["edges"], serialized_dag, version_number, session)
 
     return StructureDataResponse(**data)

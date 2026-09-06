@@ -23,8 +23,9 @@ from typing import Any
 
 from google.api_core.exceptions import GoogleAPIError
 from google.cloud.storage_transfer_v1.types import TransferOperation
+from google.protobuf.json_format import MessageToDict
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.cloud_storage_transfer_service import (
     CloudDataTransferServiceAsyncHook,
     GcpTransferOperationStatus,
@@ -41,6 +42,8 @@ class CloudStorageTransferServiceCreateJobsTrigger(BaseTrigger):
     :param project_id: GCP project id.
     :param poll_interval: Interval in seconds between polls.
     :param gcp_conn_id: The connection ID used to connect to Google Cloud.
+    :param files: Optional list of file paths being transferred. When provided, included in the
+        success event for the operator to return to subsequent tasks (e.g. for XCom).
     """
 
     def __init__(
@@ -49,12 +52,14 @@ class CloudStorageTransferServiceCreateJobsTrigger(BaseTrigger):
         project_id: str = PROVIDE_PROJECT_ID,
         poll_interval: int = 10,
         gcp_conn_id: str = "google_cloud_default",
+        files: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.project_id = project_id
         self.gcp_conn_id = gcp_conn_id
         self.job_names = job_names
         self.poll_interval = poll_interval
+        self.files = files
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         """Serialize StorageTransferJobsTrigger arguments and classpath."""
@@ -65,6 +70,7 @@ class CloudStorageTransferServiceCreateJobsTrigger(BaseTrigger):
                 "job_names": self.job_names,
                 "poll_interval": self.poll_interval,
                 "gcp_conn_id": self.gcp_conn_id,
+                "files": self.files,
             },
         )
 
@@ -116,13 +122,14 @@ class CloudStorageTransferServiceCreateJobsTrigger(BaseTrigger):
             self.log.info("Transfer jobs completed: %s of %s", jobs_completed_successfully, jobs_total)
             if jobs_completed_successfully == jobs_total:
                 s = "s" if jobs_total > 1 else ""
-                job_names = ", ".join(j for j in self.job_names)
-                yield TriggerEvent(
-                    {
-                        "status": "success",
-                        "message": f"Transfer job{s} {job_names} completed successfully",
-                    }
-                )
+                job_names_str = ", ".join(j for j in self.job_names)
+                event_payload: dict[str, Any] = {
+                    "status": "success",
+                    "message": f"Transfer job{s} {job_names_str} completed successfully",
+                }
+                if self.files is not None:
+                    event_payload["files"] = self.files
+                yield TriggerEvent(event_payload)
                 return
 
             self.log.info("Sleeping for %s seconds", self.poll_interval)
@@ -230,4 +237,93 @@ class CloudStorageTransferServiceCheckJobStatusTrigger(BaseTrigger):
                 await asyncio.sleep(self.poke_interval)
         except Exception as e:
             self.log.exception("Exception occurred while checking for query completion")
+            yield TriggerEvent({"status": "error", "message": str(e)})
+
+
+class CloudDataTransferServiceRunJobTrigger(BaseTrigger):
+    """
+    CloudDataTransferServiceRunJobTrigger run on the trigger worker to run Cloud Storage Transfer job.
+
+    :param job_name: The name of the transfer job
+    :param project_id: The ID of the project that owns the Transfer Job.
+    :param poke_interval: Polling period in seconds to check for the status
+    :param gcp_conn_id: The connection ID used to connect to Google Cloud.
+    :param impersonation_chain: Optional service account to impersonate using short-term
+        credentials, or chained list of accounts required to get the access_token
+        of the last account in the list, which will be impersonated in the request.
+        If set as a string, the account must grant the originating account
+        the Service Account Token Creator IAM role.
+        If set as a sequence, the identities from the list must grant
+        Service Account Token Creator IAM role to the directly preceding identity, with first
+        account from the list granting this role to the originating account (templated).
+    """
+
+    def __init__(
+        self,
+        job_name: str,
+        project_id: str = PROVIDE_PROJECT_ID,
+        poke_interval: float = 10.0,
+        gcp_conn_id: str = "google_cloud_default",
+        impersonation_chain: str | Sequence[str] | None = None,
+    ):
+        super().__init__()
+        self.job_name = job_name
+        self.project_id = project_id
+        self.poke_interval = poke_interval
+        self.gcp_conn_id = gcp_conn_id
+        self.impersonation_chain = impersonation_chain
+
+    def serialize(self) -> tuple[str, dict[str, Any]]:
+        """Serialize CloudDataTransferServiceRunJobTrigger arguments and classpath."""
+        return (
+            f"{self.__class__.__module__}.{self.__class__.__qualname__}",
+            {
+                "job_name": self.job_name,
+                "project_id": self.project_id,
+                "poke_interval": self.poke_interval,
+                "gcp_conn_id": self.gcp_conn_id,
+                "impersonation_chain": self.impersonation_chain,
+            },
+        )
+
+    def _get_async_hook(self) -> CloudDataTransferServiceAsyncHook:
+        return CloudDataTransferServiceAsyncHook(
+            project_id=self.project_id,
+            gcp_conn_id=self.gcp_conn_id,
+            impersonation_chain=self.impersonation_chain,
+        )
+
+    async def run(self) -> AsyncIterator[TriggerEvent]:
+        """Run the transfer job and yield a TriggerEvent."""
+        hook = self._get_async_hook()
+
+        try:
+            job_operation = await hook.run_transfer_job(self.job_name)
+            while True:
+                job_completed = await job_operation.done()
+                if job_completed:
+                    yield TriggerEvent(
+                        {
+                            "status": "success",
+                            "message": "Transfer operation run completed successfully",
+                            "job_result": {
+                                "name": job_operation.operation.name,
+                                "metadata": MessageToDict(
+                                    job_operation.operation.metadata, preserving_proto_field_name=True
+                                ),
+                                "response": MessageToDict(
+                                    job_operation.operation.response, preserving_proto_field_name=True
+                                ),
+                            },
+                        }
+                    )
+                    return
+
+                self.log.info(
+                    "Sleeping for %s seconds.",
+                    self.poke_interval,
+                )
+                await asyncio.sleep(self.poke_interval)
+        except Exception as e:
+            self.log.exception("Exception occurred while running transfer job")
             yield TriggerEvent({"status": "error", "message": str(e)})

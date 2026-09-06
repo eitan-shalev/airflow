@@ -17,33 +17,15 @@
 # under the License.
 from __future__ import annotations
 
+import dataclasses
 import datetime
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from airflow.providers.common.compat.sdk import BaseSensorOperator, timezone
 from airflow.providers.standard.triggers.temporal import DateTimeTrigger
-from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS, BaseSensorOperator
-
-try:
-    from airflow.sdk import timezone
-except ImportError:  # TODO: Remove this when min airflow version is 3.1.0 for standard provider
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
-
-try:
-    from airflow.triggers.base import StartTriggerArgs  # type: ignore[no-redef]
-except ImportError:  # TODO: Remove this when min airflow version is 2.10.0 for standard provider
-
-    @dataclass
-    class StartTriggerArgs:  # type: ignore[no-redef]
-        """Arguments required for start task execution from triggerer."""
-
-        trigger_cls: str
-        next_method: str
-        trigger_kwargs: dict[str, Any] | None = None
-        next_kwargs: dict[str, Any] | None = None
-        timeout: datetime.timedelta | None = None
-
+from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS
+from airflow.triggers.base import StartTriggerArgs
 
 if TYPE_CHECKING:
     from airflow.sdk import Context
@@ -82,30 +64,20 @@ class DateTimeSensor(BaseSensorOperator):
 
     def __init__(self, *, target_time: str | datetime.datetime, **kwargs) -> None:
         super().__init__(**kwargs)
-
-        # self.target_time can't be a datetime object as it is a template_field
-        if isinstance(target_time, datetime.datetime):
-            self.target_time = target_time.isoformat()
-        elif isinstance(target_time, str):
-            self.target_time = target_time
-        else:
-            raise TypeError(
-                f"Expected str or datetime.datetime type for target_time. Got {type(target_time)}"
-            )
+        self.target_time = target_time
 
     def poke(self, context: Context) -> bool:
         self.log.info("Checking if the time (%s) has come", self.target_time)
-        return timezone.utcnow() > timezone.parse(self.target_time)
+        return timezone.utcnow() > self._moment
 
     @property
     def _moment(self) -> datetime.datetime:
-        # Note following is reachable code if Jinja is used for redering template fields and
-        # render_template_as_native_obj=True is used.
-        # In this case, the target_time is already a datetime object.
-        if isinstance(self.target_time, datetime.datetime):  # type:ignore[unreachable]
-            return self.target_time  # type:ignore[unreachable]
-
-        return timezone.parse(self.target_time)
+        target_time: Any = self.target_time
+        if isinstance(target_time, datetime.datetime):
+            target_time = target_time.isoformat()
+        if isinstance(target_time, str):
+            return timezone.parse(target_time)
+        raise TypeError(f"Expected str or datetime.datetime type for target_time. Got {type(target_time)}")
 
 
 class DateTimeSensorAsync(DateTimeSensor):
@@ -144,9 +116,15 @@ class DateTimeSensorAsync(DateTimeSensor):
 
         self.start_from_trigger = start_from_trigger
         if self.start_from_trigger:
-            self.start_trigger_args.trigger_kwargs = dict(
-                moment=timezone.parse(self.target_time),
-                end_from_trigger=self.end_from_trigger,
+            # Replaced rather than mutated: ``start_trigger_args`` is a class attribute, so
+            # assigning through it would overwrite the arguments of every other task built
+            # from this operator.
+            self.start_trigger_args = dataclasses.replace(
+                self.start_trigger_args,
+                trigger_kwargs=dict(
+                    moment=self._moment,
+                    end_from_trigger=self.end_from_trigger,
+                ),
             )
 
     def execute(self, context: Context) -> NoReturn:

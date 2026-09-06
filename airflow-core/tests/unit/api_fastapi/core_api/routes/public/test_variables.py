@@ -19,13 +19,22 @@ from __future__ import annotations
 import json
 from io import BytesIO
 from unittest import mock
+from unittest.mock import ANY
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
+from airflow.api_fastapi.core_api.datamodels.common import BulkBody
+from airflow.api_fastapi.core_api.datamodels.variables import VariableBody
+from airflow.api_fastapi.core_api.services.public.variables import BulkVariableService
+from airflow.models.team import Team
 from airflow.models.variable import Variable
-from airflow.utils.session import provide_session
+from airflow.utils.session import NEW_SESSION, provide_session
 
-from tests_common.test_utils.db import clear_db_variables
+from tests_common.test_utils.asserts import assert_queries_count
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.db import clear_db_teams, clear_db_variables
 from tests_common.test_utils.logs import check_last_log
 
 pytestmark = pytest.mark.db_test
@@ -44,6 +53,14 @@ TEST_VARIABLE_KEY3 = "dictionary_password"
 TEST_VARIABLE_VALUE3 = '{"password": "some_password"}'
 TEST_VARIABLE_DESCRIPTION3 = "Some description for the variable"
 
+TEST_VARIABLE_KEY5 = "nested_dictionary_variable"
+TEST_VARIABLE_VALUE5 = '{"config": {"password": "some_password", "next": {"api_key": "some_api_key", "next_again": {"token": "some_token"}}}}'
+TEST_VARIABLE_DESCRIPTION5 = "Variable with a nested sensitive key"
+
+TEST_VARIABLE_KEY6 = "db_password"
+TEST_VARIABLE_VALUE6 = '{"config": "actual_secret"}'
+TEST_VARIABLE_DESCRIPTION6 = "Variable with a sensitive key name and JSON value with non-sensitive inner keys"
+
 TEST_VARIABLE_KEY4 = "test_variable_key/with_slashes"
 TEST_VARIABLE_VALUE4 = "test_variable_value"
 TEST_VARIABLE_DESCRIPTION4 = "Some description for the variable"
@@ -60,7 +77,9 @@ def create_file_upload(content: dict) -> BytesIO:
 
 
 @provide_session
-def _create_variables(session) -> None:
+def _create_variables(*, session: Session = NEW_SESSION) -> None:
+    team = session.scalars(select(Team).where(Team.name == "test")).one()
+
     Variable.set(
         key=TEST_VARIABLE_KEY,
         value=TEST_VARIABLE_VALUE,
@@ -86,6 +105,7 @@ def _create_variables(session) -> None:
         key=TEST_VARIABLE_KEY4,
         value=TEST_VARIABLE_VALUE4,
         description=TEST_VARIABLE_DESCRIPTION4,
+        team_name=team.name,
         session=session,
     )
 
@@ -96,30 +116,54 @@ def _create_variables(session) -> None:
         session=session,
     )
 
+    Variable.set(
+        key=TEST_VARIABLE_KEY5,
+        value=TEST_VARIABLE_VALUE5,
+        description=TEST_VARIABLE_DESCRIPTION5,
+        session=session,
+    )
+
+    Variable.set(
+        key=TEST_VARIABLE_KEY6,
+        value=TEST_VARIABLE_VALUE6,
+        description=TEST_VARIABLE_DESCRIPTION6,
+        session=session,
+    )
+
+
+@provide_session
+def _create_team(*, session: Session = NEW_SESSION) -> None:
+    session.add(Team(name="test"))
+    session.commit()
+
 
 class TestVariableEndpoint:
     @pytest.fixture(autouse=True)
-    def setup(self) -> None:
+    def setup(self):
         clear_db_variables()
+        with conf_vars({("core", "multi_team"): "True"}):
+            yield
 
-    def teardown_method(self) -> None:
+    def teardown_method(self):
         clear_db_variables()
+        clear_db_teams()
 
     def create_variables(self):
+        _create_team()
         _create_variables()
 
 
 class TestDeleteVariable(TestVariableEndpoint):
     def test_delete_should_respond_204(self, test_client, session):
         self.create_variables()
-        variables = session.query(Variable).all()
-        assert len(variables) == 5
+        variables = session.scalars(select(Variable)).all()
+        assert len(variables) == 7
         response = test_client.delete(f"/variables/{TEST_VARIABLE_KEY}")
         assert response.status_code == 204
         response = test_client.delete(f"/variables/{TEST_VARIABLE_KEY4}")
         assert response.status_code == 204
-        variables = session.query(Variable).all()
-        assert len(variables) == 3
+        variables = session.scalars(select(Variable)).all()
+        assert len(variables) == 5
         check_last_log(session, dag_id=None, event="delete_variable", logical_date=None)
 
     def test_delete_should_respond_401(self, unauthenticated_test_client):
@@ -140,7 +184,7 @@ class TestDeleteVariable(TestVariableEndpoint):
 class TestGetVariable(TestVariableEndpoint):
     @pytest.mark.enable_redact
     @pytest.mark.parametrize(
-        "key, expected_response",
+        ("key", "expected_response"),
         [
             (
                 TEST_VARIABLE_KEY,
@@ -149,6 +193,7 @@ class TestGetVariable(TestVariableEndpoint):
                     "value": TEST_VARIABLE_VALUE,
                     "description": TEST_VARIABLE_DESCRIPTION,
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
             (
@@ -158,6 +203,7 @@ class TestGetVariable(TestVariableEndpoint):
                     "value": "***",
                     "description": TEST_VARIABLE_DESCRIPTION2,
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
             (
@@ -167,6 +213,7 @@ class TestGetVariable(TestVariableEndpoint):
                     "value": '{"password": "***"}',
                     "description": TEST_VARIABLE_DESCRIPTION3,
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
             (
@@ -176,6 +223,7 @@ class TestGetVariable(TestVariableEndpoint):
                     "value": TEST_VARIABLE_VALUE4,
                     "description": TEST_VARIABLE_DESCRIPTION4,
                     "is_encrypted": True,
+                    "team_name": ANY,
                 },
             ),
             (
@@ -185,6 +233,27 @@ class TestGetVariable(TestVariableEndpoint):
                     "value": TEST_VARIABLE_SEARCH_VALUE,
                     "description": TEST_VARIABLE_SEARCH_DESCRIPTION,
                     "is_encrypted": True,
+                    "team_name": None,
+                },
+            ),
+            (
+                TEST_VARIABLE_KEY5,
+                {
+                    "key": TEST_VARIABLE_KEY5,
+                    "value": '{"config": {"password": "***", "next": {"api_key": "***", "next_again": {"token": "***"}}}}',
+                    "description": TEST_VARIABLE_DESCRIPTION5,
+                    "is_encrypted": True,
+                    "team_name": None,
+                },
+            ),
+            (
+                TEST_VARIABLE_KEY6,
+                {
+                    "key": TEST_VARIABLE_KEY6,
+                    "value": '{"config": "***"}',
+                    "description": TEST_VARIABLE_DESCRIPTION6,
+                    "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
         ],
@@ -209,42 +278,74 @@ class TestGetVariable(TestVariableEndpoint):
         body = response.json()
         assert f"The Variable with key: `{TEST_VARIABLE_KEY}` was not found" == body["detail"]
 
+    def test_get_should_respond_200_with_null_value_when_decryption_fails(self, test_client, session):
+        """
+        Regression test for https://github.com/apache/airflow/pull/65452.
+
+        If the stored value cannot be decrypted (for example after a Fernet key
+        rotation) ``Variable.get_val`` returns ``None``. The endpoint must then
+        respond with HTTP 200 and ``"value": null`` instead of failing with an
+        HTTP 500 caused by response-schema validation.
+        """
+        from cryptography.fernet import InvalidToken
+
+        self.create_variables()
+        with mock.patch("airflow.models.variable.get_fernet") as mock_get_fernet:
+            mock_get_fernet.return_value.decrypt.side_effect = InvalidToken
+            response = test_client.get(f"/variables/{TEST_VARIABLE_KEY}")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            "key": TEST_VARIABLE_KEY,
+            "value": None,
+            "description": TEST_VARIABLE_DESCRIPTION,
+            "is_encrypted": True,
+            "team_name": None,
+        }
+
 
 class TestGetVariables(TestVariableEndpoint):
     @pytest.mark.enable_redact
     @pytest.mark.parametrize(
-        "query_params, expected_total_entries, expected_keys",
+        ("query_params", "expected_total_entries", "expected_keys"),
         [
             # Filters
             (
                 {},
-                5,
+                7,
                 [
                     TEST_VARIABLE_KEY,
                     TEST_VARIABLE_KEY2,
                     TEST_VARIABLE_KEY3,
                     TEST_VARIABLE_KEY4,
                     TEST_VARIABLE_SEARCH_KEY,
+                    TEST_VARIABLE_KEY5,
+                    TEST_VARIABLE_KEY6,
                 ],
             ),
-            ({"limit": 1}, 5, [TEST_VARIABLE_KEY]),
-            ({"limit": 1, "offset": 1}, 5, [TEST_VARIABLE_KEY2]),
+            ({"limit": 1}, 7, [TEST_VARIABLE_KEY]),
+            ({"limit": 1, "offset": 1}, 7, [TEST_VARIABLE_KEY2]),
             # Sort
             (
                 {"order_by": "id"},
-                5,
+                7,
                 [
                     TEST_VARIABLE_KEY,
                     TEST_VARIABLE_KEY2,
                     TEST_VARIABLE_KEY3,
                     TEST_VARIABLE_KEY4,
                     TEST_VARIABLE_SEARCH_KEY,
+                    TEST_VARIABLE_KEY5,
+                    TEST_VARIABLE_KEY6,
                 ],
             ),
             (
                 {"order_by": "-id"},
-                5,
+                7,
                 [
+                    TEST_VARIABLE_KEY6,
+                    TEST_VARIABLE_KEY5,
                     TEST_VARIABLE_SEARCH_KEY,
                     TEST_VARIABLE_KEY4,
                     TEST_VARIABLE_KEY3,
@@ -254,9 +355,11 @@ class TestGetVariables(TestVariableEndpoint):
             ),
             (
                 {"order_by": "key"},
-                5,
+                7,
                 [
+                    TEST_VARIABLE_KEY6,
                     TEST_VARIABLE_KEY3,
+                    TEST_VARIABLE_KEY5,
                     TEST_VARIABLE_KEY2,
                     TEST_VARIABLE_KEY,
                     TEST_VARIABLE_KEY4,
@@ -265,35 +368,41 @@ class TestGetVariables(TestVariableEndpoint):
             ),
             (
                 {"order_by": "-key"},
-                5,
+                7,
                 [
                     TEST_VARIABLE_SEARCH_KEY,
                     TEST_VARIABLE_KEY4,
                     TEST_VARIABLE_KEY,
                     TEST_VARIABLE_KEY2,
+                    TEST_VARIABLE_KEY5,
                     TEST_VARIABLE_KEY3,
+                    TEST_VARIABLE_KEY6,
                 ],
             ),
             # Search
             (
                 {"variable_key_pattern": "~"},
-                5,
+                7,
                 [
                     TEST_VARIABLE_KEY,
                     TEST_VARIABLE_KEY2,
                     TEST_VARIABLE_KEY3,
                     TEST_VARIABLE_KEY4,
                     TEST_VARIABLE_SEARCH_KEY,
+                    TEST_VARIABLE_KEY5,
+                    TEST_VARIABLE_KEY6,
                 ],
             ),
             ({"variable_key_pattern": "search"}, 1, [TEST_VARIABLE_SEARCH_KEY]),
+            ({"variable_key_prefix_pattern": "test_variable_search"}, 1, [TEST_VARIABLE_SEARCH_KEY]),
         ],
     )
     def test_should_respond_200(
         self, session, test_client, query_params, expected_total_entries, expected_keys
     ):
         self.create_variables()
-        response = test_client.get("/variables", params=query_params)
+        with assert_queries_count(3):
+            response = test_client.get("/variables", params=query_params)
 
         assert response.status_code == 200
         body = response.json()
@@ -326,7 +435,7 @@ class TestGetVariables(TestVariableEndpoint):
 class TestPatchVariable(TestVariableEndpoint):
     @pytest.mark.enable_redact
     @pytest.mark.parametrize(
-        "key, body, params, expected_response",
+        ("key", "body", "params", "expected_response"),
         [
             (
                 TEST_VARIABLE_KEY,
@@ -341,6 +450,7 @@ class TestPatchVariable(TestVariableEndpoint):
                     "value": "The new value",
                     "description": "The new description",
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
             (
@@ -349,6 +459,7 @@ class TestPatchVariable(TestVariableEndpoint):
                     "key": TEST_VARIABLE_KEY,
                     "value": "The new value",
                     "description": "The new description",
+                    "team_name": None,
                 },
                 {"update_mask": ["value"]},
                 {
@@ -356,6 +467,7 @@ class TestPatchVariable(TestVariableEndpoint):
                     "value": "The new value",
                     "description": TEST_VARIABLE_DESCRIPTION,
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
             (
@@ -371,6 +483,7 @@ class TestPatchVariable(TestVariableEndpoint):
                     "value": "The new value",
                     "description": TEST_VARIABLE_DESCRIPTION4,
                     "is_encrypted": True,
+                    "team_name": ANY,
                 },
             ),
             (
@@ -386,6 +499,7 @@ class TestPatchVariable(TestVariableEndpoint):
                     "value": "***",
                     "description": TEST_VARIABLE_DESCRIPTION2,
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
             (
@@ -401,6 +515,7 @@ class TestPatchVariable(TestVariableEndpoint):
                     "value": '{"password": "***"}',
                     "description": "new description",
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
         ],
@@ -411,6 +526,48 @@ class TestPatchVariable(TestVariableEndpoint):
         assert response.status_code == 200
         assert response.json() == expected_response
         check_last_log(session, dag_id=None, event="patch_variable", logical_date=None)
+
+    def test_patch_with_team_should_respond_200(self, test_client, session, testing_team):
+        self.create_variables()
+        body = {
+            "key": TEST_VARIABLE_KEY,
+            "value": "The new value",
+            "description": "The new description",
+            "team_name": str(testing_team.name),
+        }
+        response = test_client.patch(f"/variables/{TEST_VARIABLE_KEY}", json=body)
+        assert response.status_code == 200
+        assert response.json() == {
+            "key": TEST_VARIABLE_KEY,
+            "value": "The new value",
+            "description": "The new description",
+            "is_encrypted": True,
+            "team_name": testing_team.name,
+        }
+        check_last_log(session, dag_id=None, event="patch_variable", logical_date=None)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            ["a", "b"],
+            {"name": "test", "id": 123, "active": True},
+            42,
+            4.2,
+            True,
+            None,
+        ],
+        ids=["list", "dict", "int", "float", "bool", "none"],
+    )
+    def test_patch_non_string_json_value_round_trips(self, test_client, value):
+        """Non-string JSON values must be stored as valid JSON, not raise a 500 (issue #71010)."""
+        self.create_variables()
+        body = {"key": TEST_VARIABLE_KEY, "value": value, "description": TEST_VARIABLE_DESCRIPTION}
+
+        response = test_client.patch(f"/variables/{TEST_VARIABLE_KEY}", json=body)
+
+        assert response.status_code == 200
+        assert json.loads(response.json()["value"]) == value
+        assert Variable.get(TEST_VARIABLE_KEY, deserialize_json=True) == value
 
     def test_patch_should_respond_400(self, test_client):
         response = test_client.patch(
@@ -444,11 +601,43 @@ class TestPatchVariable(TestVariableEndpoint):
         body = response.json()
         assert f"The Variable with key: `{TEST_VARIABLE_KEY}` was not found" == body["detail"]
 
+    @conf_vars({("core", "multi_team"): "False"})
+    def test_patch_rejects_team_name_when_multi_team_disabled(self, test_client):
+        body = {
+            "key": TEST_VARIABLE_KEY,
+            "value": "The new value",
+            "description": "The new description",
+            "team_name": "test_team",
+        }
+        response = test_client.patch(f"/variables/{TEST_VARIABLE_KEY}", json=body)
+        assert response.status_code == 422
+        assert (
+            "team_name cannot be set when multi_team mode is disabled. Please contact your administrator."
+            in response.json()["detail"][0]["msg"]
+        )
+
+    @pytest.mark.enable_redact
+    def test_patch_with_update_mask_description_only(self, test_client, session):
+        """PATCH with update_mask=['description'] should only update description, keeping value unchanged."""
+        self.create_variables()
+        response = test_client.patch(
+            f"/variables/{TEST_VARIABLE_KEY}",
+            json={
+                "key": TEST_VARIABLE_KEY,
+                "value": "ignored_value",
+                "description": "updated description",
+            },
+            params={"update_mask": ["description"]},
+        )
+        assert response.status_code == 200
+        assert response.json()["description"] == "updated description"
+        assert response.json()["key"] == TEST_VARIABLE_KEY
+
 
 class TestPostVariable(TestVariableEndpoint):
     @pytest.mark.enable_redact
     @pytest.mark.parametrize(
-        "body, expected_response",
+        ("body", "expected_response"),
         [
             (
                 {
@@ -461,6 +650,7 @@ class TestPostVariable(TestVariableEndpoint):
                     "value": "new variable value",
                     "description": "new variable description",
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
             (
@@ -474,6 +664,7 @@ class TestPostVariable(TestVariableEndpoint):
                     "value": "***",
                     "description": "another password",
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
             (
@@ -487,6 +678,7 @@ class TestPostVariable(TestVariableEndpoint):
                     "value": '{"password": "***"}',
                     "description": "some description",
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
             (
@@ -500,6 +692,7 @@ class TestPostVariable(TestVariableEndpoint):
                     "value": "",
                     "description": "some description",
                     "is_encrypted": True,
+                    "team_name": None,
                 },
             ),
         ],
@@ -509,6 +702,49 @@ class TestPostVariable(TestVariableEndpoint):
         response = test_client.post("/variables", json=body)
         assert response.status_code == 201
         assert response.json() == expected_response
+        check_last_log(session, dag_id=None, event="post_variable", logical_date=None)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            ["a", "b"],
+            {"name": "test", "id": 123, "active": True},
+            42,
+            4.2,
+            True,
+            None,
+        ],
+        ids=["list", "dict", "int", "float", "bool", "none"],
+    )
+    def test_post_non_string_json_value_round_trips(self, test_client, value):
+        """Non-string JSON values must be stored as valid JSON, not a Python repr (issue #71010)."""
+        body = {"key": "non_string_value", "value": value, "description": "non-string JSON value"}
+
+        response = test_client.post("/variables", json=body)
+
+        assert response.status_code == 201
+        assert json.loads(response.json()["value"]) == value
+        stored_raw = Variable.get("non_string_value")
+        assert json.loads(stored_raw) == value
+        assert Variable.get("non_string_value", deserialize_json=True) == value
+
+    def test_post_with_team_should_respond_201(self, test_client, testing_team, session):
+        self.create_variables()
+        body = {
+            "key": "new variable key",
+            "value": "new variable value",
+            "description": "new variable description",
+            "team_name": str(testing_team.name),
+        }
+        response = test_client.post("/variables", json=body)
+        assert response.status_code == 201
+        assert response.json() == {
+            "key": "new variable key",
+            "value": "new variable value",
+            "description": "new variable description",
+            "is_encrypted": True,
+            "team_name": str(testing_team.name),
+        }
         check_last_log(session, dag_id=None, event="post_variable", logical_date=None)
 
     def test_post_should_respond_401(self, unauthenticated_test_client):
@@ -569,6 +805,21 @@ class TestPostVariable(TestVariableEndpoint):
             ]
         }
 
+    @conf_vars({("core", "multi_team"): "False"})
+    def test_post_rejects_team_name_when_multi_team_disabled(self, test_client):
+        body = {
+            "key": "new variable key",
+            "value": "new variable value",
+            "description": "new variable description",
+            "team_name": "test_team",
+        }
+        response = test_client.post("/variables", json=body)
+        assert response.status_code == 422
+        assert (
+            "team_name cannot be set when multi_team mode is disabled. Please contact your administrator."
+            in response.json()["detail"][0]["msg"]
+        )
+
     @pytest.mark.parametrize(
         "body",
         [
@@ -591,7 +842,7 @@ class TestPostVariable(TestVariableEndpoint):
 class TestBulkVariables(TestVariableEndpoint):
     @pytest.mark.enable_redact
     @pytest.mark.parametrize(
-        "actions, expected_results",
+        ("actions", "expected_results"),
         [
             pytest.param(
                 {
@@ -744,6 +995,81 @@ class TestBulkVariables(TestVariableEndpoint):
                     }
                 },
                 id="test_update_not_found",
+            ),
+            pytest.param(
+                {
+                    "actions": [
+                        {
+                            "action": "update",
+                            "entities": [
+                                {
+                                    "key": "test_variable_key",
+                                    "value": "update_mask_value",
+                                    "description": "Updated variable 1",
+                                }
+                            ],
+                            "update_mask": ["value"],
+                            "action_on_non_existence": "fail",
+                        }
+                    ]
+                },
+                {"update": {"success": ["test_variable_key"], "errors": []}},
+                id="test_successful_update_mask",
+            ),
+            pytest.param(
+                {
+                    "actions": [
+                        {
+                            "action": "update",
+                            "entities": [
+                                {
+                                    "key": "test_variable_key",
+                                    "value": "new_value",
+                                    "description": "Updated description",
+                                }
+                            ],
+                            "update_mask": ["value"],
+                            "action_on_non_existence": "fail",
+                        }
+                    ]
+                },
+                {
+                    "update": {
+                        "success": ["test_variable_key"],
+                        "errors": [],
+                    }
+                },
+                id="test_variable_update_with_valid_update_mask",
+            ),
+            pytest.param(
+                {
+                    "actions": [
+                        {
+                            "action": "update",
+                            "entities": [
+                                {
+                                    "key": "test_variable_key",
+                                    "value": "new_value",
+                                    "description": "Updated description",
+                                }
+                            ],
+                            "update_mask": ["key", "value"],
+                            "action_on_non_existence": "fail",
+                        }
+                    ]
+                },
+                {
+                    "update": {
+                        "success": [],
+                        "errors": [
+                            {
+                                "error": "Update not allowed: the following fields are immutable and cannot be modified: {'key'}",
+                                "status_code": 400,
+                            }
+                        ],
+                    }
+                },
+                id="test_bulk_update_should_fail_on_restricted_key",
             ),
             pytest.param(
                 {
@@ -1064,6 +1390,38 @@ class TestBulkVariables(TestVariableEndpoint):
                 },
                 id="test_repeated_actions",
             ),
+            pytest.param(
+                {
+                    "actions": [
+                        {
+                            "action": "create",
+                            "entities": [
+                                {"key": "var1", "value": "initial", "description": "Initial Description"}
+                            ],
+                            "action_on_existence": "fail",
+                        },
+                        {
+                            "action": "update",
+                            "entities": [
+                                {"key": "var1", "value": "updated", "description": "Updated Description"}
+                            ],
+                            "update_mask": ["value"],
+                            "action_on_non_existence": "fail",
+                        },
+                        {
+                            "action": "delete",
+                            "entities": ["var1"],
+                            "action_on_non_existence": "fail",
+                        },
+                    ]
+                },
+                {
+                    "create": {"success": ["var1"], "errors": []},
+                    "update": {"success": ["var1"], "errors": []},
+                    "delete": {"success": ["var1"], "errors": []},
+                },
+                id="test_variable_dependent_actions_with_update_mask",
+            ),
         ],
     )
     def test_bulk_variables(self, test_client, actions, expected_results, session):
@@ -1075,7 +1433,7 @@ class TestBulkVariables(TestVariableEndpoint):
         check_last_log(session, dag_id=None, event="bulk_variables", logical_date=None)
 
     @pytest.mark.parametrize(
-        "entity_key, entity_value, entity_description",
+        ("entity_key", "entity_value", "entity_description"),
         [
             (
                 "my_dict_var_param",
@@ -1084,11 +1442,15 @@ class TestBulkVariables(TestVariableEndpoint):
             ),
             ("my_list_var_param", ["alpha", 42, False, {"nested": "item param"}], "A list value (param)"),
             ("my_string_var_param", "plain string param", "A plain string (param)"),
+            ("my_bool_var_param", True, "A bool value (param)"),
+            ("my_none_var_param", None, "A null value (param)"),
         ],
         ids=[
             "dict_variable",
             "list_variable",
             "string_variable",
+            "bool_variable",
+            "none_variable",
         ],
     )
     def test_bulk_create_entity_serialization(
@@ -1109,19 +1471,45 @@ class TestBulkVariables(TestVariableEndpoint):
         response = test_client.patch("/variables", json=actions)
         assert response.status_code == 200
 
-        if isinstance(entity_value, (dict, list)):
+        if isinstance(entity_value, str):
+            # Strings are stored verbatim; a plain non-JSON string is not deserializable.
+            retrieved_value_raw = Variable.get(entity_key, deserialize_json=False)
+            assert retrieved_value_raw == entity_value
+
+            with pytest.raises(json.JSONDecodeError):
+                Variable.get(entity_key, deserialize_json=True)
+        else:
             retrieved_value_deserialized = Variable.get(entity_key, deserialize_json=True)
             assert retrieved_value_deserialized == entity_value
             retrieved_value_raw_string = Variable.get(entity_key, deserialize_json=False)
             assert retrieved_value_raw_string == json.dumps(entity_value, indent=2)
-        else:
-            retrieved_value_raw = Variable.get(entity_key, deserialize_json=False)
-            assert retrieved_value_raw == str(entity_value)
-
-            with pytest.raises(json.JSONDecodeError):
-                Variable.get(entity_key, deserialize_json=True)
 
         check_last_log(session, dag_id=None, event="bulk_variables", logical_date=None)
+
+    def test_bulk_update_non_string_json_value_round_trips(self, test_client):
+        """A non-string value in bulk update must not 500 the whole request (issue #71010)."""
+        self.create_variables()
+        actions = {
+            "actions": [
+                {
+                    "action": "update",
+                    "entities": [
+                        {
+                            "key": TEST_VARIABLE_KEY,
+                            "value": {"nested": [1, 2, True, None]},
+                            "description": TEST_VARIABLE_DESCRIPTION,
+                        }
+                    ],
+                    "action_on_non_existence": "fail",
+                }
+            ]
+        }
+
+        response = test_client.patch("/variables", json=actions)
+
+        assert response.status_code == 200
+        assert response.json()["update"] == {"success": [TEST_VARIABLE_KEY], "errors": []}
+        assert Variable.get(TEST_VARIABLE_KEY, deserialize_json=True) == {"nested": [1, 2, True, None]}
 
     def test_bulk_variables_should_respond_401(self, unauthenticated_test_client):
         response = unauthenticated_test_client.patch("/variables", json={})
@@ -1142,3 +1530,78 @@ class TestBulkVariables(TestVariableEndpoint):
             },
         )
         assert response.status_code == 403
+
+    @conf_vars({("core", "multi_team"): "False"})
+    def test_bulk_rejects_team_name_when_multi_team_is_disabled(self, test_client):
+        actions = {
+            "actions": [
+                {
+                    "action": "create",
+                    "entities": [
+                        {
+                            "key": "var_1",
+                            "value": "value_1",
+                            "description": "description",
+                        },
+                        {
+                            "key": "var_2",
+                            "value": "value_2",
+                            "description": "description_2",
+                            "team_name": "test_team",
+                        },
+                    ],
+                },
+                {
+                    "action": "update",
+                    "entities": [
+                        {
+                            "key": "var_3",
+                            "value": "value_3",
+                            "description": "updated_description",
+                            "team_name": "test_team",
+                        },
+                        {
+                            "key": "var_4",
+                            "value": "value_4",
+                            "description": "updated_description_2",
+                        },
+                    ],
+                },
+            ]
+        }
+        response = test_client.patch("/variables", json=actions)
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+
+        assert all(
+            "team_name cannot be set when multi_team mode is disabled. Please contact your administrator."
+            in err["msg"]
+            for err in detail
+        ), f"Unexpected errors in detail: {detail}"
+
+        expected_error_keys = {err["input"]["key"] for err in detail}
+        assert sorted(expected_error_keys) == ["var_2", "var_3"]
+
+    @pytest.mark.parametrize("num_variables", [1, 25])
+    def test_bulk_delete_resolves_existence_in_single_query(self, session, num_variables):
+        """Bulk delete looks up all targeted variables in one query, not one per key (no N+1)."""
+        keys = [f"bulk_delete_var_{i}" for i in range(num_variables)]
+        for key in keys:
+            Variable.set(key=key, value="value", session=session)
+        session.commit()
+
+        request = BulkBody[VariableBody].model_validate(
+            {"actions": [{"action": "delete", "entities": keys, "action_on_non_existence": "skip"}]}
+        )
+        service = BulkVariableService(session=session, request=request)
+
+        # Only the single existence-lookup SELECT runs here; deletes flush later on commit.
+        with assert_queries_count(1):
+            response = service.handle_request()
+
+        assert response.delete is not None
+        assert sorted(response.delete.success) == sorted(keys)
+
+        session.commit()
+        assert session.scalars(select(Variable.key).where(Variable.key.in_(keys))).all() == []

@@ -30,6 +30,7 @@ def get_provider_info():
             {
                 "integration-name": "Apache Kylin",
                 "external-doc-url": "https://kylin.apache.org/",
+                "how-to-guide": ["/docs/apache-airflow-providers-apache-kylin/operators.rst"],
                 "logo": "/docs/integration-logos/kylin.png",
                 "tags": ["apache"],
             }
@@ -49,6 +50,7 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.apache.kylin.hooks.kylin.KylinHook",
+                "hook-name": "Apache Kylin",
                 "connection-type": "kylin",
             }
         ],

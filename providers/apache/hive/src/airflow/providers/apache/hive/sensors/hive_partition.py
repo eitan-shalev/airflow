@@ -21,10 +21,10 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from airflow.providers.apache.hive.hooks.hive import HiveMetastoreHook
-from airflow.providers.apache.hive.version_compat import BaseSensorOperator
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class HivePartitionSensor(BaseSensorOperator):
@@ -63,11 +63,9 @@ class HivePartitionSensor(BaseSensorOperator):
         **kwargs: Any,
     ):
         super().__init__(poke_interval=poke_interval, **kwargs)
-        if not partition:
-            partition = "ds='{{ ds }}'"
         self.metastore_conn_id = metastore_conn_id
         self.table = table
-        self.partition = partition
+        self.partition = partition or "ds='{{ ds }}'"
         self.schema = schema
 
     def poke(self, context: Context) -> bool:

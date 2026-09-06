@@ -26,9 +26,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from attrs import define
 from openlineage.client.utils import RedactMixin
-from pkg_resources import parse_version
+from packaging.version import parse as parse_version
 
 from airflow.providers.common.compat.assets import Asset
+from airflow.providers.common.compat.sdk import timezone
 from airflow.providers.openlineage.plugins.facets import AirflowDebugRunFacet
 from airflow.providers.openlineage.utils.utils import (
     DagInfo,
@@ -53,9 +54,6 @@ from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V
 
 if AIRFLOW_V_3_1_PLUS:
     from airflow.models.dag import get_next_data_interval
-    from airflow.sdk import timezone
-else:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
 
 if AIRFLOW_V_3_1_PLUS:
     from airflow.sdk._shared.secrets_masker import DEFAULT_SENSITIVE_FIELDS, SecretsMasker
@@ -70,11 +68,10 @@ else:
         SecretsMasker,
     )
 
+from airflow.providers.common.compat.sdk import DAG
+
 if AIRFLOW_V_3_0_PLUS:
-    from airflow.sdk import DAG
     from airflow.utils.types import DagRunTriggeredByType
-else:
-    from airflow import DAG
 
 
 class SafeStrDict(dict):
@@ -328,9 +325,7 @@ def test_is_operator_disabled(mock_disabled_operators):
     assert is_operator_disabled(op) is True
 
 
-@patch("airflow.providers.openlineage.conf.include_full_task_info")
-def test_includes_full_task_info(mock_include_full_task_info):
-    mock_include_full_task_info.return_value = True
+def test_includes_full_task_info():
     # There should be no 'bash_command' in excludes and it's not in includes - so
     # it's a good choice for checking TaskInfo vs TaskInfoComplete
     assert (
@@ -341,13 +336,12 @@ def test_includes_full_task_info(mock_include_full_task_info):
             MagicMock(),
             BashOperator(task_id="bash_op", bash_command="sleep 1"),
             MagicMock(),
+            include_full_task_info=True,
         )["airflow"].task
     )
 
 
-@patch("airflow.providers.openlineage.conf.include_full_task_info")
-def test_does_not_include_full_task_info(mock_include_full_task_info):
-    mock_include_full_task_info.return_value = False
+def test_does_not_include_full_task_info():
     # There should be no 'bash_command' in excludes and it's not in includes - so
     # it's a good choice for checking TaskInfo vs TaskInfoComplete
     assert (
@@ -358,7 +352,73 @@ def test_does_not_include_full_task_info(mock_include_full_task_info):
             MagicMock(),
             BashOperator(task_id="bash_op", bash_command="sleep 1"),
             MagicMock(),
+            include_full_task_info=False,
         )["airflow"].task
+    )
+
+
+@pytest.mark.skipif(
+    not AIRFLOW_V_3_0_PLUS, reason="__init_kwargs is an Airflow 3 dataclass implementation detail"
+)
+def test_full_task_info_excludes_init_kwargs():
+    """TaskInfoComplete must not expose _BaseOperator__init_kwargs.
+
+    That field holds the raw DAG and TaskGroup objects passed to __init__, which are attrs
+    classes with circular references (DAG -> TaskGroup -> DAG). Including them causes
+    RecursionError in attrs.asdict during OpenLineage event emission.
+    """
+    with DAG("test_dag", start_date=datetime.datetime(2025, 1, 1)):
+        op = BashOperator(task_id="bash_op", bash_command="sleep 1")
+    task_dict = get_airflow_run_facet(
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        op,
+        MagicMock(),
+        include_full_task_info=True,
+    )["airflow"].task
+    assert "_BaseOperator__init_kwargs" not in task_dict
+
+
+@pytest.mark.skipif(
+    not AIRFLOW_V_3_0_PLUS, reason="DAG and TaskGroup are attrs classes with circular refs in Airflow 3"
+)
+def test_full_task_info_no_raw_attrs_objects_in_dag_context():
+    """No raw attrs objects may appear (recursively) in TaskInfoComplete when the operator is part of a DAG.
+
+    Attrs objects with circular back-references (DAG.task_group -> TaskGroup.dag -> ...) cause
+    RecursionError in attrs.asdict when the OL client serialises the RunEvent.
+    """
+    import attrs as _attrs
+
+    with DAG("test_dag", start_date=datetime.datetime(2025, 1, 1)):
+        op = BashOperator(task_id="bash_op", bash_command="sleep 1")
+    task_dict = get_airflow_run_facet(
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        op,
+        MagicMock(),
+        include_full_task_info=True,
+    )["airflow"].task
+
+    def _find_attrs_objs(obj, depth=0):
+        if depth > 10:
+            return []
+        if _attrs.has(type(obj)):
+            return [obj]
+        found = []
+        if isinstance(obj, dict):
+            for v in obj.values():
+                found.extend(_find_attrs_objs(v, depth + 1))
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                found.extend(_find_attrs_objs(v, depth + 1))
+        return found
+
+    raw_attrs = _find_attrs_objs(task_dict)
+    assert not raw_attrs, (
+        f"TaskInfoComplete contains raw attrs objects that would cause RecursionError: {raw_attrs}"
     )
 
 

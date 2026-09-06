@@ -146,6 +146,25 @@ class TestEmail:
         assert [mail_to] == recipients
         assert msg["To"] == ",".join(recipients)
 
+    def test_build_mime_message_escapes_attachment_filename(self, tmp_path):
+        # A quote in the filename must not break out of the quoted
+        # Content-Disposition value and inject extra parameters.
+        malicious = 'report.txt"; x-evil="1'
+        attachment = tmp_path / malicious
+        attachment.write_bytes(b"data")
+
+        msg, _ = email.build_mime_message(
+            mail_from="from@example.com",
+            to="to@example.com",
+            subject="subject",
+            html_content="<html></html>",
+            files=[os.fspath(attachment)],
+        )
+
+        part = msg.get_payload()[-1]
+        assert part.get_filename() == malicious
+        assert "x-evil" not in dict(part.get_params(header="Content-Disposition"))
+
 
 @pytest.mark.db_test
 class TestEmailSmtp:
@@ -324,7 +343,7 @@ class TestEmailSmtp:
             port=conf.getint("smtp", "SMTP_PORT"),
             timeout=conf.getint("smtp", "SMTP_TIMEOUT"),
         )
-        assert mock_smtp.call_count == conf.getint("smtp", "SMTP_RETRY_LIMIT")
+        assert mock_smtp.call_count == conf.getint("smtp", "SMTP_RETRY_LIMIT") + 1
         assert not mock_smtp_ssl.called
         assert not mock_smtp.return_value.starttls.called
         assert not mock_smtp.return_value.login.called
@@ -348,7 +367,7 @@ class TestEmailSmtp:
             context=create_default_context.return_value,
         )
         assert create_default_context.called
-        assert mock_smtp_ssl.call_count == conf.getint("smtp", "SMTP_RETRY_LIMIT")
+        assert mock_smtp_ssl.call_count == conf.getint("smtp", "SMTP_RETRY_LIMIT") + 1
         assert not mock_smtp.called
         assert not mock_smtp_ssl.return_value.starttls.called
         assert not mock_smtp_ssl.return_value.login.called
@@ -377,7 +396,7 @@ class TestEmailSmtp:
             host=conf.get("smtp", "SMTP_HOST"), port=conf.getint("smtp", "SMTP_PORT"), timeout=custom_timeout
         )
         assert not mock_smtp_ssl.called
-        assert mock_smtp.call_count == 10
+        assert mock_smtp.call_count == custom_retry_limit + 1
 
     @mock.patch("smtplib.SMTP_SSL")
     @mock.patch("smtplib.SMTP")

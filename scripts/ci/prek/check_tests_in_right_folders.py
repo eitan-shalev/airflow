@@ -17,7 +17,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.10,<3.11"
 # dependencies = [
 #   "rich>=13.6.0",
 # ]
@@ -26,9 +26,7 @@ from __future__ import annotations
 
 import re
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))
 from common_prek_utils import console, initialize_breeze_prek
 
 initialize_breeze_prek(__name__, __file__)
@@ -61,16 +59,20 @@ POSSIBLE_TEST_FOLDERS = [
     "listeners",
     "logging",
     "macros",
+    "migrations",
     "models",
     "notifications",
+    "observability",
     "operators",
     "otel",
     "plugins",
     "providers",
+    "partition_mappers",
     "secrets",
     "security",
     "sensors",
     "serialization",
+    "state",
     "task",
     "template",
     "test_utils",
@@ -83,20 +85,16 @@ POSSIBLE_TEST_FOLDERS = [
 ]
 
 EXCEPTIONS = [
-    "airflow-core/tests/__init__.py",
-    "airflow-core/tests/unit/__init__.py",
-    "airflow-core/tests/system/__init__.py",
-    "airflow-core/tests/system/conftest.py",
-    "airflow-core/tests/system/example_empty.py",
-    "airflow-core/tests/integration/__init__.py",
-    "airflow-core/tests/conftest.py",
+    "tests/system/conftest.py",
+    "tests/system/example_empty.py",
+    "tests/conftest.py",
 ]
 
 if __name__ == "__main__":
     files = sys.argv[1:]
 
-    MATCH_TOP_LEVEL_TEST_FILES = re.compile(r"airflow-core/tests/unit/[^/]+\.py")
-    files = [file for file in files if file not in EXCEPTIONS]
+    MATCH_TOP_LEVEL_TEST_FILES = re.compile(r"tests/unit/[^/]+\.py")
+    files = [file for file in files if file not in EXCEPTIONS and not file.endswith("/__init__.py")]
 
     errors = False
     top_level_files = [file for file in files if MATCH_TOP_LEVEL_TEST_FILES.match(file)]
@@ -108,9 +106,9 @@ if __name__ == "__main__":
         errors = True
     for file in files:
         if not any(
-            file.startswith(f"airflow-core/tests/unit/{folder}/")
-            or file.startswith(f"airflow-core/tests/integration/{folder}/")
-            or file.startswith(f"airflow-core/tests/system/{folder}/")
+            file.startswith(f"tests/unit/{folder}/")
+            or file.startswith(f"tests/integration/{folder}/")
+            or file.startswith(f"tests/system/{folder}/")
             for folder in POSSIBLE_TEST_FOLDERS
         ):
             console.print(

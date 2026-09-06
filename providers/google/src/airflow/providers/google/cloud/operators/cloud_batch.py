@@ -22,8 +22,7 @@ from typing import TYPE_CHECKING
 
 from google.cloud.batch_v1 import Job, Task
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, conf
 from airflow.providers.google.cloud.hooks.cloud_batch import CloudBatchHook
 from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseOperator
 from airflow.providers.google.cloud.triggers.cloud_batch import CloudBatchJobFinishedTrigger
@@ -31,7 +30,7 @@ from airflow.providers.google.cloud.triggers.cloud_batch import CloudBatchJobFin
 if TYPE_CHECKING:
     from google.api_core import operation
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class CloudBatchSubmitJobOperator(GoogleCloudBaseOperator):
@@ -58,7 +57,8 @@ class CloudBatchSubmitJobOperator(GoogleCloudBaseOperator):
 
     """
 
-    template_fields = ("project_id", "region", "gcp_conn_id", "impersonation_chain", "job_name")
+    template_fields = ("project_id", "region", "gcp_conn_id", "impersonation_chain", "job_name", "job")
+    template_fields_renderers = {"job": "json"}
 
     def __init__(
         self,
@@ -84,6 +84,12 @@ class CloudBatchSubmitJobOperator(GoogleCloudBaseOperator):
         self.impersonation_chain = impersonation_chain
         self.deferrable = deferrable
         self.polling_period_seconds = polling_period_seconds
+
+    def prepare_template(self) -> None:
+        # Normalize Job protobuf to dict so Airflow's template renderer can descend
+        # into nested fields (e.g. runnable.container.commands). See #37217.
+        if isinstance(self.job, Job):
+            self.job = Job.to_dict(self.job)
 
     def execute(self, context: Context):
         hook: CloudBatchHook = CloudBatchHook(self.gcp_conn_id, self.impersonation_chain)
@@ -244,7 +250,7 @@ class CloudBatchListTasksOperator(GoogleCloudBaseOperator):
     :param job_name: Required. The name of the job for which to list tasks.
     :param gcp_conn_id: The connection ID used to connect to Google Cloud.
     :param filter: The filter based on which to list the jobs. If left empty, all the jobs are listed.
-    :param group_name: The name of the group that owns the task. By default it's `group0`.
+    :param group_name: The name of the group that owns the task. By default, it's `group0`.
     :param limit: The number of tasks to list.
         If left empty, all the tasks matching the filter will be returned.
     :param impersonation_chain: Optional service account to impersonate using short-term

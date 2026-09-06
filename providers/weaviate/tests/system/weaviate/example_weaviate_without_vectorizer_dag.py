@@ -16,7 +16,10 @@
 # under the License.
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pendulum
+from weaviate.classes.config import Configure
 
 try:
     from airflow.sdk import dag, setup, task, teardown
@@ -28,10 +31,17 @@ from airflow.providers.weaviate.operators.weaviate import WeaviateIngestOperator
 
 COLLECTION_NAME = "Weaviate_example_without_vectorizer_collection"
 
+default_args = {
+    "retries": 5,
+    "retry_delay": timedelta(seconds=15),
+    "pool": "weaviate_pool",
+}
+
 
 @dag(
     schedule=None,
     start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
+    default_args=default_args,
     catchup=False,
     tags=["example", "weaviate"],
 )
@@ -50,7 +60,7 @@ def example_weaviate_without_vectorizer_dag():
 
         weaviate_hook = WeaviateHook()
         # collection definition object. Weaviate's autoschema feature will infer properties when importing.
-        weaviate_hook.create_collection(COLLECTION_NAME, vectorizer_config=None)
+        weaviate_hook.create_collection(COLLECTION_NAME, vector_config=Configure.Vectors.self_provided())
 
     @setup
     @task
@@ -117,5 +127,5 @@ example_weaviate_without_vectorizer_dag()
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

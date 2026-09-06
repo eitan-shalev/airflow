@@ -50,24 +50,40 @@ Data Interval
 -------------
 
 Each Dag run in Airflow has an assigned "data interval" that represents the time
-range it operates in. For a Dag scheduled with ``@daily``, for example, each of
-its data interval would start each day at midnight (00:00) and end at midnight
-(24:00).
+range it operates in. How that interval is defined depends on the Dag's
+timetable.
 
-A Dag run is usually scheduled *after* its associated data interval has ended,
-to ensure the run is able to collect all the data within the time period. In
-other words, a run covering the data period of 2020-01-01 generally does not
-start to run until 2020-01-01 has ended, i.e. after 2020-01-02 00:00:00.
+In Airflow 3, a Dag scheduled with a bare cron string such as ``@daily`` uses
+:ref:`CronTriggerTimetable` by default (``[scheduler] create_cron_data_intervals``
+is ``False``). For that timetable, ``data_interval_start`` and
+``data_interval_end`` are the same — the trigger time (for ``@daily``, midnight
+each day). The run is created to execute *at* that time.
+
+If you need a contiguous full-day window instead — for example each run covering
+from midnight to the next midnight — use a data-interval timetable such as
+:ref:`CronDataIntervalTimetable`, or set ``[scheduler] create_cron_data_intervals``
+to ``True``. With that setup, a Dag run is usually scheduled *after* its
+associated data interval has ended, so a run covering 2020-01-01 generally does
+not start until after 2020-01-02 00:00:00.
+
+See :ref:`timetables comparison <Differences between "trigger" and "data interval" timetables>` for a
+side-by-side comparison, including how ``logical_date`` and ``run_id`` differ.
 
 All dates in Airflow are tied to the data interval concept in some way. The
 "logical date" (also called ``execution_date`` in Airflow versions prior to 2.2)
-of a Dag run, for example, denotes the start of the data interval, not when the
-Dag is actually executed.
+of a Dag run is defined by the timetable: for both timetable kinds it is
+``data_interval_start``. For the default (zero-width) trigger timetable that
+equals the trigger time. With a non-zero ``interval=`` on a trigger timetable
+it is ``trigger_time - interval``. For a data-interval timetable it is the
+start of the contiguous window, not when the Dag is actually executed.
 
-Similarly, since the ``start_date`` argument for the Dag and its tasks points to
-the same logical date, it marks the start of *the Dag's first data interval*, not
-when tasks in the Dag will start running. In other words, a Dag run will only be
-scheduled one interval after ``start_date``.
+Similarly, the ``start_date`` argument for the Dag and its tasks marks the
+earliest *trigger time* (``run_after``) the scheduler will create, not when
+tasks start running, and not necessarily the first logical date (see the
+non-zero ``interval=`` case above). A run is only created once the timetable
+reaches that bound. For a data-interval timetable, ``start_date`` is also the
+start of the first data interval, so that first run does not execute until the
+window closes, one schedule period after ``start_date``.
 
 .. tip::
 
@@ -75,6 +91,24 @@ scheduled one interval after ``start_date``.
     logical date, or data interval, see :doc:`../authoring-and-scheduling/timetable`.
     For more information on ``logical date``, see :ref:`concepts-dag-run` and
     :ref:`faq:what-does-execution-date-mean`
+
+Manual Triggering and Data Intervals
+'''''''''''''''''''''''''''''''''''''
+
+When you manually trigger a Dag (for example from the UI, CLI, REST API, or
+``TriggerDagRunOperator``), do not assume the run's ``data_interval`` is
+derived from, or equal to, the supplied ``logical_date``.
+
+For scheduled runs, the timetable defines the data interval directly. For
+manually triggered runs, the resulting ``data_interval`` depends on the
+timetable and the trigger path, and may differ from the run's
+``logical_date``.
+
+If your Dag logic needs the user-specified date for a manual run, use
+``logical_date`` explicitly instead of assuming it matches
+``data_interval_start`` or ``data_interval_end``.
+
+For upgrade guidance, see :ref:`data-interval-manual-triggering`.
 
 Re-run Dag
 ''''''''''
@@ -86,10 +120,10 @@ Dag run fails.
 Catchup
 -------
 
-An Airflow Dag defined with a ``start_date``, possibly an ``end_date``, and a non-asset schedule, defines a series of intervals which the scheduler turns into individual Dag runs and executes.
-By default, Dag runs that have not been run since the last data interval are not created by the scheduler upon activation of a Dag ( Airflow config ``scheduler.catchup_by_default=False``). The scheduler creates a Dag run only for the latest interval.
+An Airflow Dag defined with a ``start_date``, possibly an ``end_date``, and a non-asset schedule, defines a series of scheduled run times which the scheduler turns into individual Dag runs and executes.
+By default, missed scheduled run times between ``start_date`` and "now" are not backfilled when a Dag is activated (Airflow config ``scheduler.catchup_by_default=False``). The timetable instead selects the most recently applicable scheduled run time (for a trigger timetable, typically the latest cron tick that is not after "now" and not before ``start_date``).
 
-If you set ``catchup=True`` in the Dag, the scheduler will kick off a Dag Run for any data interval that has not been run since the last data interval (or has been cleared). This concept is called Catchup.
+If you set ``catchup=True`` in the Dag, the scheduler will kick off a Dag Run for any scheduled run time that has not been run since the last run (or has been cleared). This concept is called Catchup.
 
 If your Dag is not written to handle its catchup (i.e., not limited to the interval, but instead to ``Now`` for instance.),
 then you will want to turn catchup off, which is the default setting or can be done explicitly by setting ``catchup=False`` in the Dag definition, if the default config has been changed for your Airflow environment.
@@ -120,20 +154,40 @@ then you will want to turn catchup off, which is the default setting or can be d
     )
 
 In the example above, if the Dag is picked up by the scheduler daemon on
-2016-01-02 at 6 AM, (or from the command line), a single Dag Run will be created
-with a data between 2016-01-01 and 2016-01-02, and the next one will be created
-just after midnight on the morning of 2016-01-03 with a data interval between
-2016-01-02 and 2016-01-03.
+2016-01-02 at 6 AM (or from the command line), with the Airflow 3 default of
+:ref:`CronTriggerTimetable` for ``@daily`` and ``catchup=False``, the scheduler
+does **not** create runs for every midnight since ``start_date``. Instead it
+creates a single Dag run for the most recent applicable tick — midnight on
+**2016-01-02** — with ``data_interval_start`` and ``data_interval_end`` both
+equal to that trigger time. Because that ``run_after`` is already in the past,
+the run can start immediately. The following tick (midnight on 2016-01-03) is
+only created once that schedule time is reached.
 
-Be aware that using a ``datetime.timedelta`` object as schedule can lead to a different behavior.
-In such a case, the single Dag Run created will cover data between 2016-01-01 06:00 and
-2016-01-02 06:00 (one schedule interval ending now). For a more detailed description of the
-differences between a cron and a delta based schedule, take a look at the
-:ref:`timetables comparison <Differences between the cron and delta data interval timetables>`
+If instead the Dag used a data-interval timetable (for example
+:ref:`CronDataIntervalTimetable`, or ``[scheduler] create_cron_data_intervals=True``),
+the scheduler would immediately create a run for the most recently completed
+interval (2016-01-01 through 2016-01-02), and the next run would cover
+2016-01-02 through 2016-01-03 after that interval ends.
 
-If the ``dag.catchup`` value had been ``True`` instead, the scheduler would have created a Dag Run
-for each completed interval between 2015-12-01 and 2016-01-02 (but not yet one for 2016-01-02,
-as that interval hasn't completed) and the scheduler will execute them sequentially.
+Be aware that using a ``datetime.timedelta`` object as ``schedule`` is not the
+same as a cron string, even though Airflow 3 also defaults timedelta schedules
+to a trigger timetable (:ref:`DeltaTriggerTimetable`, via
+``[scheduler] create_delta_data_intervals``). A delta has no wall-clock boundary
+to snap to, so with ``catchup=False`` the first run lands at pickup time
+(**2016-01-02 06:00** in this example), with ``data_interval_start`` and
+``data_interval_end`` both equal to that moment. If instead you enable the data-interval delta
+timetable (``create_delta_data_intervals=True``), the first run covers one
+schedule interval ending now (2016-01-01 06:00 through 2016-01-02 06:00). For a
+more detailed description of the differences, see
+:ref:`timetables comparison <Differences between "trigger" and "data interval" timetables>` and
+:ref:`cron vs delta data intervals <Differences between the cron and delta data interval timetables>`.
+
+If the ``dag.catchup`` value had been ``True`` instead, the scheduler would have
+created a Dag Run for each scheduled run time between ``start_date`` and "now"
+that had not yet run (or had been cleared).
+With the default trigger timetable that means every midnight from 2015-12-01
+through 2016-01-02 inclusive. With a data-interval timetable, the still-open
+interval that ends at the next midnight is not created yet.
 
 Catchup is also triggered when you turn off a Dag for a specified period and then re-enable it.
 
@@ -165,9 +219,9 @@ For CLI usage, run the command below:
 .. code-block:: bash
 
     airflow backfill create --dag-id DAG_ID \
-        --start-date START_DATE \
-        --end-date END_DATE \
-        --reprocessing-behavior failed \
+        --from-date START_DATE \
+        --to-date END_DATE \
+        --reprocess-behavior failed \
         --max-active-runs 3 \
         --run-backwards \
         --dag-run-conf '{"my": "param"}'
@@ -271,7 +325,8 @@ Example of a parameterized Dag:
 
     parameterized_task = BashOperator(
         task_id="parameterized_task",
-        bash_command="echo value: {{ dag_run.conf['conf1'] }}",
+        bash_command="echo \"here is the message: '$message'\"",
+        env={"message": '{{ dag_run.conf["message"] if dag_run else "" }}'},
         dag=dag,
     )
 

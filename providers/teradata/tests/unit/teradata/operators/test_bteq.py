@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import tempfile
-import unittest
 from unittest import mock
 
 import pytest
@@ -145,12 +144,14 @@ class TestBteqOperator:
 
     def test_template_fields(self):
         # Verify template fields are defined correctly
-        print(BteqOperator.template_fields)
-        assert BteqOperator.template_fields == "sql"
+        assert BteqOperator.template_fields == ("sql",)
 
     def test_execute_raises_if_no_sql_or_file(self):
         op = BteqOperator(task_id="fail_case", teradata_conn_id="td_conn")
-        with pytest.raises(ValueError, match="requires either the 'sql' or 'file_path' parameter"):
+        with pytest.raises(
+            ValueError,
+            match="Failed to execute BTEQ script due to missing required parameters: either 'sql' or 'file_path' must be provided.",
+        ):
             op.execute({})
 
     @mock.patch("airflow.providers.teradata.operators.bteq.is_valid_file", return_value=False)
@@ -160,7 +161,7 @@ class TestBteqOperator:
             file_path="/invalid/path.sql",
             teradata_conn_id="td_conn",
         )
-        with pytest.raises(ValueError, match="is invalid or does not exist"):
+        with pytest.raises(ValueError, match="Failed to execute BTEQ script due to invalid file path"):
             op.execute({})
 
     @mock.patch("airflow.providers.teradata.operators.bteq.is_valid_file", return_value=True)
@@ -175,7 +176,10 @@ class TestBteqOperator:
             bteq_script_encoding="UTF-8",
             teradata_conn_id="td_conn",
         )
-        with pytest.raises(ValueError, match="encoding is different from BTEQ I/O encoding"):
+        with pytest.raises(
+            ValueError,
+            match="Failed to execute BTEQ script because the provided file.*encoding differs from the specified BTEQ I/O encoding",
+        ):
             op.execute({})
 
     @mock.patch("airflow.providers.teradata.operators.bteq.BteqHook.execute_bteq_script")
@@ -252,7 +256,7 @@ class TestBteqOperator:
         mock_execute_bteq_script.assert_called_once()
         assert result == 0
 
-    @mock.patch("airflow.providers.teradata.version_compat.BaseOperator.render_template")
+    @mock.patch("airflow.providers.common.compat.sdk.BaseOperator.render_template")
     def test_render_template_in_sql(self, mock_render):
         op = BteqOperator(task_id="render_test", sql="SELECT * FROM {{ params.table }};")
         mock_render.return_value = "SELECT * FROM my_table;"
@@ -282,7 +286,3 @@ class TestBteqOperator:
         )
         result = op.execute({})
         assert result == 42  # still returns, but caller can fail on RC if desired
-
-
-if __name__ == "__main__":
-    unittest.main()

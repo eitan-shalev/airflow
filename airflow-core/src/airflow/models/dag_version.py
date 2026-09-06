@@ -18,14 +18,17 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
+import sqlalchemy as sa
 import uuid6
-from sqlalchemy import Column, ForeignKey, Integer, UniqueConstraint, select
-from sqlalchemy.orm import joinedload, relationship
-from sqlalchemy_utils import UUIDType
+from sqlalchemy import ForeignKey, Integer, UniqueConstraint, select
+from sqlalchemy.orm import Mapped, joinedload, mapped_column, relationship
 
 from airflow._shared.timezones import timezone
+from airflow.dag_processing.bundles.manager import DagBundlesManager
 from airflow.models.base import Base, StringID
 from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.sqlalchemy import UtcDateTime, with_row_locks
@@ -34,6 +37,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
     from sqlalchemy.sql import Select
 
+
 log = logging.getLogger(__name__)
 
 
@@ -41,12 +45,21 @@ class DagVersion(Base):
     """Model to track the versions of DAGs in the database."""
 
     __tablename__ = "dag_version"
-    id = Column(UUIDType(binary=False), primary_key=True, default=uuid6.uuid7)
-    version_number = Column(Integer, nullable=False, default=1)
-    dag_id = Column(StringID(), ForeignKey("dag.dag_id", ondelete="CASCADE"), nullable=False)
+    id: Mapped[UUID] = mapped_column(sa.Uuid(), primary_key=True, default=uuid6.uuid7)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    dag_id: Mapped[str] = mapped_column(
+        StringID(), ForeignKey("dag.dag_id", ondelete="CASCADE"), nullable=False
+    )
     dag_model = relationship("DagModel", back_populates="dag_versions")
-    bundle_name = Column(StringID(), nullable=True)
-    bundle_version = Column(StringID())
+    bundle_name: Mapped[str | None] = mapped_column(StringID(), nullable=True)
+    bundle_version: Mapped[str | None] = mapped_column(StringID(), nullable=True)
+    version_data: Mapped[dict | None] = mapped_column(sa.JSON(), nullable=True)
+    bundle = relationship(
+        "DagBundleModel",
+        primaryjoin="foreign(DagVersion.bundle_name) == DagBundleModel.name",
+        uselist=False,
+        viewonly=True,
+    )
     dag_code = relationship(
         "DagCode",
         back_populates="dag_version",
@@ -62,8 +75,10 @@ class DagVersion(Base):
         cascade_backrefs=False,
     )
     task_instances = relationship("TaskInstance", back_populates="dag_version")
-    created_at = Column(UtcDateTime, nullable=False, default=timezone.utcnow)
-    last_updated = Column(UtcDateTime, nullable=False, default=timezone.utcnow, onupdate=timezone.utcnow)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=timezone.utcnow)
+    last_updated: Mapped[datetime] = mapped_column(
+        UtcDateTime, nullable=False, default=timezone.utcnow, onupdate=timezone.utcnow
+    )
 
     __table_args__ = (
         UniqueConstraint("dag_id", "version_number", name="dag_id_v_name_v_number_unique_constraint"),
@@ -73,6 +88,22 @@ class DagVersion(Base):
         """Represent the object as a string."""
         return f"<DagVersion {self.dag_id} {self.version}>"
 
+    @property
+    def bundle_url(self) -> str | None:
+        """Render the bundle URL using the joined bundle metadata if available."""
+        # Prefer using the joined bundle relationship when present to avoid extra queries
+        if getattr(self, "bundle", None) is not None and hasattr(self.bundle, "signed_url_template"):
+            return self.bundle.render_url(self.bundle_version)
+
+        # fallback to the deprecated option if the bundle model does not have a signed_url_template
+        # attribute
+        if self.bundle_name is None:
+            return None
+        try:
+            return DagBundlesManager().view_url(self.bundle_name, self.bundle_version)
+        except ValueError:
+            return None
+
     @classmethod
     @provide_session
     def write_dag(
@@ -81,6 +112,7 @@ class DagVersion(Base):
         dag_id: str,
         bundle_name: str,
         bundle_version: str | None = None,
+        version_data: dict | None = None,
         version_number: int = 1,
         session: Session = NEW_SESSION,
     ) -> DagVersion:
@@ -90,6 +122,9 @@ class DagVersion(Base):
         Checks if a version of the DAG exists and increments the version number if it does.
 
         :param dag_id: The DAG ID.
+        :param bundle_name: The bundle name.
+        :param bundle_version: The bundle version string.
+        :param version_data: Optional structured data associated with this version (e.g., S3 manifest).
         :param version_number: The version number.
         :param session: The database session.
         :return: The DagVersion object.
@@ -105,16 +140,21 @@ class DagVersion(Base):
             version_number=version_number,
             bundle_name=bundle_name,
             bundle_version=bundle_version,
+            version_data=version_data,
         )
         log.debug("Writing DagVersion %s to the DB", dag_version)
         session.add(dag_version)
-        session.commit()
         log.debug("DagVersion %s written to the DB", dag_version)
         return dag_version
 
     @classmethod
     def _latest_version_select(
-        cls, dag_id: str, bundle_version: str | None = None, load_dag_model: bool = False
+        cls,
+        dag_id: str,
+        bundle_version: str | None = None,
+        load_dag_model: bool = False,
+        load_bundle_model: bool = False,
+        load_serialized_dag: bool = False,
     ) -> Select:
         """
         Get the select object to get the latest version of the DAG.
@@ -123,13 +163,24 @@ class DagVersion(Base):
         :return: The select object.
         """
         query = select(cls).where(cls.dag_id == dag_id)
-        if bundle_version:
+        if bundle_version is not None:
             query = query.where(cls.bundle_version == bundle_version)
 
         if load_dag_model:
             query = query.options(joinedload(cls.dag_model))
 
-        query = query.order_by(cls.created_at.desc()).limit(1)
+        if load_bundle_model:
+            query = query.options(joinedload(cls.bundle))
+
+        if load_serialized_dag:
+            query = query.options(joinedload(cls.serialized_dag))
+
+        # Order by version_number, not created_at: version_number is monotonic and unique per
+        # dag_id, so it is deterministic even when two versions share a created_at timestamp.
+        # write_dag relies on this select to compute the next version_number; ordering by
+        # created_at could pick a non-max row under a tie and collide with the
+        # (dag_id, version_number) unique constraint.
+        query = query.order_by(cls.version_number.desc()).limit(1)
         return query
 
     @classmethod
@@ -140,6 +191,8 @@ class DagVersion(Base):
         *,
         bundle_version: str | None = None,
         load_dag_model: bool = False,
+        load_bundle_model: bool = False,
+        load_serialized_dag: bool = False,
         session: Session = NEW_SESSION,
     ) -> DagVersion | None:
         """
@@ -148,10 +201,18 @@ class DagVersion(Base):
         :param dag_id: The DAG ID.
         :param session: The database session.
         :param load_dag_model: Whether to load the DAG model.
+        :param load_bundle_model: Whether to load the DagBundle model.
+        :param load_serialized_dag: Whether to eagerly load the serialized DAG.
         :return: The latest version of the DAG or None if not found.
         """
         return session.scalar(
-            cls._latest_version_select(dag_id, bundle_version=bundle_version, load_dag_model=load_dag_model)
+            cls._latest_version_select(
+                dag_id,
+                bundle_version=bundle_version,
+                load_dag_model=load_dag_model,
+                load_bundle_model=load_bundle_model,
+                load_serialized_dag=load_serialized_dag,
+            )
         )
 
     @classmethod
@@ -175,9 +236,21 @@ class DagVersion(Base):
         if version_number:
             version_select_obj = version_select_obj.where(cls.version_number == version_number)
 
-        return session.scalar(version_select_obj.order_by(cls.id.desc()).limit(1))
+        return session.scalar(version_select_obj.order_by(cls.version_number.desc()).limit(1))
 
     @property
     def version(self) -> str:
         """A human-friendly representation of the version."""
         return f"{self.dag_id}-{self.version_number}"
+
+
+def _resolve_version_data(
+    dag_version: DagVersion | None, bundle_version: str | None
+) -> dict[str, Any] | None:
+    """Return a bundle version's ``version_data`` manifest, but only for pinned runs."""
+    # Expose version_data only when the run is pinned (bundle_version set) and a DagVersion is
+    # present, so the bundle initializes against the exact version the run used. Unpinned runs
+    # follow the latest bundle state, and legacy rows have no DagVersion.
+    if dag_version is not None and bundle_version is not None:
+        return dag_version.version_data
+    return None

@@ -22,10 +22,11 @@ Database helpers for Airflow REST API.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Generator, Sequence
 from typing import TYPE_CHECKING, Annotated, Literal, overload
 
 from fastapi import Depends
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -37,13 +38,18 @@ if TYPE_CHECKING:
 
     from airflow.api_fastapi.core_api.base import OrmClause
 
+# Rows a single scan reads. Result sets that fit are counted exactly; wider ones report a floor.
+# Shared by the dashboard's historical metrics and by cursor-paginated listings, which surface an
+# item count without counting every matching row — the point of cursor pagination on large tables.
+EXACT_COUNT_LIMIT = 50_000
 
-def _get_session() -> Session:
+
+def _get_session() -> Generator[Session, None, None]:
     with create_session(scoped=False) as session:
         yield session
 
 
-SessionDep = Annotated[Session, Depends(_get_session)]
+SessionDep = Annotated[Session, Depends(_get_session, scope="function")]
 
 
 def apply_filters_to_select(
@@ -59,7 +65,31 @@ def apply_filters_to_select(
     return statement
 
 
-async def _get_async_session() -> AsyncSession:
+def bounded_total_entries(
+    *,
+    statement: Select,
+    filters: Sequence[OrmClause | None] | None = None,
+    session: Session,
+) -> tuple[int, int]:
+    """
+    Count the rows a cursor-paginated listing matches, reading at most ``EXACT_COUNT_LIMIT``.
+
+    Returns ``(total, limit)`` where ``total`` is ``min(actual_count, EXACT_COUNT_LIMIT)`` — a
+    ``total`` equal to ``limit`` means only that at least that many rows match — and ``limit`` is
+    the cap that was applied, for the caller to surface as ``total_entries_limit``.
+
+    The ``LIMIT`` sits inside the counted subquery so the database stops scanning once the cap is
+    reached, keeping the count cheap on tables that cursor pagination exists to handle. ORDER BY is
+    stripped for the same reason :func:`~airflow.utils.db.get_query_count` strips it: it cannot
+    change a count and only constrains the planner.
+    """
+    statement = apply_filters_to_select(statement=statement, filters=filters)
+    bounded = statement.order_by(None).limit(EXACT_COUNT_LIMIT).subquery()
+    total = session.scalar(select(func.count()).select_from(bounded)) or 0
+    return total, EXACT_COUNT_LIMIT
+
+
+async def _get_async_session() -> AsyncGenerator[AsyncSession, None]:
     async with create_session_async() as session:
         yield session
 
@@ -111,11 +141,6 @@ async def paginated_select_async(
     total_entries = None
     if return_total_entries:
         total_entries = await get_query_count_async(statement, session=session)
-
-    # TODO: Re-enable when permissions are handled. Readable / writable entities,
-    # for instance:
-    # readable_dags = get_auth_manager().get_authorized_dag_ids(user=g.user)
-    # dags_select = dags_select.where(DagModel.dag_id.in_(readable_dags))
 
     statement = apply_filters_to_select(
         statement=statement,
@@ -170,11 +195,6 @@ def paginated_select(
     total_entries = None
     if return_total_entries:
         total_entries = get_query_count(statement, session=session)
-
-    # TODO: Re-enable when permissions are handled. Readable / writable entities,
-    # for instance:
-    # readable_dags = get_auth_manager().get_authorized_dag_ids(user=g.user)
-    # dags_select = dags_select.where(DagModel.dag_id.in_(readable_dags))
 
     statement = apply_filters_to_select(statement=statement, filters=[order_by, offset, limit])
 

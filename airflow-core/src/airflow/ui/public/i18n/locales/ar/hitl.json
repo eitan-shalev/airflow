@@ -1,5 +1,7 @@
 {
   "filters": {
+    "body": "المحتوى",
+    "createdAt": "تم الإنشاء في",
     "response": {
       "all": "الكل",
       "pending": "قيد الانتظار",
@@ -20,13 +22,29 @@
   "requiredActionCount_zero": "لا توجد إجراءات مطلوبة",
   "requiredActionState": "حالة الإجراء المطلوب",
   "response": {
+    "created": "تم إنشاء الاستجابة في ",
     "error": "فشل في الاستجابة",
     "optionsDescription": "اختر الخيارات لهذا مثيل المهمة",
     "optionsLabel": "الخيارات",
     "received": "تم استلام الاستجابة في ",
     "respond": "الرد",
+    "responded_by_user_name": "أجاب بواسطة (اسم المستخدم)",
     "success": "تمت الاستجابة بنجاح ل{{taskId}}",
     "title": "مثيل مهمة يدوي - {{taskId}}"
+  },
+  "review": {
+    "detail": {
+      "selectRequiredAction": "اختر إجراءً مطلوباً لعرض التفاصيل"
+    },
+    "list": {
+      "completedRequiredActions": "الإجراءات المطلوبة المكتملة ({{count}})",
+      "loadError": "تعذّر تحميل الإجراءات المطلوبة",
+      "loadingActions": "جارٍ تحميل الإجراءات المطلوبة...",
+      "pendingRequiredActions": "الإجراءات المطلوبة قيد الانتظار ({{count}})"
+    },
+    "openReviewDrawer": "فتح لوحة المراجعة",
+    "pageLimitHint": "تُعرض هنا الإجراءات الأولى فقط. استخدم \"$t(review.viewAll)\" لعرضها جميعاً.",
+    "viewAll": "عرض جميع الإجراءات المطلوبة"
   },
   "state": {
     "approvalReceived": "تم استلام الموافقة",

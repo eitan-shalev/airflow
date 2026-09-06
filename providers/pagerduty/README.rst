@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-pagerduty``
 
-Release: ``5.0.2``
+Release: ``5.2.6``
 
 
 `Pagerduty <https://www.pagerduty.com/>`__
@@ -36,7 +36,7 @@ This is a provider package for ``pagerduty`` provider. All classes for this prov
 are in ``airflow.providers.pagerduty`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-pagerduty/5.0.2/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-pagerduty/5.2.6/>`_.
 
 Installation
 ------------
@@ -45,7 +45,7 @@ You can install this package on top of an existing Airflow installation (see ``R
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-pagerduty``
 
-The package supports the following python versions: 3.10,3.11,3.12,3.13
+The package supports the following python versions: 3.10,3.11,3.12,3.13,3.14
 
 Requirements
 ------------
@@ -53,29 +53,11 @@ Requirements
 ==========================================  ==================
 PIP package                                 Version required
 ==========================================  ==================
-``apache-airflow``                          ``>=2.10.0``
-``apache-airflow-providers-common-compat``  ``>=1.6.1``
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.10.1``
+``apache-airflow-providers-http``
 ``pagerduty``                               ``>=2.3.0``
 ==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
-
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified providers in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
-
-.. code-block:: bash
-
-    pip install apache-airflow-providers-pagerduty[common.compat]
-
-
-==================================================================================================================  =================
-Dependent package                                                                                                   Extra
-==================================================================================================================  =================
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_  ``common.compat``
-==================================================================================================================  =================
-
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-pagerduty/5.0.2/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-pagerduty/5.2.6/changelog.html>`_.

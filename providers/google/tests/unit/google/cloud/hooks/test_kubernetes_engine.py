@@ -28,9 +28,10 @@ import pytest_asyncio
 from google.cloud.container_v1 import ClusterManagerAsyncClient
 from google.cloud.container_v1.types import Cluster
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.kubernetes_engine import (
     GKEAsyncHook,
+    GKEClusterConnection,
     GKEHook,
     GKEKubernetesAsyncHook,
     GKEKubernetesHook,
@@ -155,11 +156,16 @@ class TestGKEHookClient:
     def setup_method(self):
         self.gke_hook = GKEHook(location=GKE_ZONE)
 
+    @mock.patch(GKE_STRING.format("GKEHook.get_client_options"))
     @mock.patch(GKE_STRING.format("GKEHook.get_credentials"))
     @mock.patch(GKE_STRING.format("ClusterManagerClient"))
-    def test_gke_cluster_client_creation(self, mock_client, mock_get_creds):
+    def test_gke_cluster_client_creation(self, mock_client, mock_get_creds, mock_get_client_options):
         result = self.gke_hook.get_cluster_manager_client()
-        mock_client.assert_called_once_with(credentials=mock_get_creds.return_value, client_info=CLIENT_INFO)
+        mock_client.assert_called_once_with(
+            credentials=mock_get_creds.return_value,
+            client_info=CLIENT_INFO,
+            client_options=mock_get_client_options.return_value,
+        )
         assert mock_client.return_value == result
         assert self.gke_hook._client == result
 
@@ -321,14 +327,17 @@ class TestGKEHook:
             self.gke_hook = GKEHook(gcp_conn_id="test", location=GKE_ZONE)
         self.gke_hook._client = mock.Mock()
 
+    @mock.patch(GKE_STRING.format("GKEHook.get_client_options"))
     @mock.patch(GKE_STRING.format("ClusterManagerClient"))
     @mock.patch(GKE_STRING.format("GKEHook.get_credentials"))
-    def test_get_client(self, mock_get_credentials, mock_client):
+    def test_get_client(self, mock_get_credentials, mock_client, mock_get_client_options):
         self.gke_hook._client = None
         self.gke_hook.get_cluster_manager_client()
         assert mock_get_credentials.called
         mock_client.assert_called_once_with(
-            credentials=mock_get_credentials.return_value, client_info=CLIENT_INFO
+            credentials=mock_get_credentials.return_value,
+            client_info=CLIENT_INFO,
+            client_options=mock_get_client_options.return_value,
         )
 
     def test_get_operation(self):
@@ -393,7 +402,7 @@ class TestGKEHook:
         assert operation_mock.call_count == 2
 
     @pytest.mark.parametrize(
-        "cluster_obj, expected_result",
+        ("cluster_obj", "expected_result"),
         [
             (CLUSTER_TEST_AUTOPROVISIONING, True),
             (CLUSTER_TEST_AUTOSCALED, True),
@@ -451,7 +460,7 @@ class TestGKEKubernetesHookDeployments:
         return self.credentials
 
     @pytest.mark.parametrize(
-        "api_client, expected_client",
+        ("api_client", "expected_client"),
         [
             (None, mock.MagicMock()),
             (mock_client := mock.MagicMock(), mock_client),  # type: ignore[name-defined]
@@ -476,6 +485,32 @@ class TestGKEKubernetesHookDeployments:
         if api_client is None:
             mock_get_conn.assert_called_once()
         mock_super.return_value.apply_from_yaml_file.assert_called_once_with(**expected_kwargs)
+
+
+class TestGKEClusterConnection:
+    @pytest.mark.parametrize("expired", [False, True])
+    def test_registers_bearer_token_for_client_35_and_36(self, expired):
+        # The bearer token and its "Bearer" prefix must be registered under both the client-35.x key
+        # ('authorization') and the client-36.x key ('BearerToken', renamed in
+        # https://github.com/kubernetes-client/python/issues/2582). Asserting the registration
+        # directly verifies both-version support regardless of which client CI installed; the
+        # auth_settings() check then confirms the installed client emits the prefixed header.
+        credentials = mock.MagicMock()
+        credentials.token = "the-token"
+        credentials.expired = expired
+        credentials.refresh = lambda request: setattr(credentials, "token", "the-token")
+        conn = GKEClusterConnection(
+            cluster_url="https://cluster",
+            ssl_ca_cert=None,
+            credentials=credentials,
+            use_dns_endpoint=True,
+        )
+
+        config = conn.get_conn().configuration
+
+        assert config.api_key == {"authorization": "the-token", "BearerToken": "the-token"}
+        assert config.api_key_prefix == {"authorization": "Bearer", "BearerToken": "Bearer"}
+        assert config.auth_settings()["BearerToken"]["value"] == "Bearer the-token"
 
 
 class TestGKEKubernetesAsyncHook:
@@ -529,9 +564,12 @@ class TestGKEKubernetesAsyncHook:
     @mock.patch(GKE_STRING.format("async_client.CoreV1Api.read_namespaced_pod_log"))
     async def test_read_logs(self, read_namespaced_pod_log, get_conn_mock, async_hook, caplog):
         caplog.set_level(logging.INFO)
-        self.make_mock_awaitable(read_namespaced_pod_log, result="Test string #1\nTest string #2\n")
+        # As logs are read in raw mode, need to mock the response object plus read method
+        response_mock = mock.AsyncMock()
+        response_mock.read.return_value = b"Test string #1\nTest string #2\n"
+        self.make_mock_awaitable(read_namespaced_pod_log, result=response_mock)
 
-        await async_hook.read_logs(name=POD_NAME, namespace=POD_NAMESPACE)
+        logs = await async_hook.read_logs(name=POD_NAME, namespace=POD_NAMESPACE)
 
         get_conn_mock.assert_called_once_with()
         read_namespaced_pod_log.assert_called_with(
@@ -539,9 +577,10 @@ class TestGKEKubernetesAsyncHook:
             namespace=POD_NAMESPACE,
             follow=False,
             timestamps=True,
+            _preload_content=False,
         )
-        assert "Test string #1" in caplog.text
-        assert "Test string #2" in caplog.text
+        assert "Test string #1" in logs
+        assert "Test string #2" in logs
 
 
 @pytest_asyncio.fixture
@@ -629,7 +668,7 @@ class TestGKEKubernetesHookPod:
         return self.credentials
 
     @pytest.mark.parametrize(
-        "disable_tcp_keepalive, expected",
+        ("disable_tcp_keepalive", "expected"),
         (
             (True, False),
             (None, True),

@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import json
 import os
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
 from airflow.cli.simple_table import AirflowConsole
-from airflow.cli.utils import print_export_output
+from airflow.cli.utils import SENSITIVE_PLACEHOLDER, deprecated_for_airflowctl, print_export_output
 from airflow.exceptions import (
     AirflowFileParseException,
     AirflowUnsupportedFileTypeException,
@@ -36,18 +37,63 @@ from airflow.secrets.local_filesystem import load_variables
 from airflow.utils import cli as cli_utils
 from airflow.utils.cli import suppress_logs_and_warning
 from airflow.utils.providers_configuration_loader import providers_configuration_loaded
-from airflow.utils.session import create_session, provide_session
+from airflow.utils.session import NEW_SESSION, create_session, provide_session
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm.session import Session
 
 
+class VariableDisplayMapper:
+    """Mapper class for formatting variable data for CLI display."""
+
+    @staticmethod
+    def keys_only(var) -> dict[str, str]:
+        """Return only variable keys. Accepts Variable model or dict with 'key'."""
+        key = var.key if hasattr(var, "key") else var["key"]
+        return {"key": key}
+
+    @staticmethod
+    def with_values(var, hide_sensitive: bool = False) -> dict[str, str]:
+        """Return variable with value, optionally masked."""
+        key = var.key if hasattr(var, "key") else var["key"]
+        raw = var.val if hasattr(var, "val") else var.get("val", var.get("_val"))
+        val = "" if raw is None else str(raw)
+        if hide_sensitive:
+            val = SENSITIVE_PLACEHOLDER
+        return {"key": key, "val": val}
+
+
+@deprecated_for_airflowctl("airflowctl variables list")
 @suppress_logs_and_warning
 @providers_configuration_loaded
 def variables_list(args):
-    """Display all the variables."""
+    """
+    Display all the variables.
+
+    By default only variable keys are shown. Use --show-values to display
+    values; use --hide-sensitive to mask all variable values (since individual
+    variables cannot be automatically classified as sensitive or not).
+    """
+    show_values = getattr(args, "show_values", False)
+    hide_sensitive = getattr(args, "hide_sensitive", False)
+
+    if hide_sensitive and not show_values:
+        raise SystemExit("--hide-sensitive can only be used with --show-values")
+
+    def _mapper(var):
+        return VariableDisplayMapper.with_values(var, hide_sensitive)
+
     with create_session() as session:
-        variables = session.scalars(select(Variable)).all()
-    AirflowConsole().print_as(data=variables, output=args.output, mapper=lambda x: {"key": x.key})
+        if show_values:
+            variables = session.scalars(select(Variable)).all()
+            AirflowConsole().print_as(data=variables, output=args.output, mapper=_mapper)
+        else:
+            keys = session.scalars(select(Variable.key).distinct()).all()
+            variables = [{"key": key} for key in keys]
+            AirflowConsole().print_as(data=variables, output=args.output, mapper=None)
 
 
+@deprecated_for_airflowctl("airflowctl variables get")
 @suppress_logs_and_warning
 @providers_configuration_loaded
 def variables_get(args):
@@ -64,6 +110,7 @@ def variables_get(args):
 
 
 @cli_utils.action_cli
+@deprecated_for_airflowctl("airflowctl variables create")
 @providers_configuration_loaded
 def variables_set(args):
     """Create new variable with a given name, value and description."""
@@ -72,6 +119,7 @@ def variables_set(args):
 
 
 @cli_utils.action_cli
+@deprecated_for_airflowctl("airflowctl variables delete")
 @providers_configuration_loaded
 def variables_delete(args):
     """Delete variable by a given name."""
@@ -80,9 +128,10 @@ def variables_delete(args):
 
 
 @cli_utils.action_cli
+@deprecated_for_airflowctl("airflowctl variables import")
 @providers_configuration_loaded
 @provide_session
-def variables_import(args, session):
+def variables_import(args, *, session: Session = NEW_SESSION):
     """Import variables from a given file."""
     if not os.path.exists(args.file):
         raise SystemExit("Missing variables file.")
@@ -111,7 +160,7 @@ def variables_import(args, session):
         try:
             value = v
             description = None
-            if isinstance(v, dict) and v.get("value"):  # verify that var configuration has value
+            if isinstance(v, dict) and "value" in v:  # verify that var configuration has value
                 value, description = v["value"], v.get("description")
             Variable.set(k, value, description, serialize_json=not isinstance(value, str))
         except Exception as e:
@@ -137,11 +186,14 @@ def variables_export(args):
 
         data = json.JSONDecoder()
         for var in qry:
+            # Mirror variables_import's reconstruction so export/import round-trips.
             try:
                 val = data.decode(var.val)
             except Exception:
                 val = var.val
-            if var.description:
+            if isinstance(val, str):
+                val = var.val
+            if var.description or (isinstance(val, dict) and "value" in val):
                 var_dict[var.key] = {
                     "value": val,
                     "description": var.description,

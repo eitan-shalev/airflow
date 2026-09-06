@@ -16,6 +16,7 @@
 # under the License.
 from __future__ import annotations
 
+import logging
 import threading
 from collections import namedtuple
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -32,9 +33,8 @@ from typing import (
 
 from databricks import sql
 from databricks.sql.types import Row
-from sqlalchemy.engine import URL
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, AirflowOptionalProviderFeatureException
 from airflow.providers.common.sql.hooks.handlers import return_single_query_results
 from airflow.providers.common.sql.hooks.sql import DbApiHook
 from airflow.providers.databricks.exceptions import DatabricksSqlExecutionError, DatabricksSqlExecutionTimeout
@@ -43,6 +43,7 @@ from airflow.providers.databricks.hooks.databricks_base import BaseDatabricksHoo
 
 if TYPE_CHECKING:
     from databricks.sql.client import Connection
+    from sqlalchemy.engine import URL
 
     from airflow.models.connection import Connection as AirflowConnection
     from airflow.providers.openlineage.extractors import OperatorLineage
@@ -51,15 +52,55 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+log = logging.getLogger(__name__)
 
-def create_timeout_thread(cur, execution_timeout: timedelta | None) -> threading.Timer | None:
-    if execution_timeout is not None:
-        seconds_to_timeout = execution_timeout.total_seconds()
-        t = threading.Timer(seconds_to_timeout, cur.connection.cancel)
-    else:
-        t = None
 
-    return t
+def create_timeout_thread(
+    cur, execution_timeout: timedelta | None
+) -> tuple[threading.Timer | None, threading.Event | None]:
+    """Create a timeout timer that cancels the connection and sets a timeout flag."""
+    if not execution_timeout:
+        return None, None
+
+    timeout_event = threading.Event()
+
+    def _cancel():
+        timeout_event.set()
+        cur.connection.cancel()
+
+    timer = threading.Timer(execution_timeout.total_seconds(), _cancel)
+    timer.start()
+
+    return timer, timeout_event
+
+
+def _format_query_tag_value(value: str) -> str:
+    """
+    Escape special characters and truncate a single query tag value.
+
+    Databricks ``QUERY_TAGS`` uses ``key:value`` pairs delimited by commas, so
+    backslash, comma and colon inside *values* must be escaped.  Values are also
+    capped at 128 characters before escaping to keep the overall tag string
+    within reasonable bounds.
+    """
+    raw = str(value)
+    if len(raw) > 128:
+        log.warning(
+            "Query tag value truncated to 128 characters (original length %d): %r", len(raw), raw[:128]
+        )
+    value = raw[:128]
+    return value.replace("\\", "\\\\").replace(",", "\\,").replace(":", "\\:")
+
+
+def _format_query_tags(tags: dict[str, str | None]) -> str:
+    """
+    Serialize a query-tags dict to the ``key:value,key:value`` string expected by ``QUERY_TAGS``.
+
+    Entries whose value is ``None`` are omitted.
+    """
+    return ",".join(
+        f"{key}:{_format_query_tag_value(value)}" for key, value in tags.items() if value is not None
+    )
 
 
 class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
@@ -79,6 +120,10 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
         on every request
     :param catalog: An optional initial catalog to use. Requires DBR version 9.0+
     :param schema: An optional initial schema to use. Requires DBR version 9.0+
+    :param query_tags: An optional dict of query tags to attach to every SQL statement executed by
+        this hook.  Tags are injected via the ``QUERY_TAGS`` Databricks session parameter so they
+        appear in ``system.query.history``.  Any existing ``QUERY_TAGS`` already present in
+        *session_configuration* are preserved and the new tags are appended.
     :param kwargs: Additional parameters internal to Databricks SQL Connector parameters
     """
 
@@ -95,6 +140,7 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
         catalog: str | None = None,
         schema: str | None = None,
         caller: str = "DatabricksSqlHook",
+        query_tags: dict[str, str | None] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(databricks_conn_id, caller=caller)
@@ -109,6 +155,7 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
         self.schema = schema
         self.additional_params = kwargs
         self.query_ids: list[str] = []
+        self.query_tags = query_tags
 
     def _get_extra_config(self) -> dict[str, Any | None]:
         extra_params = copy(self.databricks_conn.extra_dejson)
@@ -120,29 +167,55 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
 
     def _get_sql_endpoint_by_name(self, endpoint_name) -> dict[str, Any]:
         result = self._do_api_call(LIST_SQL_ENDPOINTS_ENDPOINT)
-        if "endpoints" not in result:
-            raise AirflowException("Can't list Databricks SQL endpoints")
+        # The API response key depends on which endpoint path is used:
+        # - "warehouses" for the current /api/2.0/sql/warehouses path
+        # - "endpoints" for the legacy /api/2.0/sql/endpoints path
+        warehouses = result.get("warehouses") or result.get("endpoints")
+        if not warehouses:
+            raise RuntimeError(
+                "Can't list Databricks SQL warehouses. The API response contained neither "
+                "'warehouses' nor 'endpoints' key. Check that the connection has sufficient "
+                "permissions to list SQL warehouses."
+            )
         try:
-            endpoint = next(endpoint for endpoint in result["endpoints"] if endpoint["name"] == endpoint_name)
+            endpoint = next(ep for ep in warehouses if ep["name"] == endpoint_name)
         except StopIteration:
-            raise AirflowException(f"Can't find Databricks SQL endpoint with name '{endpoint_name}'")
+            raise ValueError(f"Can't find Databricks SQL warehouse with name '{endpoint_name}'")
         else:
             return endpoint
+
+    def _resolve_http_path(self, allow_endpoint_lookup: bool = True) -> str | None:
+        """
+        Resolve http_path from explicit arg, endpoint name, or connection extra.
+
+        :param allow_endpoint_lookup: If True, may call API to resolve sql_endpoint_name.
+            Set False for offline-safe paths like sqlalchemy_url.
+        :return: resolved http_path or None if not found.
+
+        When allow_endpoint_lookup=False (used by sqlalchemy_url etc.),
+        sql_endpoint_name is ignored and we fall back to http_path from the
+        connection extra. This keeps the property fully offline. If both
+        sql_endpoint_name and an extra http_path are set, sqlalchemy_url may
+        therefore point at a different warehouse than the one get_conn() will
+        actually connect to. This asymmetry is intentional.
+        """
+        if self._http_path:
+            return self._http_path
+        if allow_endpoint_lookup and self._sql_endpoint_name:
+            endpoint = self._get_sql_endpoint_by_name(self._sql_endpoint_name)
+            return endpoint["odbc_params"]["path"]
+        return self.databricks_conn.extra_dejson.get("http_path")
 
     def get_conn(self) -> AirflowConnection:
         """Return a Databricks SQL connection object."""
         if not self._http_path:
-            if self._sql_endpoint_name:
-                endpoint = self._get_sql_endpoint_by_name(self._sql_endpoint_name)
-                self._http_path = endpoint["odbc_params"]["path"]
-            elif "http_path" in self.databricks_conn.extra_dejson:
-                self._http_path = self.databricks_conn.extra_dejson["http_path"]
-            else:
-                raise AirflowException(
-                    "http_path should be provided either explicitly, "
-                    "or in extra parameter of Databricks connection, "
-                    "or sql_endpoint_name should be specified"
-                )
+            self._http_path = self._resolve_http_path(allow_endpoint_lookup=True)
+        if not self._http_path:
+            raise AirflowException(
+                "http_path should be provided either explicitly, "
+                "or in extra parameter of Databricks connection, "
+                "or sql_endpoint_name should be specified"
+            )
 
         prev_token = self._token
         new_token = self._get_token(raise_error=True)
@@ -152,20 +225,32 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
         if not self.session_config:
             self.session_config = self.databricks_conn.extra_dejson.get("session_configuration")
 
+        # session_configuration (including QUERY_TAGS) is applied only when opening a new
+        # connection; changing query_tags after the first get_conn() call has no effect.
         if not self._sql_conn or prev_token != new_token:
             if self._sql_conn:  # close already existing connection
                 self._sql_conn.close()
+            session_config: dict[str, str] = dict(self.session_config) if self.session_config else {}
+            if self.query_tags:
+                tags_str = _format_query_tags(self.query_tags)
+                existing = session_config.get("QUERY_TAGS", "")
+                session_config["QUERY_TAGS"] = f"{existing},{tags_str}" if existing else tags_str
+
+            connect_kwargs = {
+                "schema": self.schema,
+                "catalog": self.catalog,
+                "session_configuration": session_config or None,
+                "http_headers": self.http_headers,
+                "_user_agent_entry": self.user_agent_value,
+                **self._get_extra_config(),
+                **self.additional_params,
+            }
+
             self._sql_conn = sql.connect(
                 self.host,
                 self._http_path,
                 self._token,
-                schema=self.schema,
-                catalog=self.catalog,
-                session_configuration=self.session_config,
-                http_headers=self.http_headers,
-                _user_agent_entry=self.user_agent_value,
-                **self._get_extra_config(),
-                **self.additional_params,
+                **connect_kwargs,
             )
 
         if self._sql_conn is None:
@@ -179,18 +264,28 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
 
         :return: the extracted sqlalchemy.engine.URL object.
         """
+        try:
+            from sqlalchemy.engine import URL
+        except ImportError:
+            raise AirflowOptionalProviderFeatureException(
+                "sqlalchemy is required to generate the connection URL. "
+                "Install it with: pip install 'apache-airflow-providers-databricks[sqlalchemy]'"
+            )
+
+        http_path = self._resolve_http_path(allow_endpoint_lookup=False)
+
         url_query = {
-            "http_path": self._http_path,
+            "http_path": http_path,
             "catalog": self.catalog,
             "schema": self.schema,
         }
-        url_query = {k: v for k, v in url_query.items() if v is not None}
+        url_query_formatted: dict[str, str] = {k: v for k, v in url_query.items() if v is not None}
         return URL.create(
             drivername="databricks",
             username="token",
             password=self._get_token(raise_error=True),
             host=self.host,
-            query=url_query,
+            query=url_query_formatted,
         )
 
     def get_uri(self) -> str:
@@ -223,7 +318,7 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
         split_statements: bool = ...,
         return_last: bool = ...,
         execution_timeout: timedelta | None = None,
-    ) -> tuple | list[tuple] | list[list[tuple] | tuple] | None: ...
+    ) -> tuple | list[tuple] | list[list[tuple] | tuple | None] | None: ...
 
     def run(
         self,
@@ -234,7 +329,7 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
         split_statements: bool = True,
         return_last: bool = True,
         execution_timeout: timedelta | None = None,
-    ) -> tuple | list[tuple] | list[list[tuple] | tuple] | None:
+    ) -> tuple | list[tuple] | list[list[tuple] | tuple | None] | None:
         """
         Run a command or a list of commands.
 
@@ -278,26 +373,29 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
             self.log.info("Running statement: %s, parameters: %s", sql_statement, parameters)
             # when using AAD tokens, it could expire if previous query run longer than token lifetime
             conn = self.get_conn()
-            with closing(conn.cursor()) as cur:
+            with closing(conn.cursor()):
                 self.set_autocommit(conn, autocommit)
 
                 with closing(conn.cursor()) as cur:
-                    t = create_timeout_thread(cur, execution_timeout)
+                    timer, timeout_event = create_timeout_thread(cur, execution_timeout)
 
-                    # TODO: adjust this to make testing easier
                     try:
                         self._run_command(cur, sql_statement, parameters)
+
                     except Exception as e:
-                        if t is None or t.is_alive():
-                            raise DatabricksSqlExecutionError(
-                                f"Error running SQL statement: {sql_statement}. {str(e)}"
-                            )
-                        raise DatabricksSqlExecutionTimeout(
-                            f"Timeout threshold exceeded for SQL statement: {sql_statement} was cancelled."
-                        )
+                        if timeout_event and timeout_event.is_set():
+                            raise DatabricksSqlExecutionTimeout(
+                                f"Timeout threshold exceeded for SQL statement: "
+                                f"{sql_statement} was cancelled."
+                            ) from e
+
+                        raise DatabricksSqlExecutionError(
+                            f"Error running SQL statement: {sql_statement}. {str(e)}"
+                        ) from e
+
                     finally:
-                        if t is not None:
-                            t.cancel()
+                        if timer:
+                            timer.cancel()
 
                     if query_id := cur.query_id:
                         self.log.info("Databricks query id: %s", query_id)
@@ -323,10 +421,14 @@ class DatabricksSqlHook(BaseDatabricksHook, DbApiHook):
             return results[-1]
         return results
 
-    def _make_common_data_structure(self, result: T | Sequence[T]) -> tuple[Any, ...] | list[tuple[Any, ...]]:
+    def _make_common_data_structure(
+        self, result: T | Sequence[T] | None
+    ) -> tuple[Any, ...] | list[tuple[Any, ...]] | None:
         """Transform the databricks Row objects into namedtuple."""
         # Below ignored lines respect namedtuple docstring, but mypy do not support dynamically
         # instantiated namedtuple, and will never do: https://github.com/python/mypy/issues/848
+        if result is None:
+            return None
         if isinstance(result, list):
             rows: Sequence[Row] = result
             if not rows:

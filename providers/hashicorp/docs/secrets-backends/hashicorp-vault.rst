@@ -69,6 +69,24 @@ For example, if you want to set parameter ``connections_path`` to ``"airflow-con
     backend = airflow.providers.hashicorp.secrets.vault.VaultBackend
     backend_kwargs = {"connections_path": "airflow-connections", "variables_path": null, "mount_point": "airflow", "url": "http://127.0.0.1:8200"}
 
+Falling back across multiple secret paths
+"""""""""""""""""""""""""""""""""""""""""
+
+``connections_path``, ``variables_path``, and ``config_path`` can take a list of paths. Each path is tried in order, and
+the first path where a secret is found returns. This can be used as a fallback mechanism for e.g. teams, environments,
+etc.:
+
+.. code-block:: ini
+
+    [secrets]
+    backend = airflow.providers.hashicorp.secrets.vault.VaultBackend
+    backend_kwargs = {"connections_path": ["airflow-prod/connections", "airflow-common/connections"], "mount_point": "airflow", "url": "http://127.0.0.1:8200"}
+
+.. note::
+    Historically, the ``global_secrets_path`` parameter partially supported the above. The ``global_secrets_path``
+    parameter was deprecated in favor of a more generic approach. It is appended to the list of paths until it is
+    completely removed.
+
 Storing and Retrieving Connections using connection URI representation
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -229,6 +247,35 @@ For more details, please refer to the AWS Assume Role Authentication documentati
     [secrets]
     backend = airflow.providers.hashicorp.secrets.vault.VaultBackend
     backend_kwargs = {"connections_path": "airflow-connections", "variables_path": null, "mount_point": "airflow", "url": "http://127.0.0.1:8200", "auth_type": "aws_iam", "assume_role_kwargs": {"RoleArn":"arn:aws:iam::123456789000:role/hashicorp-aws-iam-role", "RoleSessionName": "Airflow"}}
+
+Vault authentication with JWT/OIDC
+""""""""""""""""""""""""""""""""""
+
+JWT/OIDC authentication is useful for:
+
+- Cloud provider identity (AWS IAM roles, GCP Workload Identity, Azure AD)
+- CI/CD pipelines (GitHub Actions OIDC, GitLab CI)
+- External identity providers (Auth0, Okta, Keycloak)
+- Kubernetes workload identity with projected service account tokens
+
+To use JWT authentication, set ``auth_type`` to ``jwt`` and provide ``jwt_role``. You must also provide a JWT token
+via ``jwt_token`` (inline) or ``jwt_token_path`` (path to a file containing the token):
+
+.. code-block:: ini
+
+    [secrets]
+    backend = airflow.providers.hashicorp.secrets.vault.VaultBackend
+    backend_kwargs = {"connections_path": "connections", "variables_path": "variables", "mount_point": "airflow", "url": "http://127.0.0.1:8200", "auth_type": "jwt", "jwt_role": "airflow-role", "jwt_token_path": "/var/run/secrets/tokens/vault-token"}
+
+You can also provide the token directly:
+
+.. code-block:: ini
+
+    [secrets]
+    backend = airflow.providers.hashicorp.secrets.vault.VaultBackend
+    backend_kwargs = {"connections_path": "connections", "variables_path": "variables", "mount_point": "airflow", "url": "http://127.0.0.1:8200", "auth_type": "jwt", "jwt_role": "airflow-role", "jwt_token": "eyJhbGciOiJSUzI1NiIs..."}
+
+If you need to use a different mount point for the JWT auth method (default is ``jwt``), you can specify it with ``auth_mount_point``.
 
 Using multiple mount points
 """""""""""""""""""""""""""

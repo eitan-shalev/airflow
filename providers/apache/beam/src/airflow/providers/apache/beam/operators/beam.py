@@ -30,18 +30,20 @@ from contextlib import ExitStack
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException, AirflowOptionalProviderFeatureException
 from airflow.providers.apache.beam.hooks.beam import BeamHook, BeamRunnerType
 from airflow.providers.apache.beam.triggers.beam import BeamJavaPipelineTrigger, BeamPythonPipelineTrigger
-from airflow.providers.apache.beam.version_compat import BaseOperator
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowOptionalProviderFeatureException,
+    BaseOperator,
+    conf,
+)
 from airflow.providers_manager import ProvidersManager
 from airflow.utils.helpers import convert_camel_to_snake, exactly_one
 from airflow.version import version
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
-
+    from airflow.providers.common.compat.sdk import Context
 GOOGLE_PROVIDER = ProvidersManager().providers.get("apache-airflow-providers-google")
 
 
@@ -161,7 +163,7 @@ class BeamBasePipelineOperator(BaseOperator, BeamDataflowMixin, ABC):
     """
     Abstract base class for Beam Pipeline Operators.
 
-    :param runner: Runner on which pipeline will be run. By default "DirectRunner" is being used.
+    :param runner: Runner on which pipeline will be run. By default, "DirectRunner" is being used.
         Other possible options: DataflowRunner, SparkRunner, FlinkRunner, PortableRunner.
         See: :class:`~providers.apache.beam.hooks.beam.BeamRunnerType`
         See: https://beam.apache.org/documentation/runners/capability-matrix/
@@ -311,7 +313,7 @@ class BeamRunPythonPipelineOperator(BeamBasePipelineOperator):
     will be merged to specify pipeline execution parameter, and
     ``default_pipeline_options`` is expected to save high-level options,
     for instances, project and zone information, which apply to all beam
-    operators in the DAG.
+    operators in the Dag.
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
@@ -458,7 +460,12 @@ class BeamRunPythonPipelineOperator(BeamBasePipelineOperator):
         )
 
         location = self.dataflow_config.location or DEFAULT_DATAFLOW_LOCATION
-        DataflowJobLink.persist(context=context, region=location)
+        DataflowJobLink.persist(
+            context=context,
+            region=self.dataflow_config.location,
+            job_id=self.dataflow_job_id,
+            project_id=self.dataflow_config.project_id,
+        )
 
         if self.deferrable:
             trigger_args = {
@@ -510,7 +517,7 @@ class BeamRunJavaPipelineOperator(BeamBasePipelineOperator):
     ``default_pipeline_options`` and ``pipeline_options`` will be merged to specify pipeline
     execution parameter, and ``default_pipeline_options`` is expected to save
     high-level pipeline_options, for instances, project and zone information, which
-    apply to all Apache Beam operators in the DAG.
+    apply to all Apache Beam operators in the Dag.
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
@@ -648,7 +655,12 @@ class BeamRunJavaPipelineOperator(BeamBasePipelineOperator):
                 is_dataflow_job_id_exist_callback=self.is_dataflow_job_id_exist_callback,
             )
             if self.dataflow_job_name and self.dataflow_config.location:
-                DataflowJobLink.persist(context=context)
+                DataflowJobLink.persist(
+                    context=context,
+                    region=self.dataflow_config.location,
+                    job_id=self.dataflow_job_id,
+                    project_id=self.dataflow_config.project_id,
+                )
                 if self.deferrable:
                     trigger_args = {
                         "job_id": self.dataflow_job_id,
@@ -702,7 +714,7 @@ class BeamRunGoPipelineOperator(BeamBasePipelineOperator):
     will be merged to specify pipeline execution parameter, and
     ``default_pipeline_options`` is expected to save high-level options,
     for instances, project and zone information, which apply to all beam
-    operators in the DAG.
+    operators in the Dag.
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:

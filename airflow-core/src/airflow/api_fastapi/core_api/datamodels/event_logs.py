@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 
 from pydantic import AliasPath, Field
@@ -37,6 +38,7 @@ class EventLogResponse(BaseModel):
     event: str
     logical_date: datetime | None
     owner: str | None
+    owner_display_name: str | None
     extra: str | None
     dag_display_name: str | None = Field(
         validation_alias=AliasPath("dag_model", "dag_display_name"), default=None
@@ -49,5 +51,5 @@ class EventLogResponse(BaseModel):
 class EventLogCollectionResponse(BaseModel):
     """Event Log Collection Response."""
 
-    event_logs: list[EventLogResponse]
+    event_logs: Iterable[EventLogResponse]
     total_entries: int

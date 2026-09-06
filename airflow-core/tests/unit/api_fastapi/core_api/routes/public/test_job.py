@@ -19,12 +19,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from sqlalchemy.orm import Session
 
 from airflow.jobs.job import Job, JobState
 from airflow.jobs.scheduler_job_runner import SchedulerJobRunner
-from airflow.utils.session import provide_session
+from airflow.utils.session import NEW_SESSION, provide_session
 from airflow.utils.state import State
 
+from tests_common.test_utils.asserts import assert_queries_count
 from tests_common.test_utils.db import clear_db_jobs
 from tests_common.test_utils.format_datetime import from_datetime_to_zulu
 
@@ -52,10 +54,10 @@ TESTCASE_MULTIPLE_RUNNER = "should_report_success_for_multiple_runners"
 class TestJobEndpoint:
     """Common class for /jobs related unit tests."""
 
-    scheduler_jobs: list[Job] | None = None
-    job_runners: list[SchedulerJobRunner] | None = None
+    scheduler_jobs: list[Job]
+    job_runners: list[SchedulerJobRunner]
 
-    def _setup_should_report_success_for_one_working_scheduler(self, session=None):
+    def _setup_should_report_success_for_one_working_scheduler(self, session: Session):
         scheduler_job = Job()
         job_runner = SchedulerJobRunner(job=scheduler_job)
         scheduler_job.state = State.RUNNING
@@ -65,7 +67,7 @@ class TestJobEndpoint:
         self.job_runners.append(job_runner)
         scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
 
-    def _setup_should_report_success_for_one_working_scheduler_with_hostname(self, session=None):
+    def _setup_should_report_success_for_one_working_scheduler_with_hostname(self, session: Session):
         scheduler_job = Job()
         job_runner = SchedulerJobRunner(job=scheduler_job)
         scheduler_job.state = State.RUNNING
@@ -76,7 +78,7 @@ class TestJobEndpoint:
         session.commit()
         scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
 
-    def _setup_should_report_success_for_ha_schedulers(self, session=None):
+    def _setup_should_report_success_for_ha_schedulers(self, session: Session):
         for _ in range(3):
             scheduler_job = Job()
             job_runner = SchedulerJobRunner(job=scheduler_job)
@@ -87,7 +89,7 @@ class TestJobEndpoint:
         session.commit()
         scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
 
-    def _setup_should_ignore_not_running_jobs(self, session=None):
+    def _setup_should_ignore_not_running_jobs(self, session: Session):
         for _ in range(3):
             scheduler_job = Job()
             job_runner = SchedulerJobRunner(job=scheduler_job)
@@ -97,7 +99,7 @@ class TestJobEndpoint:
             self.job_runners.append(job_runner)
         session.commit()
 
-    def _setup_should_raise_exception_for_multiple_scheduler_on_one_host(self, session=None):
+    def _setup_should_raise_exception_for_multiple_scheduler_on_one_host(self, session: Session):
         for _ in range(3):
             scheduler_job = Job()
             job_runner = SchedulerJobRunner(job=scheduler_job)
@@ -111,7 +113,7 @@ class TestJobEndpoint:
         scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
 
     @provide_session
-    def setup(self, testcase: TestCase, session=None) -> None:
+    def setup(self, testcase: TestCase, *, session: Session = NEW_SESSION) -> None:
         """
         Setup testcase at runtime based on the `testcase` provided by `pytest.mark.parametrize`.
         """
@@ -127,13 +129,13 @@ class TestJobEndpoint:
 
 class TestGetJobs(TestJobEndpoint):
     @pytest.mark.parametrize(
-        "testcase, query_params, expected_status_code, expected_total_entries",
+        ("testcase", "query_params", "expected_status_code", "expected_total_entries"),
         [
             # original testcases refactor from tests/cli/commands/test_jobs_command.py
             (TESTCASE_ONE_SCHEDULER, {}, 200, 1),
             (TESTCASE_ONE_SCHEDULER_WITH_HOSTNAME, {"hostname": "HOSTNAME"}, 200, 1),
             (TESTCASE_HA_SCHEDULERS, {"limit": 100}, 200, 3),
-            (TESTCASE_IGNORE_NOT_RUNNING, {}, 200, 0),
+            (TESTCASE_IGNORE_NOT_RUNNING, {}, 200, 3),
             (TESTCASE_MULTIPLE_SCHEDULERS_ON_ONE_HOST, {"limit": 100}, 200, 3),
         ],
     )
@@ -142,28 +144,48 @@ class TestGetJobs(TestJobEndpoint):
     ):
         # setup testcase at runtime based on the `testcase` parameter
         self.setup(testcase)
-        response = test_client.get("/jobs", params=query_params)
+        with assert_queries_count(2):
+            response = test_client.get("/jobs", params=query_params)
         assert response.status_code == expected_status_code
         if expected_status_code != 200:
             return
         response_json = response.json()
         assert response_json["total_entries"] == expected_total_entries
 
-        for idx, resp_job in enumerate(response_json["jobs"]):
+        for resp_job in response_json["jobs"]:
+            matched = [j for j in self.scheduler_jobs if j.id == resp_job["id"]]
+            assert len(matched) == 1
             expected_job = {
-                "id": self.scheduler_jobs[idx].id,
+                "id": matched[0].id,
                 "dag_display_name": None,
                 "dag_id": None,
-                "state": "running",
+                "state": matched[0].state,
                 "job_type": "SchedulerJob",
-                "start_date": from_datetime_to_zulu(self.scheduler_jobs[idx].start_date),
+                "start_date": from_datetime_to_zulu(matched[0].start_date),
                 "end_date": None,
-                "latest_heartbeat": from_datetime_to_zulu(self.scheduler_jobs[idx].latest_heartbeat),
+                "latest_heartbeat": from_datetime_to_zulu(matched[0].latest_heartbeat),
                 "executor_class": None,
-                "hostname": self.scheduler_jobs[idx].hostname,
-                "unixname": self.scheduler_jobs[idx].unixname,
+                "hostname": matched[0].hostname,
+                "unixname": matched[0].unixname,
             }
             assert resp_job == expected_job
+
+    def test_get_jobs_filters_by_dag_id(self, test_client, session: Session):
+        clear_db_jobs()
+        session.add_all(
+            [
+                Job(dag_id="target_dag", state=JobState.RUNNING, job_type="SchedulerJob"),
+                Job(dag_id="other_dag", state=JobState.SUCCESS, job_type="SchedulerJob"),
+            ]
+        )
+        session.commit()
+
+        response = test_client.get("/jobs", params={"dag_id": "target_dag"})
+
+        assert response.status_code == 200
+        response_json = response.json()
+        assert response_json["total_entries"] == 1
+        assert response_json["jobs"][0]["dag_id"] == "target_dag"
 
     def test_should_raises_401_unauthenticated(self, unauthenticated_test_client):
         response = unauthenticated_test_client.get("/jobs")

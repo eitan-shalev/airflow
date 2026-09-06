@@ -17,13 +17,18 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import signal
 
+from tabulate import tabulate
+
 from airflow import settings
+from airflow.api_fastapi.common.dagbag import resolve_run_on_latest_version
 from airflow.cli.simple_table import AirflowConsole
+from airflow.cli.utils import deprecated_for_airflowctl
 from airflow.exceptions import AirflowConfigException
-from airflow.models.backfill import ReprocessBehavior, _create_backfill, _do_dry_run
+from airflow.models.backfill import NoBackfillRunsToCreate, ReprocessBehavior, _create_backfill, _do_dry_run
 from airflow.utils import cli as cli_utils
 from airflow.utils.cli import sigint_handler
 from airflow.utils.platform import getuser
@@ -34,10 +39,11 @@ log = logging.getLogger(__name__)
 
 
 @cli_utils.action_cli
+@deprecated_for_airflowctl("airflowctl backfill create")
 @providers_configuration_loaded
 def create_backfill(args) -> None:
-    """Create backfill job or dry run for a DAG or list of DAGs using regex."""
-    logging.basicConfig(level=settings.LOGGING_LEVEL, format=settings.SIMPLE_LOG_FORMAT)
+    """Create backfill job or dry run for a Dag or list of Dags using regex."""
+    logging.basicConfig(level=logging.INFO, format=settings.SIMPLE_LOG_FORMAT)
     signal.signal(signal.SIGTERM, sigint_handler)
     console = AirflowConsole()
 
@@ -45,6 +51,21 @@ def create_backfill(args) -> None:
         reprocess_behavior = ReprocessBehavior(args.reprocess_behavior)
     else:
         reprocess_behavior = None
+
+    dag_run_conf = None
+    if args.dag_run_conf:
+        try:
+            dag_run_conf = json.loads(args.dag_run_conf)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in --dag-run-conf: {e}")
+
+    with create_session() as session:
+        resolved_run_on_latest = resolve_run_on_latest_version(
+            args.run_on_latest_version,
+            args.dag_id,
+            session,
+            fallback=True,
+        )
 
     if args.dry_run:
         console.print("Performing dry run of backfill.")
@@ -55,24 +76,29 @@ def create_backfill(args) -> None:
             to_date=args.to_date,
             max_active_runs=args.max_active_runs,
             reverse=args.run_backwards,
-            dag_run_conf=args.dag_run_conf,
+            dag_run_conf=dag_run_conf,
             reprocess_behavior=reprocess_behavior,
-            run_on_latest_version=args.run_on_latest_version,
+            run_on_latest_version=resolved_run_on_latest,
         )
         for k, v in params.items():
             console.print(f"    - {k} = {v}")
         with create_session() as session:
-            logical_dates = _do_dry_run(
+            infos = _do_dry_run(
                 dag_id=args.dag_id,
                 from_date=args.from_date,
                 to_date=args.to_date,
                 reverse=args.run_backwards,
-                reprocess_behavior=args.reprocess_behavior,
+                reprocess_behavior=reprocess_behavior or ReprocessBehavior.NONE,
+                dag_run_conf=dag_run_conf,
                 session=session,
             )
-        console.print("Logical dates to be attempted:")
-        for d in logical_dates:
-            console.print(f"    - {d}")
+        console.print("Runs to be attempted:")
+        rows = [
+            dict(logical_date=d.logical_date, partition_key=d.partition_key, partition_date=d.partition_date)
+            for d in infos
+        ]
+        output = tabulate(rows, tablefmt="grid", headers="keys")
+        console.print(output)
         return
 
     try:
@@ -80,14 +106,19 @@ def create_backfill(args) -> None:
     except AirflowConfigException as e:
         log.warning("Failed to get user name from os: %s, not setting the triggering user", e)
         user = None
-    _create_backfill(
-        dag_id=args.dag_id,
-        from_date=args.from_date,
-        to_date=args.to_date,
-        max_active_runs=args.max_active_runs,
-        reverse=args.run_backwards,
-        dag_run_conf=args.dag_run_conf,
-        triggering_user_name=user,
-        reprocess_behavior=reprocess_behavior,
-        run_on_latest_version=args.run_on_latest_version,
-    )
+
+    try:
+        _create_backfill(
+            dag_id=args.dag_id,
+            from_date=args.from_date,
+            to_date=args.to_date,
+            max_active_runs=args.max_active_runs,
+            reverse=args.run_backwards,
+            dag_run_conf=dag_run_conf,
+            triggering_user_name=user,
+            reprocess_behavior=reprocess_behavior,
+            run_on_latest_version=resolved_run_on_latest,
+        )
+    except NoBackfillRunsToCreate as e:
+        console.print(f"[yellow]Warning:[/yellow] {e}")
+        raise SystemExit(1)

@@ -298,6 +298,10 @@
                     "hook-class-name": {
                         "description": "Hook class name that implements the connection type",
                         "type": "string"
+                    },
+                    "hook-name": {
+                        "description": "Display name for the connection type in the UI",
+                        "type": "string"
                     }
                 },
                 "required": [
@@ -320,11 +324,37 @@
                 "type": "string"
             }
         },
+        "email-backends": {
+            "type": "array",
+            "description": "Email backend function names",
+            "items": {
+                "type": "string"
+            }
+        },
         "logging": {
             "type": "array",
             "description": "Logging Task Handlers class names",
             "items": {
                 "type": "string"
+            }
+        },
+        "remote-logging": {
+            "type": "array",
+            "description": "Remote logging IO handlers contributed by the provider. Each entry registers a RemoteLogIO implementation that ProvidersManager dispatches by URL scheme.",
+            "items": {
+                "type": "object",
+                "required": ["classpath", "scheme"],
+                "additionalProperties": false,
+                "properties": {
+                    "classpath": {
+                        "type": "string",
+                        "description": "Fully-qualified class name of the RemoteLogIO implementation."
+                    },
+                    "scheme": {
+                        "type": "string",
+                        "description": "URL scheme (without ://) of [logging] remote_base_log_folder that this handler claims."
+                    }
+                }
             }
         },
         "auth-backends": {
@@ -351,6 +381,20 @@
         "executors": {
             "type": "array",
             "description": "Executor class names",
+            "items": {
+                "type": "string"
+            }
+        },
+        "db-managers": {
+            "type": "array",
+            "description": "DB manager class names",
+            "items": {
+                "type": "string"
+            }
+        },
+        "cli": {
+            "type": "array",
+            "description": "CLI command functions exposed by the provider",
             "items": {
                 "type": "string"
             }
@@ -395,11 +439,16 @@
             "type": "array",
             "description": "Apply custom decorators to the TaskFlow API. Can be accessed by users via '@task.<name>'",
             "items": {
-                "name": {
-                    "type": "string"
-                },
-                "path": {
-                    "type": "string"
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "description": "Name the decorator is exposed under, following '@task.'",
+                        "type": "string"
+                    },
+                    "class-name": {
+                        "description": "Class name that implements the decorator",
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -407,27 +456,22 @@
             "type": "array",
             "description": "Plugins provided by the provider",
             "items": {
-                "name": {
-                    "type": "string",
-                    "description": "Name of the plugin"
-                },
-                "plugin-class": {
-                    "type": "string",
-                    "description": "Class to instantiate the plugin"
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the plugin"
+                    },
+                    "plugin-class": {
+                        "type": "string",
+                        "description": "Class to instantiate the plugin"
+                    }
                 }
             }
         },
         "queues": {
             "type": "array",
-            "description": "Message Queues exposed by the provider",
-            "items": {
-                "name": {
-                    "type": "string"
-                },
-                "message-queue-class": {
-                    "type": "string"
-                }
-            }
+            "description": "Message queue provider class names"
         }
     },
     "definitions": {

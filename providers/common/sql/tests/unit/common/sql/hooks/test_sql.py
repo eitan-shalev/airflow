@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-import logging.config
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pandas as pd
 import polars as pl
@@ -70,8 +69,16 @@ index = 0
 
 @pytest.mark.db_test
 @pytest.mark.parametrize(
-    "return_last, split_statements, sql, cursor_calls,"
-    "cursor_descriptions, cursor_results, hook_descriptions, hook_results, ",
+    (
+        "return_last",
+        "split_statements",
+        "sql",
+        "cursor_calls",
+        "cursor_descriptions",
+        "cursor_results",
+        "hook_descriptions",
+        "hook_results",
+    ),
     [
         pytest.param(
             True,
@@ -239,9 +246,8 @@ class TestDbApiHook:
     )
     def test_no_query(self, empty_statement):
         dbapi_hook = mock_db_hook(DbApiHook)
-        with pytest.raises(ValueError) as err:
+        with pytest.raises(ValueError, match="List of SQL statements is empty"):
             dbapi_hook.run(sql=empty_statement)
-        assert err.value.args[0] == "List of SQL statements is empty"
 
     @pytest.mark.db_test
     def test_placeholder_config_from_extra(self):
@@ -311,7 +317,7 @@ class TestDbApiHook:
 
     @pytest.mark.db_test
     @pytest.mark.parametrize(
-        "df_type, expected_type",
+        ("df_type", "expected_type"),
         [
             ("test_default_df_type", pd.DataFrame),
             ("pandas", pd.DataFrame),
@@ -326,3 +332,141 @@ class TestDbApiHook:
         else:
             df = dbapi_hook.get_df("SQL", df_type=df_type)
             assert isinstance(df, expected_type)
+
+
+class TestDbApiHookGetSqlalchemyEngine:
+    """SQLAlchemy resolves a bare ``postgresql`` scheme to the psycopg2 DB-API by default, which
+    may not be installed now that it's an optional extra of apache-airflow-providers-postgres."""
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql._is_sqlalchemy_2", return_value=True)
+    @patch("airflow.providers.common.sql.hooks.sql.find_spec")
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_falls_back_to_psycopg_when_psycopg2_import_fails(
+        self, mock_create_engine, mock_find_spec, mock_is_sqlalchemy_2, caplog
+    ):
+        mock_find_spec.return_value = object()
+        mock_create_engine.side_effect = [ModuleNotFoundError("No module named 'psycopg2'"), MagicMock()]
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "postgresql"})
+
+        dbapi_hook.get_sqlalchemy_engine()
+
+        assert mock_create_engine.call_count == 2
+        retried_url = mock_create_engine.call_args.kwargs["url"]
+        assert retried_url.drivername == "postgresql+psycopg"
+        assert (
+            "SQLAlchemy could not load a DB-API driver for the bare 'postgresql://' URL; "
+            "retrying with psycopg (v3) ('postgresql+psycopg')."
+        ) in caplog.text
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql._is_sqlalchemy_2", return_value=False)
+    @patch("airflow.providers.common.sql.hooks.sql.find_spec")
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_falls_back_to_psycopg2_when_sqlalchemy_below_2(
+        self, mock_create_engine, mock_find_spec, mock_is_sqlalchemy_2, caplog
+    ):
+        # SQLAlchemy 1.4 (shipped with Airflow 2.11) has no native "postgresql+psycopg" dialect,
+        # so even when psycopg (v3) is importable the retry must use psycopg2, not psycopg.
+        mock_find_spec.return_value = object()
+        mock_create_engine.side_effect = [ModuleNotFoundError("No module named 'psycopg2'"), MagicMock()]
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "postgresql"})
+
+        dbapi_hook.get_sqlalchemy_engine()
+
+        assert mock_create_engine.call_count == 2
+        retried_url = mock_create_engine.call_args.kwargs["url"]
+        assert retried_url.drivername == "postgresql+psycopg2"
+        assert (
+            "SQLAlchemy could not load a DB-API driver for the bare 'postgresql://' URL; "
+            "retrying with 'postgresql+psycopg2'."
+        ) in caplog.text
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql.find_spec")
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_falls_back_to_psycopg2_when_psycopg_unavailable(
+        self, mock_create_engine, mock_find_spec, caplog
+    ):
+        mock_find_spec.side_effect = lambda name: None if name == "psycopg" else object()
+        mock_create_engine.side_effect = [ModuleNotFoundError("No module named 'psycopg2'"), MagicMock()]
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "postgresql"})
+
+        dbapi_hook.get_sqlalchemy_engine()
+
+        assert mock_create_engine.call_count == 2
+        retried_url = mock_create_engine.call_args.kwargs["url"]
+        assert retried_url.drivername == "postgresql+psycopg2"
+        assert (
+            "SQLAlchemy could not load a DB-API driver for the bare 'postgresql://' URL; "
+            "retrying with 'postgresql+psycopg2'."
+        ) in caplog.text
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql.find_spec", return_value=None)
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_reraises_when_no_postgres_driver_is_available(self, mock_create_engine, mock_find_spec):
+        original_error = ModuleNotFoundError("No module named 'psycopg2'")
+        mock_create_engine.side_effect = original_error
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "postgresql"})
+
+        with pytest.raises(ModuleNotFoundError, match="psycopg2"):
+            dbapi_hook.get_sqlalchemy_engine()
+        mock_create_engine.assert_called_once()
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_does_not_retry_for_non_postgres_schemes(self, mock_create_engine):
+        original_error = ModuleNotFoundError("No module named 'some_other_driver'")
+        mock_create_engine.side_effect = original_error
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "mysql"})
+
+        with pytest.raises(ModuleNotFoundError, match="some_other_driver"):
+            dbapi_hook.get_sqlalchemy_engine()
+        mock_create_engine.assert_called_once()
+
+
+class TestDbApiHookGetTableSchema:
+    @pytest.mark.db_test
+    def test_get_table_schema(self):
+        dbapi_hook = mock_db_hook(DbApiHook)
+        mock_inspector = MagicMock()
+        mock_inspector.get_columns.return_value = [
+            {"name": "id", "type": "INTEGER", "nullable": True},
+            {"name": "name", "type": "VARCHAR(255)", "nullable": False},
+        ]
+        with patch.object(
+            type(dbapi_hook), "inspector", new_callable=PropertyMock, return_value=mock_inspector
+        ):
+            result = dbapi_hook.get_table_schema("users")
+
+        assert result == [
+            {"name": "id", "type": "INTEGER"},
+            {"name": "name", "type": "VARCHAR(255)"},
+        ]
+        mock_inspector.get_columns.assert_called_once_with("users", schema=None)
+
+    @pytest.mark.db_test
+    def test_get_table_schema_with_schema(self):
+        dbapi_hook = mock_db_hook(DbApiHook)
+        mock_inspector = MagicMock()
+        mock_inspector.get_columns.return_value = [
+            {"name": "col1", "type": "TEXT"},
+        ]
+        with patch.object(
+            type(dbapi_hook), "inspector", new_callable=PropertyMock, return_value=mock_inspector
+        ):
+            dbapi_hook.get_table_schema("my_table", schema="my_schema")
+
+        mock_inspector.get_columns.assert_called_once_with("my_table", schema="my_schema")
+
+
+def test_inspector_is_cached():
+    """inspector should return the same object on repeated access (not create N engines)."""
+    hook = DBApiHookForTests(conn_id=DEFAULT_CONN_ID)
+    mock_engine = MagicMock()
+    with patch.object(hook, "get_sqlalchemy_engine", return_value=mock_engine) as mock_get_engine:
+        inspector1 = hook.inspector
+        inspector2 = hook.inspector
+        assert inspector1 is inspector2
+        mock_get_engine.assert_called_once()

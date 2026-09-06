@@ -24,6 +24,7 @@ import subprocess
 import sys
 import warnings
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import TYPE_CHECKING
@@ -33,16 +34,16 @@ import pendulum
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
-from google.api_core.exceptions import Conflict
+from google.api_core.exceptions import Conflict, GoogleAPIError
 from google.cloud.exceptions import GoogleCloudError
 
-from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.sdk import AirflowException, timezone
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseOperator
 from airflow.providers.google.common.links.storage import FileDetailsLink, StorageLink
-from airflow.utils import timezone
 
 
 class GCSCreateBucketOperator(GoogleCloudBaseOperator):
@@ -110,6 +111,7 @@ class GCSCreateBucketOperator(GoogleCloudBaseOperator):
         "storage_class",
         "location",
         "project_id",
+        "gcp_conn_id",
         "impersonation_chain",
     )
     ui_color = "#f0eee4"
@@ -204,6 +206,7 @@ class GCSListObjectsOperator(GoogleCloudBaseOperator):
         "prefix",
         "delimiter",
         "match_glob",
+        "gcp_conn_id",
         "impersonation_chain",
     )
 
@@ -225,18 +228,21 @@ class GCSListObjectsOperator(GoogleCloudBaseOperator):
         super().__init__(**kwargs)
         self.bucket = bucket
         self.prefix = prefix
-        if delimiter:
-            warnings.warn(
-                "Usage of 'delimiter' is deprecated, please use 'match_glob' instead",
-                AirflowProviderDeprecationWarning,
-                stacklevel=2,
-            )
         self.delimiter = delimiter
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
         self.match_glob = match_glob
 
+    def _warn_on_deprecated_template_fields(self) -> None:
+        if self.delimiter:
+            warnings.warn(
+                "Usage of 'delimiter' is deprecated, please use 'match_glob' instead. Planned removal date: October 5, 2026.",
+                AirflowProviderDeprecationWarning,
+                stacklevel=2,
+            )
+
     def execute(self, context: Context) -> list:
+        self._warn_on_deprecated_template_fields()
         hook = GCSHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
@@ -276,6 +282,7 @@ class GCSDeleteObjectsOperator(GoogleCloudBaseOperator):
         of objects in the bucket, not including gs://bucket/
     :param prefix: String or list of strings, which filter objects whose name begin with
            it/them. (templated)
+    :param ignore_error: (Optional) whether to ignore NotFound exceptions. Default: False
     :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
@@ -291,6 +298,7 @@ class GCSDeleteObjectsOperator(GoogleCloudBaseOperator):
         "bucket_name",
         "prefix",
         "objects",
+        "gcp_conn_id",
         "impersonation_chain",
     )
 
@@ -300,6 +308,7 @@ class GCSDeleteObjectsOperator(GoogleCloudBaseOperator):
         bucket_name: str,
         objects: list[str] | None = None,
         prefix: str | list[str] | None = None,
+        ignore_error: bool = False,
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         **kwargs,
@@ -307,6 +316,7 @@ class GCSDeleteObjectsOperator(GoogleCloudBaseOperator):
         self.bucket_name = bucket_name
         self.objects = objects
         self.prefix = prefix
+        self.ignore_error = ignore_error
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
@@ -333,7 +343,7 @@ class GCSDeleteObjectsOperator(GoogleCloudBaseOperator):
             objects = hook.list(bucket_name=self.bucket_name, prefix=self.prefix)
         self.log.info("Deleting %s objects from %s", len(objects), self.bucket_name)
         for object_name in objects:
-            hook.delete(bucket_name=self.bucket_name, object_name=object_name)
+            hook.delete(bucket_name=self.bucket_name, object_name=object_name, ignore_error=self.ignore_error)
 
     def get_openlineage_facets_on_start(self):
         from airflow.providers.common.compat.openlineage.facet import (
@@ -406,6 +416,7 @@ class GCSBucketCreateAclEntryOperator(GoogleCloudBaseOperator):
         "entity",
         "role",
         "user_project",
+        "gcp_conn_id",
         "impersonation_chain",
     )
     # [END gcs_bucket_create_acl_template_fields]
@@ -443,6 +454,91 @@ class GCSBucketCreateAclEntryOperator(GoogleCloudBaseOperator):
         hook.insert_bucket_acl(
             bucket_name=self.bucket, entity=self.entity, role=self.role, user_project=self.user_project
         )
+
+
+class GCSBucketAddIamBindingOperator(GoogleCloudBaseOperator):
+    """
+    Adds a member to an IAM role binding on the specified bucket.
+
+    .. seealso::
+        For more information on how to use this operator, take a look at the guide:
+        :ref:`howto/operator:GCSBucketAddIamBindingOperator`
+
+    :param bucket: Name of a bucket.
+    :param role: The IAM role to grant, for example ``roles/storage.objectViewer``.
+    :param member: The IAM member to grant the role to, for example
+        ``serviceAccount:example@example-project.iam.gserviceaccount.com``.
+    :param user_project: (Optional) The project to be billed for this request.
+        Required for Requester Pays buckets.
+    :param gcp_conn_id: (Optional) The connection ID used to connect to Google Cloud.
+    :param impersonation_chain: Optional service account to impersonate using short-term
+        credentials, or chained list of accounts required to get the access_token
+        of the last account in the list, which will be impersonated in the request.
+        If set as a string, the account must grant the originating account
+        the Service Account Token Creator IAM role.
+        If set as a sequence, the identities from the list must grant
+        Service Account Token Creator IAM role to the directly preceding identity, with first
+        account from the list granting this role to the originating account (templated).
+    """
+
+    # [START gcs_bucket_add_iam_binding_template_fields]
+    template_fields: Sequence[str] = (
+        "bucket",
+        "role",
+        "member",
+        "user_project",
+        "gcp_conn_id",
+        "impersonation_chain",
+    )
+    # [END gcs_bucket_add_iam_binding_template_fields]
+    operator_extra_links = (StorageLink(),)
+
+    def __init__(
+        self,
+        *,
+        bucket: str,
+        role: str,
+        member: str,
+        user_project: str | None = None,
+        gcp_conn_id: str = "google_cloud_default",
+        impersonation_chain: str | Sequence[str] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.bucket = bucket
+        self.role = role
+        self.member = member
+        self.user_project = user_project
+        self.gcp_conn_id = gcp_conn_id
+        self.impersonation_chain = impersonation_chain
+
+    def execute(self, context: Context) -> None:
+        hook = GCSHook(
+            gcp_conn_id=self.gcp_conn_id,
+            impersonation_chain=self.impersonation_chain,
+        )
+        StorageLink.persist(
+            context=context,
+            uri=self.bucket,
+            project_id=hook.project_id,
+        )
+        try:
+            hook.add_bucket_iam_binding(
+                bucket_name=self.bucket,
+                role=self.role,
+                member=self.member,
+                user_project=self.user_project,
+            )
+        except GoogleAPIError as e:
+            self.log.exception(
+                "Failed to add member %s to IAM role %s on bucket %s. Google Cloud API error (%s): %s",
+                self.member,
+                self.role,
+                self.bucket,
+                type(e).__name__,
+                e,
+            )
+            raise
 
 
 class GCSObjectCreateAclEntryOperator(GoogleCloudBaseOperator):
@@ -484,6 +580,7 @@ class GCSObjectCreateAclEntryOperator(GoogleCloudBaseOperator):
         "generation",
         "role",
         "user_project",
+        "gcp_conn_id",
         "impersonation_chain",
     )
     # [END gcs_object_create_acl_template_fields]
@@ -571,6 +668,7 @@ class GCSFileTransformOperator(GoogleCloudBaseOperator):
         "destination_bucket",
         "destination_object",
         "transform_script",
+        "gcp_conn_id",
         "impersonation_chain",
     )
     operator_extra_links = (FileDetailsLink(),)
@@ -674,6 +772,10 @@ class GCSTimeSpanFileTransformOperator(GoogleCloudBaseOperator):
     data from source, transform it and write the output to the local
     destination file.
 
+    Downloads and uploads can be executed in parallel by configuring
+    ``max_download_workers`` and ``max_upload_workers``. By default,
+    execution is sequential.
+
     :param source_bucket: The bucket to fetch data from. (templated)
     :param source_prefix: Prefix string which filters objects whose name begin with
            this prefix. Can interpolate logical date and time components. (templated)
@@ -715,6 +817,10 @@ class GCSTimeSpanFileTransformOperator(GoogleCloudBaseOperator):
     :param upload_continue_on_fail: With this set to true, if an upload fails the task does not error out
         but will still continue.
     :param upload_num_attempts: Number of attempts to try to upload a single file.
+    :param max_download_workers: Maximum number of worker threads to use for parallel downloads.
+        Must be greater than or equal to 1. Defaults to 1 (sequential execution).
+    :param max_upload_workers: Maximum number of worker threads to use for parallel uploads.
+        Must be greater than or equal to 1. Defaults to 1 (sequential execution).
     """
 
     template_fields: Sequence[str] = (
@@ -723,7 +829,9 @@ class GCSTimeSpanFileTransformOperator(GoogleCloudBaseOperator):
         "destination_bucket",
         "destination_prefix",
         "transform_script",
+        "source_gcp_conn_id",
         "source_impersonation_chain",
+        "destination_gcp_conn_id",
         "destination_impersonation_chain",
     )
     operator_extra_links = (StorageLink(),)
@@ -756,6 +864,8 @@ class GCSTimeSpanFileTransformOperator(GoogleCloudBaseOperator):
         download_num_attempts: int = 1,
         upload_continue_on_fail: bool | None = False,
         upload_num_attempts: int = 1,
+        max_download_workers: int = 1,
+        max_upload_workers: int = 1,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -778,6 +888,15 @@ class GCSTimeSpanFileTransformOperator(GoogleCloudBaseOperator):
         self.upload_continue_on_fail = upload_continue_on_fail
         self.upload_num_attempts = upload_num_attempts
 
+        if max_download_workers < 1:
+            raise ValueError("max_download_workers must be >= 1")
+
+        if max_upload_workers < 1:
+            raise ValueError("max_upload_workers must be >= 1")
+
+        self.max_download_workers = max_download_workers
+        self.max_upload_workers = max_upload_workers
+
         self._source_prefix_interp: str | None = None
         self._destination_prefix_interp: str | None = None
 
@@ -797,7 +916,7 @@ class GCSTimeSpanFileTransformOperator(GoogleCloudBaseOperator):
 
         timespan_start = orig_start
         if orig_start >= orig_end:  # Airflow 2.2 sets start == end for non-perodic schedules.
-            self.log.warning("DAG schedule not periodic, setting timespan end to max %s", orig_end)
+            self.log.warning("Dag schedule not periodic, setting timespan end to max %s", orig_end)
             timespan_end = pendulum.instance(datetime.datetime.max)
         else:
             timespan_end = orig_end
@@ -829,41 +948,84 @@ class GCSTimeSpanFileTransformOperator(GoogleCloudBaseOperator):
         )
 
         # Fetch list of files.
-        blobs_to_transform = source_hook.list_by_timespan(
-            bucket_name=self.source_bucket,
-            prefix=self._source_prefix_interp,
-            timespan_start=timespan_start,
-            timespan_end=timespan_end,
-        )
+
+        blobs_to_transform = [
+            blob
+            for blob in source_hook.list_by_timespan(
+                bucket_name=self.source_bucket,
+                prefix=self._source_prefix_interp,
+                timespan_start=timespan_start,
+                timespan_end=timespan_end,
+            )
+            # Filter out "directory" placeholders (GCS objects ending with '/')
+            # to avoid attempting to download non-file blobs.
+            if not blob.endswith("/")
+        ]
 
         with TemporaryDirectory() as temp_input_dir, TemporaryDirectory() as temp_output_dir:
             temp_input_dir_path = Path(temp_input_dir)
+            temp_input_dir_resolved = temp_input_dir_path.resolve()
             temp_output_dir_path = Path(temp_output_dir)
 
-            # TODO: download in parallel.
-            for blob_to_transform in blobs_to_transform:
-                destination_file = temp_input_dir_path / blob_to_transform
-                destination_file.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    source_hook.download(
-                        bucket_name=self.source_bucket,
-                        object_name=blob_to_transform,
-                        filename=str(destination_file),
-                        chunk_size=self.chunk_size,
-                        num_max_attempts=self.download_num_attempts,
+            num_downloads = len(blobs_to_transform)
+            download_workers = min(self.max_download_workers, num_downloads) if num_downloads > 0 else 1
+
+            self.log.info(
+                "Downloading %d files using %d workers",
+                num_downloads,
+                download_workers,
+            )
+
+            # Get storage client once (storage.Client is thread-safe for concurrent requests).
+            client = source_hook.get_conn()
+
+            def _download(blob_name: str):
+
+                bucket = client.bucket(bucket_name=self.source_bucket)
+                blob = bucket.blob(blob_name=blob_name, chunk_size=self.chunk_size)
+
+                destination_file = temp_input_dir_path / blob_name
+                # Containment check: ``blob_name`` originates outside the worker, and GCS
+                # allows object names containing ``..``. Resolve the target and assert it
+                # stays under ``temp_input_dir_path`` so a hostile blob name cannot write
+                # outside the worker's temp directory (CWE-22).
+                if not destination_file.resolve().is_relative_to(temp_input_dir_resolved):
+                    raise ValueError(
+                        f"Refusing to download GCS blob {blob_name!r}: resolved path "
+                        f"{destination_file} escapes the temp directory {temp_input_dir_path}."
                     )
-                except GoogleCloudError:
-                    if not self.download_continue_on_fail:
-                        raise
+                destination_file.parent.mkdir(parents=True, exist_ok=True)
+
+                blob.download_to_filename(filename=str(destination_file))
+
+                return blob_name
+
+            with ThreadPoolExecutor(max_workers=download_workers) as executor:
+                futures = {executor.submit(_download, blob): blob for blob in blobs_to_transform}
+
+                for future in as_completed(futures):
+                    blob = futures[future]
+                    try:
+                        future.result()
+                    except GoogleCloudError as e:
+                        if not self.download_continue_on_fail:
+                            # Attempt to cancel pending futures to reduce unnecessary work.
+                            # Note: futures already running cannot be cancelled.
+                            for f in futures:
+                                f.cancel()
+                            raise
+                        self.log.warning("Download failed for %s: %s", blob, e)
 
             self.log.info("Starting the transformation")
             cmd = [self.transform_script] if isinstance(self.transform_script, str) else self.transform_script
+
             cmd += [
                 str(temp_input_dir_path),
                 str(temp_output_dir_path),
                 timespan_start.replace(microsecond=0).isoformat(),
                 timespan_end.replace(microsecond=0).isoformat(),
             ]
+
             with subprocess.Popen(
                 args=cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, close_fds=True
             ) as process:
@@ -878,32 +1040,64 @@ class GCSTimeSpanFileTransformOperator(GoogleCloudBaseOperator):
 
             self.log.info("Transformation succeeded. Output temporarily located at %s", temp_output_dir_path)
 
-            files_uploaded = []
+            upload_candidates = [f for f in temp_output_dir_path.glob("**/*") if f.is_file()]
 
-            # TODO: upload in parallel.
-            for upload_file in temp_output_dir_path.glob("**/*"):
-                if upload_file.is_dir():
-                    continue
+            num_uploads = len(upload_candidates)
+            upload_workers = min(self.max_upload_workers, num_uploads) if num_uploads > 0 else 1
 
+            self.log.info(
+                "Uploading %d files using %d workers",
+                num_uploads,
+                upload_workers,
+            )
+
+            destination_hook = GCSHook(
+                gcp_conn_id=self.destination_gcp_conn_id,
+                impersonation_chain=self.destination_impersonation_chain,
+            )
+
+            # Get storage client once (storage.Client is thread-safe for concurrent requests).
+            client = destination_hook.get_conn()
+
+            def _upload(upload_file: Path):
+
+                bucket = client.bucket(bucket_name=self.destination_bucket)
+
+                # Preserve directory structure relative to the output temp directory.
                 upload_file_name = str(upload_file.relative_to(temp_output_dir_path))
 
                 if self._destination_prefix_interp is not None:
                     upload_file_name = f"{self._destination_prefix_interp.rstrip('/')}/{upload_file_name}"
 
-                self.log.info("Uploading file %s to %s", upload_file, upload_file_name)
+                blob = bucket.blob(blob_name=upload_file_name, chunk_size=self.chunk_size)
 
-                try:
-                    destination_hook.upload(
-                        bucket_name=self.destination_bucket,
-                        object_name=upload_file_name,
-                        filename=str(upload_file),
-                        chunk_size=self.chunk_size,
-                        num_max_attempts=self.upload_num_attempts,
-                    )
-                    files_uploaded.append(str(upload_file_name))
-                except GoogleCloudError:
-                    if not self.upload_continue_on_fail:
-                        raise
+                blob.upload_from_filename(
+                    filename=str(upload_file),
+                )
+
+                return upload_file_name
+
+            files_uploaded: list[str] = []
+
+            with ThreadPoolExecutor(max_workers=upload_workers) as executor:
+                futures = {
+                    executor.submit(_upload, upload_file): str(upload_file)
+                    for upload_file in upload_candidates
+                }
+
+                for future in as_completed(futures):
+                    upload_file = futures[future]
+                    try:
+                        uploaded_name = future.result()
+                        files_uploaded.append(uploaded_name)
+                    except GoogleCloudError as e:
+                        if not self.upload_continue_on_fail:
+                            # Attempt to cancel pending futures to reduce unnecessary work.
+                            # Note: futures already running cannot be cancelled.
+                            for f in futures:
+                                f.cancel()
+                            raise
+                        self.log.warning("Upload failed for %s: %s", upload_file, e)
 
             return files_uploaded
 

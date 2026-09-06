@@ -21,6 +21,7 @@ import contextlib
 import copy
 import logging
 import os
+import pathlib
 from unittest import mock
 
 import boto3
@@ -30,14 +31,15 @@ from moto import mock_aws
 
 from airflow.models import DAG, DagRun, TaskInstance
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-from airflow.providers.amazon.aws.log.s3_task_handler import S3TaskHandler
-from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.providers.amazon.aws.log.s3_task_handler import S3RemoteLogIO, S3TaskHandler
 from airflow.utils.state import State, TaskInstanceState
 
+from tests_common.test_utils.compat import EmptyOperator
 from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.dag import sync_dag_to_db
 from tests_common.test_utils.db import clear_db_dag_bundles, clear_db_dags, clear_db_runs
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+from tests_common.test_utils.taskinstance import create_task_instance
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_2_2_PLUS
 
 try:
     from airflow.sdk.timezone import datetime
@@ -49,6 +51,130 @@ except ImportError:
 def s3mock():
     with mock_aws():
         yield
+
+
+class TestS3RemoteLogIOFromConfig:
+    @conf_vars(
+        {
+            ("logging", "base_log_folder"): "~/airflow/logs",
+            ("logging", "remote_base_log_folder"): "s3://bucket/remote/log/location",
+            ("logging", "delete_local_logs"): "True",
+        }
+    )
+    def test_from_config(self):
+        subject = S3RemoteLogIO.from_config()
+
+        assert subject.remote_base == "s3://bucket/remote/log/location"
+        assert subject.base_log_folder == pathlib.Path(os.path.expanduser("~/airflow/logs"))
+        assert subject.delete_local_copy is True
+
+    @conf_vars(
+        {
+            ("logging", "base_log_folder"): "/tmp/airflow/logs",
+            ("logging", "remote_base_log_folder"): "s3://bucket/remote/log/location",
+            ("logging", "delete_local_logs"): "False",
+            ("logging", "remote_task_handler_kwargs"): '{"delete_local_copy": true, "max_bytes": 1024}',
+        }
+    )
+    def test_from_config_applies_io_kwargs_and_filters_file_handler_kwargs(self):
+        subject = S3RemoteLogIO.from_config()
+
+        assert subject.delete_local_copy is True
+        assert not hasattr(subject, "max_bytes")
+
+    @conf_vars({("logging", "remote_task_handler_kwargs"): '["not", "a", "dict"]'})
+    def test_from_config_rejects_non_dict_remote_task_handler_kwargs(self):
+        with pytest.raises(ValueError, match="remote_task_handler_kwargs"):
+            S3RemoteLogIO.from_config()
+
+    def test_provider_registers_s3_scheme(self):
+        from airflow.providers_manager import ProvidersManager
+
+        manager = ProvidersManager()
+        if not hasattr(manager, "remote_logging_handler_by_scheme"):
+            pytest.skip("Airflow core does not support remote logging provider dispatch")
+
+        info = manager.remote_logging_handler_by_scheme("s3")
+
+        assert info is not None
+        assert info.classpath == "airflow.providers.amazon.aws.log.s3_task_handler.S3RemoteLogIO"
+
+    @pytest.mark.parametrize(
+        "manager_classpath",
+        [
+            pytest.param("airflow.providers_manager.ProvidersManager", id="core"),
+            pytest.param(
+                "airflow.sdk.providers_manager_runtime.ProvidersManagerTaskRuntime", id="task-runtime"
+            ),
+        ],
+    )
+    @conf_vars(
+        {
+            ("logging", "remote_logging"): "True",
+            ("logging", "remote_base_log_folder"): "s3://bucket/remote/log/location",
+            ("logging", "remote_log_conn_id"): "aws_default",
+        }
+    )
+    def test_resolve_remote_task_log_uses_provider_dispatch_not_local_settings(self, manager_classpath):
+        factory = pytest.importorskip("airflow._shared.logging.factory")
+        from airflow._shared.module_loading import import_string
+        from airflow.configuration import conf
+
+        with mock.patch.object(factory, "discover_remote_log_handler", autospec=True) as legacy_discover:
+            remote_task_log, conn_id = factory.resolve_remote_task_log(
+                conf=conf,
+                providers_manager=import_string(manager_classpath)(),
+                import_string=import_string,
+            )
+
+        assert isinstance(remote_task_log, S3RemoteLogIO)
+        assert remote_task_log.remote_base == "s3://bucket/remote/log/location"
+        assert conn_id == "aws_default"
+        legacy_discover.assert_not_called()
+
+    @conf_vars(
+        {
+            ("logging", "remote_base_log_folder"): "s3://bucket/remote/log/location",
+            ("aws", "s3_task_handler_acl_policy"): "bucket-owner-full-control",
+        }
+    )
+    def test_from_config_reads_acl_policy(self):
+        subject = S3RemoteLogIO.from_config()
+
+        assert subject.acl_policy == "bucket-owner-full-control"
+
+    @conf_vars({("logging", "remote_base_log_folder"): "s3://bucket/remote/log/location"})
+    def test_from_config_acl_policy_defaults_to_none(self):
+        subject = S3RemoteLogIO.from_config()
+
+        assert subject.acl_policy is None
+
+    @conf_vars(
+        {
+            ("logging", "remote_base_log_folder"): "s3://bucket/remote/log/location",
+            ("logging", "remote_task_handler_kwargs"): '{"acl_policy": "bucket-owner-full-control"}',
+        }
+    )
+    def test_from_config_acl_policy_via_remote_task_handler_kwargs(self):
+        subject = S3RemoteLogIO.from_config()
+
+        assert subject.acl_policy == "bucket-owner-full-control"
+
+
+class TestS3TaskHandlerInit:
+    @conf_vars({("aws", "s3_task_handler_acl_policy"): "bucket-owner-full-control"})
+    def test_init_reads_acl_policy_from_conf(self):
+        handler = S3TaskHandler("/tmp/local", "s3://bucket/remote/log/location")
+
+        assert handler.io.acl_policy == "bucket-owner-full-control"
+
+    @conf_vars({("aws", "s3_task_handler_acl_policy"): "bucket-owner-full-control"})
+    def test_init_acl_policy_kwarg_overrides_conf(self):
+        handler = S3TaskHandler(
+            "/tmp/local", "s3://bucket/remote/log/location", acl_policy="bucket-owner-read"
+        )
+
+        assert handler.io.acl_policy == "bucket-owner-read"
 
 
 @pytest.mark.db_test
@@ -98,7 +224,7 @@ class TestS3RemoteLogIO:
             from airflow.models.dag_version import DagVersion
 
             dag_version = DagVersion.get_latest_version(self.dag.dag_id)
-            self.ti = TaskInstance(task=task, dag_version_id=dag_version.id)
+            self.ti = create_task_instance(task=task, dag_version_id=dag_version.id)
         else:
             self.ti = TaskInstance(task=task, run_id=dag_run.run_id)
         self.ti.dag_run = dag_run
@@ -183,6 +309,48 @@ class TestS3RemoteLogIO:
 
         assert body == b"previous \ntext"
 
+    def test_write_does_not_expose_lineage(self, hook_lineage_collector):
+        # Remote task logs are not task data assets, so uploading them must not add the S3 object
+        # as a task output in OpenLineage events.
+        self.subject.write("text", self.remote_log_location)
+        assert hook_lineage_collector.collected_assets.outputs == []
+        assert hook_lineage_collector.collected_assets.inputs == []
+
+    @conf_vars({("logging", "encrypt_s3_logs"): "True"})
+    def test_write_with_encryption(self):
+        self.subject.write("text", self.remote_log_location)
+        resp = self.conn.head_object(Bucket="bucket", Key=self.remote_log_key)
+        assert resp["ServerSideEncryption"] == "AES256"
+        body = boto3.resource("s3").Object("bucket", self.remote_log_key).get()["Body"].read()
+        assert body == b"text"
+
+    def test_write_with_acl_policy(self):
+        self.subject.acl_policy = "bucket-owner-full-control"
+        conn = self.subject.hook.get_conn()
+        with mock.patch.object(conn, "put_object", wraps=conn.put_object) as mock_put_object:
+            self.subject.write("text", self.remote_log_location)
+        assert mock_put_object.call_args.kwargs["ACL"] == "bucket-owner-full-control"
+        body = boto3.resource("s3").Object("bucket", self.remote_log_key).get()["Body"].read()
+        assert body == b"text"
+
+    def test_upload_repeated_appends_no_duplication(self):
+        """Simulate reschedule-mode sensor: each cycle appends to the local log, then uploads.
+
+        Without truncation after upload, the S3 object accumulates duplicate
+        lines and grows O(N^2).  The correct behavior is that each line appears
+        in S3 exactly once.
+        """
+        local_log = self.subject.base_log_folder / "1.log"
+        local_log.parent.mkdir(parents=True, exist_ok=True)
+
+        for cycle in range(1, 4):
+            with open(local_log, "a") as f:
+                f.write(f"cycle {cycle}\n")
+            self.subject.upload(local_log, self.ti)
+
+        body = boto3.resource("s3").Object("bucket", self.remote_log_key).get()["Body"].read()
+        assert body == b"cycle 1\ncycle 2\ncycle 3\n"
+
     def test_write_raises(self, caplog):
         url = "s3://nonexistentbucket/foo"
         with caplog.at_level(logging.ERROR):
@@ -240,7 +408,7 @@ class TestS3TaskHandler:
             from airflow.models.dag_version import DagVersion
 
             dag_version = DagVersion.get_latest_version(self.dag.dag_id)
-            self.ti = TaskInstance(task=task, run_id=dag_run.run_id, dag_version_id=dag_version.id)
+            self.ti = create_task_instance(task=task, run_id=dag_run.run_id, dag_version_id=dag_version.id)
         else:
             self.ti = TaskInstance(task=task, run_id=dag_run.run_id)
         self.ti.dag_run = dag_run
@@ -269,6 +437,8 @@ class TestS3TaskHandler:
         assert not self.s3_task_handler.upload_on_close
         mock_open.assert_not_called()
 
+    # TODO: Remove when we stop testing for 2.11 compatibility
+    @conf_vars({("core", "use_historical_filename_templates"): "True"})
     def test_set_context_not_raw(self):
         mock_open = mock.mock_open()
         with mock.patch("airflow.providers.amazon.aws.log.s3_task_handler.open", mock_open):
@@ -278,6 +448,8 @@ class TestS3TaskHandler:
         mock_open.assert_called_once_with(os.path.join(self.local_log_location, "1.log"), "w")
         mock_open().write.assert_not_called()
 
+    # TODO: Remove when we stop testing for 2.11 compatibility
+    @conf_vars({("core", "use_historical_filename_templates"): "True"})
     def test_read(self):
         # Test what happens when we have two log files to read
         self.conn.put_object(Bucket="bucket", Key=self.remote_log_key, Body=b"Log line\nLine 2\n")
@@ -290,7 +462,17 @@ class TestS3TaskHandler:
 
         expected_s3_uri = f"s3://bucket/{self.remote_log_key}"
 
-        if AIRFLOW_V_3_0_PLUS:
+        if AIRFLOW_V_3_2_2_PLUS:
+            log = list(log)
+            assert log[0].event == "::group::Log message source details"
+            assert expected_s3_uri in log[1].event
+            assert log[3].event == "::endgroup::"
+            assert log[4].event == "Log line"
+            assert log[5].event == "Line 2"
+            assert log[6].event == "Log line 3"
+            assert log[7].event == "Line 4"
+            assert metadata == {"end_of_log": True, "log_pos": 4}
+        elif AIRFLOW_V_3_0_PLUS:
             log = list(log)
             assert log[0].event == "::group::Log message source details"
             assert expected_s3_uri in log[0].sources
@@ -323,6 +505,8 @@ class TestS3TaskHandler:
             assert expected in actual
             assert metadata[0] == {"end_of_log": True, "log_pos": 0}
 
+    # TODO: Remove when we stop testing for 2.11 compatibility
+    @conf_vars({("core", "use_historical_filename_templates"): "True"})
     def test_close(self):
         self.s3_task_handler.set_context(self.ti)
         assert self.s3_task_handler.upload_on_close
@@ -341,7 +525,7 @@ class TestS3TaskHandler:
             boto3.resource("s3").Object("bucket", self.remote_log_key).get()
 
     @pytest.mark.parametrize(
-        "delete_local_copy, expected_existence_of_local_copy",
+        ("delete_local_copy", "expected_existence_of_local_copy"),
         [(True, False), (False, True)],
     )
     def test_close_with_delete_local_logs_conf(self, delete_local_copy, expected_existence_of_local_copy):

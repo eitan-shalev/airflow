@@ -20,6 +20,670 @@
 Changelog
 ---------
 
+3.8.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Validate issuer and audience of Azure AD id_tokens in FAB auth manager (#71735)``
+
+Misc
+~~~~
+
+* ``Bump eslint to 10.8.1 (#71508)``
+* ``Add pnpm overrides after audit review in fab provider (#71448)``
+* ``Bump webpack to 5.109.2 and webpack-cli to 7.2.2 (#71005)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fix SSO docs pointing at the pre-Airflow 3 OAuth redirect path (#71624)``
+* ``Document API token response details (#71583)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] CI: Upgrade important CI environment (#70501)``
+
+
+3.8.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Gate audit log rows not tied to a Dag on a dedicated AccessView (#70759)``
+* ``Add IMPORT_ERRORS_ALL permission for import errors of files with no registered Dag (#69790)``
+* ``Add 'get_display_name' to 'BaseUser' interface (#70583)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix asset state store writes forbidden under FAB auth manager (#70478)``
+* ``Stop dumping every Dag to stdout when syncing FAB permissions (#70939)``
+
+Misc
+~~~~
+
+* ``Bump eslint to 10.8.0 (#70697)``
+* ``Bump prettier to 3.9.6, stylelint to 17.14.1, webpack to 5.109.0 (#70604)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.7.3
+.....
+
+.. note::
+    The Azure AD OAuth provider in the FAB auth manager now verifies the ``id_token``
+    signature by default: ``verify_signature`` now defaults to ``True`` (previously
+    ``False``), consistent with the Authentik provider. Deployments that intentionally
+    relied on skipping signature verification must set ``verify_signature: False``
+    explicitly in the Azure provider ``client_kwargs`` to keep the previous behaviour.
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix AUTH_ROLE_PUBLIC returning 401 in FastAPI API server (#69773)``
+* ``Verify Azure AD OAuth id_token signatures by default in FAB auth manager (#69374)``
+
+Misc
+~~~~
+
+* ``Bump flask-appbuilder to 5.2.2 in FAB provider (#69730)``
+
+Doc-only
+~~~~~~~~
+
+* ``Clarify FAB and Auth documentation regarding external_db_managers (#69929)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix flaky static checks caused by migration-reference hook race (#70170)``
+   * ``[main] Upgrade important CI environment (#69694)``
+   * ``Bump eslint (#69932)``
+   * ``Bump prettier (#69835)``
+   * ``Add upgrade-fab-provider skill and FAB contributing doc (#69729)``
+   * ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#69664)``
+   * ``Bump moment-timezone from 0.6.2 to 0.6.3 in /providers/fab/src/airflow/providers/fab/www in the fab-ui-package-updates group across 1 directory (#70308)``
+
+
+3.7.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix DAG named "DAGs" colliding with the global DAGs permission resource (#69106)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Document each provider's optional extras in its docs index (#69478)``
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+   * ``Prepare ad-hoc provider documentation 2026-06-26 (#69022)``
+   * ``Prepare ad-hoc provider documentation 2026-06-26``
+   * ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#69344)``
+   * ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#69210)``
+   * ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#69186)``
+   * ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#69133)``
+
+3.7.1
+.....
+
+.. note::
+    The ``get_cli_user`` method added to the FAB auth manager in 3.7.0 has been removed
+    together with the revert of the airflowctl CLI client integration in Airflow core.
+    If you relied on ``airflowctl`` CLI authentication through the FAB auth manager,
+    provide an API token via the ``AIRFLOW_CLI_TOKEN`` environment variable instead.
+
+Misc
+~~~~
+
+* ``Revert airflowctl dependency from airflow-core (#68856)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.7.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Implement 'get_cli_user' in the FAB auth manager so airflowctl CLI commands can authenticate (#68175)``
+* ``Add Browse > Deadlines menu item for compatibility with Airflow 3.3.0 (#67586)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix fab deserialize user session leak (#68100)``
+* ``Import ldap.filter in security_manager override (#68226)``
+* ``Add defensive validation for LDAP search filter configuration (#67630)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update FAB auth manager Flask config wording for Airflow 3 (#68162)``
+* ``Fix removed webserver command in FAB SSO guide for Airflow 3 (#68166)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#67928)``
+   * ``[main] Upgrade important CI environment (#68163)``
+   * ``Bump stylelint (#68347)``
+   * ``Bump prettier (#68576)``
+   * ``Bump eslint (#68681)``
+   * ``Load example DAGs from providers via ProvidersManager (continuation of #57320) (#66161)``
+
+3.6.5
+.....
+
+Misc
+~~~~
+
+* ``Bump the fab-ui-package-updates group across 1 directory with 5 updates (#67733)``
+* ``Remove further findings from positional session check (#67712)``
+* ``Replace Sphinx Redoc with Swagger API Docs (#67390)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#67512)``
+* ``Add prek hook to enforce HTTPException is imported from fastapi (#67367)``
+* ``Remove exclusion of yanked version dependencies from providers (#66857)``
+* ``Bump eslint (via audit fix) (#67220)``
+
+Doc-only
+~~~~~~~~
+
+* ``Auto-sync provider README.rst Requirements with pyproject.toml (#67669)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Remove findings from positional session check in Core Utils (#67777)``
+   * ``[main] CI: Upgrade important CI environment (#67593)``
+   * ``[main] CI: Upgrade important CI environment (#67313)``
+
+
+3.6.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix provider DB upgrades with existing tables (#66883)``
+* ``Clean up FK associations before deleting role (#65375) (#66686)``
+* ``Fix session cookie serialization when using securecookie backend (#66565)``
+* ``Fix escape special characters in LDAP authentication filter (#66417)``
+
+Misc
+~~~~
+
+* ``Bump flask-appbuilder to 5.2.1 and mirror new auth event hooks (#66841)``
+* ``Bump terser-webpack-plugin (#66834)``
+* ``Pin pyjwt>=2.11.0 in FAB provider and stabilise JWT tests under PyJWT 2.12 (#66840)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#66742)``
+* ``Bump stylelint (#66528)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#66429)``
+* ``Bump stylelint (#67148)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "Remove global variables in airflow.settings (#67070)" (#67099)``
+   * ``Remove global variables in airflow.settings (#67070)``
+   * ``Enable ruff B008 (function-call-in-default-argument) and fix violations (#66979)``
+   * ``[main] CI: Upgrade important CI environment (#66843)``
+
+3.6.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix NPM security vulnerabilities in fab provider (#66031)``
+* ``Fix FAB password hashing to respect FAB_PASSWORD_HASH_METHOD config (#65735)``
+* ``Fix fab mysql migration error caused by pre defiend fk name in orm create (#65831)``
+* ``Fix '/auth/token' 500 when FAB auth manager is recreated (#65710)``
+* ``Honor AUTH_ROLE_PUBLIC in FastAPI API server (#65685)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] CI: Upgrade important CI environment (#66068)``
+   * ``Bump stylelint (#66224)``
+   * ``Bump moment-timezone from 0.6.1 to 0.6.2 in /providers/fab/src/airflow/providers/fab/www in the fab-ui-package-updates group across 1 directory (#66166)``
+   * ``Bump terser-webpack-plugin (#66033)``
+   * ``Bump stylelint (#65979)``
+   * ``Dispose flask_sqlalchemy + airflow ORM engines in fab test fixtures (#65941)``
+   * ``[main] CI: Upgrade important CI environment (#65933)``
+   * ``Revert "Remove global variables in airflow.settings (#61917)" (#65718)``
+   * ``Remove global variables in airflow.settings (#61917)``
+   * ``Providers wave 2026-04-21 (#65614)``
+   * ``Providers wave 2026-04-21``
+
+3.6.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix SQLite migration 02ca36b0235b to use naming_convention for batch_alter_table (#65540)``
+* ``Invalidate cached user permissions after LDAP role sync to prevent intermittent 403 errors (#64539)``
+* ``Lazily initialize flask_app in FastAPI routes (#64908)``
+* ``Fix duplicate Date headers in Flask WSGI responses (#64726)``
+
+Misc
+~~~~
+
+* ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#65567)``
+* ``Bump stylelint (#65380)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#65234)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 4 updates (#65145)``
+* ``Bump eslint (#65681)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] CI: Upgrade important CI environment (#65521)``
+   * ``Isolate non-provider mypy hooks per distribution with dedicated .build/ venvs (#65492)``
+
+3.6.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add authlib as optional oauth extra in fab provider (#64457)``
+* ``Prevent AppBuilder re-initialization race in FastAPI login (#64151) (#64418)``
+
+Misc
+~~~~
+
+* ``Remove dependabot alarms in fab provider npm dependencies (#64789)``
+* ``Add 4-day cooldown for pnpm dependency resolution (#64337)``
+* ``Fix dependabot alarms in FAB provider (#64369)``
+* ``Fix NPM security issues in FAB provider (#64308)``
+* ``chore(deps-dev): bump eslint (#64171)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``CI: Upgrade important CI environment (#64451)``
+   * ``Compat sdk conf follow-up: Celery, Common AI, FAB, Edge3 (#64292)``
+   * ``[main] Upgrade important CI environment (#64239)``
+   * ``Add 4-day cooldown for uv dependency resolution (#64249)``
+
+3.6.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add order_by parameter to GET /permissions for pagination consistency (#63418)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix 403 from roles endpoint despite admin rights (#64097)``
+* ``Fix dependabot alarms for Flatted in Fab (#63956)``
+* ``Fix race condition in FabAuthManager when workers concurrently create permissions, roles, and resources (#63842)``
+* ``Pass role name string to delete_role instead of Role object (#63337)``
+* ``Recover from first idle MySQL disconnect in token auth (#62919)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+* ``Fix mypy errors in kubernetes, fab, google, and amazon providers (#63947)``
+* ``Remove various upper version bounds in the FAB provider (#63868)``
+* ``Bump webpack-cli (#63892)``
+* ``Add marshmallow to fab provider dependencies (#63896)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#63743)``
+* ``Re-introducing '--use-migration-files' and fix inconsistences between ORM/migration files (#62234)``
+* ``Fix dependabot warning regarding flatten lib - providers (#63586)``
+* ``Bump eslint (#63361)``
+* ``Bump babel-loader (#63283)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 4 updates (#64111)``
+* ``UpdateConfImports (#64165)``
+
+Doc-only
+~~~~~~~~
+
+* ``Generate ERD diagrams at doc build time instead of committing them (#63402)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+
+3.5.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Replace connexion with FastAPI for FAB provider (#62664)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add missing HTTP timeout to FAB JWKS fetching (#63058)``
+* ``Fix race condition in auth manager initialization (#62431)``
+* ``Fix/FabAuthManager race condition on startup with multiple workers (#62737)``
+* ``Scope session token in cookie to base_url (#62771)``
+
+Misc
+~~~~
+
+* ``Remove dependency limitations related to FAB's py3.13 incompatibility (#62924)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``chore(deps-dev): bump the fab-ui-package-updates group across 1 directory with 3 updates (#63067)``
+   * ``chore(deps-dev): bump copy-webpack-plugin (#63004)``
+   * ``Upgrade 'sgvo' (#62941)``
+   * ``chore(deps-dev): bump the fab-ui-package-updates group across 1 directory with 3 updates (#62719)``
+   * ``Update dependencies for TS code in Fab Provider (#62679)``
+   * ``CI: Upgrade important CI environment (#62610)``
+   * ``Fix all build-system/requires including transitive dependencies (#62570)``
+
+3.4.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Auto-discover DB managers from provider.yaml (#62308)``
+* ``Feature/enable dynamic build of fab UI assets (#61959)``
+* ``feat(fab): Add configurable role key for Azure OAuth groups (#61585)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``providers-fab: Handle database errors in cleanup_session_middleware Session.remove() (#62336)``
+* ``Fix 500 Error in FAB API Users endpoint by allowing naive datetimes i… (#62327)``
+* ``fix(providers/fab): restore OAuth callback route exposure (#62151)``
+* ``fix: fab deserialize issue (#62153)``
+* ``Fix FAB auth_manager load_user causing PendingRollbackError and Inter… (#61943)``
+* ``fix(api): unify get_permissions pagination with other list endpoints (#61726)``
+
+Misc
+~~~~
+
+* ``chore(deps-dev): bump eslint (#62418)``
+* ``Remove unused dependencies from FAB provider (#62382)``
+* ``Bump css-loader (#62235)``
+* ``fab: centralize FastAPI auth manager routing (#61647)``
+* ``Change FAB asset compilation from yarn to pnpm (#61958)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#62039)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#61779)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "Fix race condition in auth manager initialization (#62214)" (#62404)``
+   * ``Fix race condition in auth manager initialization (#62214)``
+   * ``Add comment to remove 'get_db_manager' method from FAB provider (#62361)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``Remove duplicated import in roles.py (#61896)``
+   * ``YAML first discovery for connection form metadata (#60410)``
+
+3.3.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Support string update_mask in FABAuthManagerRoles.patch_role (#61507)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add session cleanup middleware to FAB FastAPI app (#61480)``
+* ``Prevent 500 error when JWT user is missing in FabAuthManager (#61517)``
+* ``Add session rollback in FAB find_user to clear invalid transactions (#61374)``
+* ``Use correct PUT permission for /roles/{name} endpoint (#61462)``
+* ``Fix OAuth session race condition causing false 401 errors during login (#61287)``
+
+Misc
+~~~~
+
+* ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#61500)``
+* ``Deprecate 'is_authorized_backfill' in FAB auth manager (#61402)``
+* ``Upgrade fastapi and conform openapi schema changes (#61476)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#61404)``
+* ``Migrate Flask based role_and_permission_endpoint APIs to Fastapi (#60977)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#61134)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove duplicate task failure permission entry (#61215)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Cache user object fetched per request in FAB auth manager for improved performance. (#60274)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``(bugfix): Add dark theme support for FAB Security pages (#60908)``
+* ``fix(fab): Align ORM column sizes with migration definitions (#60869)``
+
+Misc
+~~~~
+
+* ``Migrate Flask based user APIs to Fastapi (#60973)``
+* ``Improve typing in Fab (#61001)``
+* ``Bump lodash from 4.17.21 to 4.17.23 in /providers/fab/src/airflow/providers/fab/www (#60911)``
+* ``Bump mini-css-extract-plugin from 2.9.4 to 2.10.0 in /providers/fab/src/airflow/providers/fab/www in the fab-ui-package-updates group across 1 directory (#60831)``
+* ``Remove non-logic redundant selection and query in FAB (#60807)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 5 updates (#60791)``
+* ``Migrate FAB POST /users to FastAPI (#60523)``
+
+Doc-only
+~~~~~~~~
+
+* ``Add Azure AD OAuth webserver authentication example with role mapping (#60756)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.1.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fab Auth Manager add xcom missing perms (#60315)``
+* ``Fix typos in CLI commands (#60227)``
+* ``Hide Groups field from User edit form in FAB Auth Manager (#60019)``
+* ``Fix user creation in FAB fails when no role specified (#60015)``
+
+Misc
+~~~~
+
+* ``Change starlette import to fastapi (#60382)``
+* ``New year means updated Copyright notices (#60344)``
+* ``rename names of data models related to roles for consistency across requests and responses (#60312)``
+* ``Introduce a "cli" section in provider metadata (#59805)``
+* ``Move over plugins_manager to a shared library (#59956)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 4 updates (#59717)``
+* ``Make FAB AirflowAppBuilder use scoped_session (#59953)``
+* ``Upgrade SQLAlchemy (SQLA) to 2.0 (#59218)``
+
+Doc-only
+~~~~~~~~
+
+* ``Clarify note re: webserver_config.py deprecation (#59529)``
+* ``#59475 (docs): added few clarification docs for OAuth Authentication type (#60109)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.1.1
+.....
+
+Misc
+~~~~
+
+* ``Remove global from plugins_manager (#59851)``
+* ``Replace imports from airflow.security.permissions module in fab provider due to future deprecation of the module. (#59755)``
+* ``Split SerializedBaseOperator from serde logic (#59627)``
+* ``Adaptions for custom auth manager example in documentation (#59355)``
+* ``Pnpm upgrade to 10.x and prevent script execution (#59466)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#59242)``
+
+Doc-only
+~~~~~~~~
+
+* ``Add hints for claim validation to auth manager documentation (#59320)``
+* ``Fix release process issues after going through 2025-12-09 release (#59261)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.1.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Create 'create_token' method in FAB auth manager (#59245)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Permit 'airflow db migrate -r' with an empty database (#59205)``
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+* ``Remove global statement from Fab provider (#59018)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#58954)``
+* ``Bump minimum prek version to 0.2.0 (#58952)``
+* ``Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead of 'HTTP_422_UNPROCESSABLE_ENTITY' (#58828)``
+
+Doc-only
+~~~~~~~~
+
+* ``docs: adjust misleading docs (#59228)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+3.0.3
+.....
+
+Misc
+~~~~
+
+* ``Bump stylelint from 16.25.0 to 16.26.0 in /providers/fab/src/airflow/providers/fab/www in the fab-ui-package-updates group across 1 directory (#58678)``
+* ``Remove deprecation warning in Fab provider (#58686)``
+* ``Fix mypy errors in providers (#58644)``
+* ``Bump webpack from 5.102.1 to 5.103.0 in /providers/fab/src/airflow/providers/fab/www in the fab-ui-package-updates group across 1 directory (#58634)``
+* ``Upgrade js-yaml to 4.1.1 in FAB (#58501)``
+* ``Migrate FAB PATCH /roles/{name} to FastAPI (#58023)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+3.0.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix duplicated SQLAlchemy sessions caused transactions fail to close (#58196)``
+* ``Fix logout in Fab and Keycloak auth managers (#57992)``
+* ``Fix double redirection while authenticating in Fab auth manager (#57993)``
+* ``Fix remote user authentication in Fab auth manager (#57775)``
+* ``Fix Fab auth manager with 'securecookie' as session backend (#57578)``
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+* ``Migrate FAB GET /roles/{name} to FastAPI (#58009)``
+* ``Migrate FAB DELETE /roles to FastAPI (#57780)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 2 updates (#57760)``
+* ``Migrate FAB GET /roles to FastAPI (#57411)``
+* ``Synchronize boto3 and sqlalchemy dependency lower-binds (#57385)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 4 updates (#57160)``
+* ``Migrate FAB POST /roles to FastAPI (#57199)``
+* ``Upgrade 'flask-appbuilder' to 5.0.1 (#57170)``
+* ``refactor: migrate models to use mapped_column for SQLAlchemy 2.0 compatibility (#56827)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fixing some typos and spelling errors (#57186)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable pt006 rule and fix new generate errors (#58238)``
+   * ``Enable ruff PLW2101,PLW2901,PLW3301 rule (#57700)``
+   * ``Revert "Fix duplicated SQLAlchemy sessions caused transactions fail to close (#57815)" (#58097)``
+   * ``Fix duplicated SQLAlchemy sessions caused transactions fail to close (#57815)``
+   * ``Synchronize default versions in all split .pre-commit-config.yaml (#57851)``
+   * ``Fix mypy static errors in fab provider (#57761)``
+   * ``Fix mypy static errors in main (#57755)``
+   * ``Fix mypy type errors in providers/standard/ in external_task.py for SQLAlchemy 2 migration (#57369)``
+   * ``Enable ruff PLW1641 rule (#57679)``
+   * ``Extract prek hooks for FAB provider (#57181)``
+
+3.0.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Update authentication to handle JWT token in backend (#56633)``
+* ``Add Werkzeug version check (#56398)``
+
+Misc
+~~~~
+
+* ``SQLA2/FAB: fix some type hints (#56928)``
+* ``FAB: reuse ORM type hints from common-compat (#56903)``
+* ``Bump eslint from 9.37.0 to 9.38.0 in /providers/fab/src/airflow/providers/fab/www in the fab-ui-package-updates group across 1 directory (#56847)``
+* ``Bump the fab-ui-package-updates group across 1 directory with 3 updates (#56436)``
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+3.0.0
+.....
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+Migrated to Flask-appbuilder 5 which removed the authentication type ``AUTH_OID``.
+Using the authentication type ``AUTH_OID`` in fab provider is no longer possible.
+Applications using ``AUTH_TYPE = AUTH_OID`` must migrate to ``AUTH_OAUTH``.
+
+* ``Upgrade flask-appbuilder to version 5 (#50960)``
+
+Features
+~~~~~~~~
+
+* ``Support nested groups resolution for LDAP authentication in Fab auth manager``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add 'if_not_exists=True' to FAB migration (#56100)``
+* ``Add if_not_exists to index creation in migrations (#56328)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix static check error resulting from not rebased change in FAB5 (#56178)``
+   * ``Remove placeholder Release Date in changelog and index files (#56056)``
+   * ``Prepare fab and amazon providers to release (September 2025) (#56241)``
+
 2.4.4
 .....
 
@@ -201,7 +865,7 @@ Doc-only
 Bug Fixes
 ~~~~~~~~~
 
-* ``Fix: allow users with specific DAG permissions to access DAGs when no pecific DAG is requested (#51462)``
+* ``Fix: allow users with specific DAG permissions to access DAGs when no specific DAG is requested (#51462)``
 * ``Fix fab asset compilation hashing script (#51446)``
 * ``Fix default setting for hash algorithm for FAB password hash (#51858)``
 
@@ -605,8 +1269,6 @@ Misc
    appropriate section above if needed. Do not delete the lines(!):
    * ``Add TODOs in providers code for Subdag code removal (#41963)``
    * ``Add fixes by breeze/precommit-lint static checks (#41604) (#41618)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Fix pre-commit for auto update of fab migration versions (#42382)``
    * ``Handle 'AUTH_ROLE_PUBLIC' in FAB auth manager (#42280)``
 

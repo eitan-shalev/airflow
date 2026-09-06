@@ -16,20 +16,20 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Flex, Heading, HStack } from "@chakra-ui/react";
+import { Box, Flex, Heading } from "@chakra-ui/react";
 import { useTranslation } from "react-i18next";
 import { FiClipboard, FiZap } from "react-icons/fi";
 
 import { useDashboardServiceDagStats } from "openapi/queries";
-import { NeedsReviewButton } from "src/components/NeedsReviewButton";
+import { NeedsReviewButtonWithModal } from "src/components/NeedsReviewButton";
 import { StatsCard } from "src/components/StatsCard";
 import { useAutoRefresh } from "src/utils";
 
-import { DAGImportErrors } from "./DAGImportErrors";
+import { DagImportErrors } from "./DagImportErrors";
 import { PluginImportErrors } from "./PluginImportErrors";
 
 export const Stats = () => {
-  const refetchInterval = useAutoRefresh({});
+  const refetchInterval = useAutoRefresh({ checkPendingRuns: true });
   const { data: statsData, isLoading: isStatsLoading } = useDashboardServiceDagStats(undefined, {
     refetchInterval,
   });
@@ -51,8 +51,8 @@ export const Stats = () => {
         </Heading>
       </Flex>
 
-      <HStack gap={4}>
-        <NeedsReviewButton />
+      <Flex flexWrap="wrap" gap={4}>
+        <NeedsReviewButtonWithModal />
 
         <StatsCard
           colorScheme="failed"
@@ -64,7 +64,7 @@ export const Stats = () => {
           state="failed"
         />
 
-        <DAGImportErrors />
+        <DagImportErrors />
 
         <PluginImportErrors />
 
@@ -75,7 +75,7 @@ export const Stats = () => {
             isLoading={isStatsLoading}
             isRTL={isRTL}
             label={translate("stats.queuedDags")}
-            link="dags?last_dag_run_state=queued"
+            link="dags?dag_run_state=queued"
             state="queued"
           />
         ) : undefined}
@@ -86,7 +86,7 @@ export const Stats = () => {
           isLoading={isStatsLoading}
           isRTL={isRTL}
           label={translate("stats.runningDags")}
-          link="dags?last_dag_run_state=running"
+          link="dags?dag_run_state=running"
           state="running"
         />
 
@@ -99,7 +99,7 @@ export const Stats = () => {
           label={translate("stats.activeDags")}
           link="dags?paused=false"
         />
-      </HStack>
+      </Flex>
     </Box>
   );
 };

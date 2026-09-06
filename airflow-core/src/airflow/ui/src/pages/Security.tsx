@@ -17,10 +17,13 @@
  * under the License.
  */
 import { Box } from "@chakra-ui/react";
-import { useParams } from "react-router-dom";
+import { useRef } from "react";
+import { useTranslation } from "react-i18next";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { useAuthLinksServiceGetAuthMenus } from "openapi/queries";
 import { ProgressBar } from "src/components/ui";
+import { useDocumentTitle } from "src/utils";
 
 import { ErrorPage } from "./Error";
 
@@ -32,10 +35,38 @@ const SANDBOX = "allow-scripts allow-same-origin allow-forms";
 
 export const Security = () => {
   const { page } = useParams();
+  const { t: translate } = useTranslation();
+
+  useDocumentTitle(translate("nav.security"));
 
   const { data: authLinks, isLoading } = useAuthLinksServiceGetAuthMenus();
 
   const link = authLinks?.extra_menu_items.find((mi) => mi.text.toLowerCase().replace(" ", "-") === page);
+
+  const navigate = useNavigate();
+  // Track when we are already redirecting so that setting iframe.src = "about:blank"
+  // (which fires another onLoad event) does not trigger a second navigate call.
+  const isRedirecting = useRef(false);
+
+  const onLoad = () => {
+    if (isRedirecting.current) {
+      return;
+    }
+
+    const iframe: HTMLIFrameElement | null = document.querySelector("#security-iframe");
+
+    if (iframe?.contentWindow) {
+      const base = new URL(document.baseURI).pathname.replace(/\/$/u, ""); // Remove trailing slash if exists
+
+      if (!iframe.contentWindow.location.pathname.startsWith(`${base}/auth/`)) {
+        // Clear the iframe immediately so that the React app does not render its own
+        // navigation sidebar inside the iframe, which would produce a duplicate nav bar.
+        isRedirecting.current = true;
+        iframe.src = "about:blank";
+        void navigate("/");
+      }
+    }
+  };
 
   if (!link) {
     if (isLoading) {
@@ -51,7 +82,17 @@ export const Security = () => {
 
   return (
     <Box flexGrow={1} m={-3}>
-      <iframe sandbox={SANDBOX} src={link.href} style={{ height: "100%", width: "100%" }} title={link.text} />
+      {
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+        <iframe
+          id="security-iframe"
+          onLoad={onLoad}
+          sandbox={SANDBOX}
+          src={link.href}
+          style={{ height: "100%", width: "100%" }}
+          title={link.text}
+        />
+      }
     </Box>
   );
 };

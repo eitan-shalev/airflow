@@ -25,7 +25,6 @@ DEVELOPER_COMMANDS: dict[str, str | list[str]] = {
         "shell",
         "exec",
         "run",
-        "compile-ui-assets",
         "cleanup",
         "generate-migration-file",
         "doctor",
@@ -54,6 +53,7 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             "name": "Database",
             "options": [
                 "--backend",
+                "--custom-db-url",
                 "--postgres-version",
                 "--mysql-version",
                 "--db-reset",
@@ -65,7 +65,6 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--github-repository",
                 "--builder",
                 "--use-uv",
-                "--uv-http-timeout",
             ],
         },
         {
@@ -111,6 +110,7 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             "name": "Database",
             "options": [
                 "--backend",
+                "--custom-db-url",
                 "--postgres-version",
                 "--mysql-version",
                 "--db-reset",
@@ -132,7 +132,6 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--github-repository",
                 "--builder",
                 "--use-uv",
-                "--uv-http-timeout",
             ],
         },
         {
@@ -161,6 +160,7 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--providers-constraints-reference",
                 "--providers-skip-constraints",
                 "--use-airflow-version",
+                "--mount-ui-dist",
                 "--allow-pre-releases",
                 "--use-distributions-from-dist",
                 "--install-airflow-python-client",
@@ -193,15 +193,6 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             ],
         },
     ],
-    "breeze compile-ui-assets": [
-        {
-            "name": "Compile ui assets flag",
-            "options": [
-                "--dev",
-                "--force-clean",
-            ],
-        }
-    ],
     "breeze start-airflow": [
         {
             "name": "Execution mode",
@@ -210,6 +201,7 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--platform",
                 "--integration",
                 "--standalone-dag-processor",
+                "--terminal-multiplexer",
                 "--auth-manager",
                 "--load-example-dags",
                 "--load-default-connections",
@@ -227,6 +219,7 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             "name": "Database",
             "options": [
                 "--backend",
+                "--custom-db-url",
                 "--postgres-version",
                 "--mysql-version",
                 "--db-reset",
@@ -254,7 +247,6 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--github-repository",
                 "--builder",
                 "--use-uv",
-                "--uv-http-timeout",
             ],
         },
         {
@@ -279,15 +271,14 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--providers-constraints-reference",
                 "--providers-skip-constraints",
                 "--use-airflow-version",
+                "--mount-ui-dist",
                 "--allow-pre-releases",
                 "--use-distributions-from-dist",
             ],
         },
         {
             "name": "Other options",
-            "options": [
-                "--forward-credentials",
-            ],
+            "options": ["--forward-credentials", "--create-all-roles"],
         },
         {
             "name": "Debugging options",
@@ -303,8 +294,10 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             "options": [
                 "--python",
                 "--backend",
+                "--custom-db-url",
                 "--postgres-version",
                 "--mysql-version",
+                "--forward-ports",
                 "--tty",
             ],
         },
@@ -316,7 +309,6 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--github-repository",
                 "--builder",
                 "--use-uv",
-                "--uv-http-timeout",
             ],
         },
         {
@@ -343,11 +335,18 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--cleanup-build-cache",
             ],
         },
+        {
+            "name": "Project selection",
+            "options": [
+                "--all-projects",
+                "--project-name",
+            ],
+        },
     ],
     "breeze build-docs": [
         {
-            "name": "Build scope (default is to build docs and spellcheck)",
-            "options": ["--docs-only", "--spellcheck-only"],
+            "name": "Build scope (default is to build Python docs and spellcheck)",
+            "options": ["--docs-only", "--sdk-docs-only", "--spellcheck-only"],
         },
         {
             "name": "Type of build",
@@ -355,11 +354,17 @@ DEVELOPER_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
         },
         {
             "name": "Cleaning inventories",
-            "options": ["--clean-build", "--refresh-airflow-inventories"],
+            "options": [
+                "--clean-build",
+                "--clean-inventory-cache",
+                "--refresh-airflow-inventories",
+                "--fail-on-missing-third-party-inventories",
+            ],
         },
         {
             "name": "Filtering options",
             "options": [
+                "--sdk",
                 "--package-filter",
                 "--include-not-ready-providers",
                 "--include-removed-providers",

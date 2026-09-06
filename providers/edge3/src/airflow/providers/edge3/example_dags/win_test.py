@@ -28,46 +28,55 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Container, Sequence
 from datetime import datetime
-from subprocess import STDOUT, Popen
+from subprocess import STDOUT, Popen, SubprocessError
 from time import sleep
 from typing import TYPE_CHECKING, Any
+
+from airflow.models import BaseOperator
+from airflow.models.dag import DAG
+from airflow.models.variable import Variable
+from airflow.providers.common.compat.sdk import (
+    AirflowNotFoundException,
+    AirflowSkipException,
+)
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.sdk.execution_time.context import context_to_airflow_vars
 
 try:
     from airflow.sdk import task, task_group
 except ImportError:
-    # Airflow 2 path
     from airflow.decorators import task, task_group  # type: ignore[attr-defined,no-redef]
-from airflow.exceptions import AirflowException, AirflowNotFoundException, AirflowSkipException
-from airflow.models import BaseOperator
-from airflow.models.dag import DAG
-from airflow.models.variable import Variable
-from airflow.providers.standard.operators.empty import EmptyOperator
-
 try:
     from airflow.sdk import BaseHook
 except ImportError:
     from airflow.hooks.base import BaseHook  # type: ignore[attr-defined,no-redef]
-from airflow.sdk import Param
-
+try:
+    from airflow.sdk import Param
+except ImportError:
+    from airflow.models import Param  # type: ignore[attr-defined,no-redef]
 try:
     from airflow.sdk import TriggerRule
 except ImportError:
-    # Compatibility for Airflow < 3.1
     from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
-from airflow.sdk.execution_time.context import context_to_airflow_vars
-from airflow.utils.types import ArgNotSet
+try:
+    from airflow.providers.common.compat.standard.operators import PythonOperator
+except ImportError:
+    from airflow.operators.python import PythonOperator  # type: ignore[no-redef]
+try:
+    from airflow.sdk.definitions._internal.types import NOTSET, ArgNotSet
+except ImportError:
+    from airflow.utils.types import NOTSET, ArgNotSet  # type: ignore[attr-defined,no-redef]
+try:
+    from airflow.sdk.definitions._internal.types import is_arg_set
+except ImportError:
+
+    def is_arg_set(value):  # type: ignore[misc,no-redef]
+        return value is not NOTSET
+
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.types import RuntimeTaskInstanceProtocol as TaskInstance
-    except ImportError:
-        from airflow.models import TaskInstance  # type: ignore[assignment]
-    from airflow.utils.context import Context
-
-try:
-    from airflow.operators.python import PythonOperator
-except ImportError:
-    from airflow.providers.common.compat.standard.operators import PythonOperator
+    from airflow.sdk import Context
+    from airflow.sdk.types import RuntimeTaskInstanceProtocol as TaskInstance
 
 
 class CmdOperator(BaseOperator):
@@ -115,7 +124,7 @@ class CmdOperator(BaseOperator):
        * - `skip_on_exit_code` (default: 99)
          - raise :class:`airflow.exceptions.AirflowSkipException`
        * - otherwise
-         - raise :class:`airflow.exceptions.AirflowException`
+         - raise :class:`subprocess.SubprocessError`
 
     .. warning::
 
@@ -131,7 +140,7 @@ class CmdOperator(BaseOperator):
 
     template_fields: Sequence[str] = ("command", "env", "cwd")
     template_fields_renderers = {"command": "bash", "env": "json"}
-    template_ext: Sequence[str] = ".bat"
+    template_ext: Sequence[str] = (".bat",)
 
     subprocess: Popen | None = None
 
@@ -163,7 +172,7 @@ class CmdOperator(BaseOperator):
         # When using the @task.command decorator, the command is not known until the underlying Python
         # callable is executed and therefore set to NOTSET initially. This flag is useful during execution to
         # determine whether the command value needs to re-rendered.
-        self._init_command_not_set = isinstance(self.command, ArgNotSet)
+        self._init_command_not_set = not is_arg_set(self.command)
 
     @staticmethod
     def refresh_command(ti: TaskInstance) -> None:
@@ -200,9 +209,9 @@ class CmdOperator(BaseOperator):
     def execute(self, context: Context):
         if self.cwd is not None:
             if not os.path.exists(self.cwd):
-                raise AirflowException(f"Can not find the cwd: {self.cwd}")
+                raise SubprocessError(f"Can not find the cwd: {self.cwd}")
             if not os.path.isdir(self.cwd):
-                raise AirflowException(f"The cwd {self.cwd} must be a directory")
+                raise SubprocessError(f"The cwd {self.cwd} must be a directory")
         env = self.get_env(context)
 
         # Because the command value is evaluated at runtime using the @task.command decorator, the
@@ -227,7 +236,7 @@ class CmdOperator(BaseOperator):
         if exit_code in self.skip_on_exit_code:
             raise AirflowSkipException(f"Command returned exit code {exit_code}. Skipping.")
         if exit_code != 0:
-            raise AirflowException(f"Command failed. The command returned a non-zero exit code {exit_code}.")
+            raise SubprocessError(f"Command failed. The command returned a non-zero exit code {exit_code}.")
 
         return self.output_processor(outs)
 
@@ -243,7 +252,7 @@ with DAG(
     doc_md=__doc__,
     schedule=None,
     start_date=datetime(2025, 1, 1),
-    tags=["edge", "Windows"],
+    tags=["example", "edge", "Windows"],
     default_args={"queue": "windows"},
     params={
         "mapping_count": Param(

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import os
 import shutil
 from functools import cached_property
@@ -26,8 +27,8 @@ from typing import TYPE_CHECKING
 
 import attrs
 
-from airflow.configuration import conf
 from airflow.providers.alibaba.cloud.hooks.oss import OSSHook
+from airflow.providers.common.compat.sdk import conf
 from airflow.utils.log.file_task_handler import FileTaskHandler
 from airflow.utils.log.logging_mixin import LoggingMixin
 
@@ -44,20 +45,45 @@ class OSSRemoteLogIO(LoggingMixin):  # noqa: D101
 
     processors = ()
 
-    def upload(self, path: os.PathLike | str, ti: RuntimeTI):
+    @classmethod
+    def from_config(cls) -> OSSRemoteLogIO:
+        """Build the remote log IO from Airflow logging configuration."""
+        remote_task_handler_kwargs = conf.getjson("logging", "remote_task_handler_kwargs", fallback={})
+        if not isinstance(remote_task_handler_kwargs, dict):
+            raise ValueError(
+                "logging/remote_task_handler_kwargs must be a JSON object (a python dict), we got "
+                f"{type(remote_task_handler_kwargs)}"
+            )
+        # remote_task_handler_kwargs mixes FileTaskHandler kwargs with IO kwargs; only the
+        #  latter belongs to this (same split as airflow_local_settings.py).
+        fth_params = frozenset(inspect.signature(FileTaskHandler.__init__).parameters) - {
+            "self",
+            "base_log_folder",
+        }
+        io_kwargs = {k: v for k, v in remote_task_handler_kwargs.items() if k not in fth_params}
+        return cls(
+            **{
+                "base_log_folder": os.path.expanduser(conf.get_mandatory_value("logging", "base_log_folder")),
+                "remote_base": conf.get_mandatory_value("logging", "remote_base_log_folder"),
+                "delete_local_copy": conf.getboolean("logging", "delete_local_logs"),
+            }
+            | io_kwargs,
+        )
+
+    def upload(self, path: os.PathLike | str, ti: RuntimeTI | None = None) -> None:
         """Upload the given log path to the remote storage."""
         path = Path(path)
         if path.is_absolute():
             local_loc = path
-            remote_loc = os.path.join(self.remote_base, path.relative_to(self.base_log_folder))
+            relative_path = str(path.relative_to(self.base_log_folder))
         else:
             local_loc = self.base_log_folder.joinpath(path)
-            remote_loc = os.path.join(self.remote_base, path)
+            relative_path = str(path)
 
         if local_loc.is_file():
             # read log and remove old logs to get just the latest additions
             log = local_loc.read_text()
-            has_uploaded = self.oss_write(log, remote_loc)
+            has_uploaded = self.oss_write(log, relative_path)
             if has_uploaded and self.delete_local_copy:
                 shutil.rmtree(os.path.dirname(local_loc))
 
@@ -245,11 +271,11 @@ class OSSTaskHandler(FileTaskHandler, LoggingMixin):
         log_relative_path = self._render_filename(ti, try_number)
         remote_loc = log_relative_path
 
-        if not self.oss_log_exists(remote_loc):
+        if not self.io.oss_log_exists(remote_loc):
             return super()._read(ti, try_number, metadata)
         # If OSS remote file exists, we do not fetch logs from task instance
         # local machine even if there are errors reading remote logs, as
         # returned remote_log will contain error messages.
-        remote_log = self.oss_read(remote_loc, return_error=True)
+        remote_log = self.io.oss_read(remote_loc, return_error=True)
         log = f"*** Reading remote log from {remote_loc}.\n{remote_log}\n"
         return log, {"end_of_log": True}

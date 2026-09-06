@@ -21,32 +21,36 @@ import re
 import time
 from collections import namedtuple
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from functools import cached_property
+from typing import TYPE_CHECKING, Any, cast
 
 from azure.mgmt.containerinstance.models import (
     Container,
     ContainerGroup,
     ContainerGroupDiagnostics,
+    ContainerGroupIdentity,
     ContainerGroupSubnetId,
     ContainerPort,
     DnsConfiguration,
     EnvironmentVariable,
     IpAddress,
+    ResourceIdentityType,
     ResourceRequests,
     ResourceRequirements,
+    UserAssignedIdentities,
     Volume as _AzureVolume,
     VolumeMount,
 )
 from msrestazure.azure_exceptions import CloudError
 
-from airflow.exceptions import AirflowException, AirflowTaskTimeout
+from airflow.providers.common.compat.sdk import AirflowException, AirflowTaskTimeout, BaseOperator, conf
 from airflow.providers.microsoft.azure.hooks.container_instance import AzureContainerInstanceHook
 from airflow.providers.microsoft.azure.hooks.container_registry import AzureContainerRegistryHook
 from airflow.providers.microsoft.azure.hooks.container_volume import AzureContainerVolumeHook
-from airflow.providers.microsoft.azure.version_compat import BaseOperator
+from airflow.providers.microsoft.azure.triggers.container_instance import AzureContainerInstanceTrigger
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 Volume = namedtuple(
     "Volume",
@@ -102,6 +106,11 @@ class AzureContainerInstancesOperator(BaseOperator):
     :param dns_config: The DNS configuration for a container group.
     :param diagnostics: Container group diagnostic information (Log Analytics).
     :param priority: Container group priority, Possible values include: 'Regular', 'Spot'
+    :param identity: List of User/System assigned identities for the container group.
+    :param deferrable: Run in deferrable mode, releasing the worker slot while the container
+        runs. Defaults to ``[operators] default_deferrable`` in ``airflow.cfg``.
+    :param remove_on_success: Delete the container group after a successful run. Default ``True``.
+    :param polling_interval: Seconds between status polls in deferrable mode. Default ``30.0``.
 
     **Example**::
 
@@ -144,6 +153,15 @@ class AzureContainerInstancesOperator(BaseOperator):
                 }
             },
             priority="Regular",
+            identity = {
+                "type": "UserAssigned" | "SystemAssigned" | "SystemAssigned,UserAssigned",
+                "resource_ids": [
+                  "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<id>"
+                ]
+                "user_assigned_identities": {
+                  "/subscriptions/.../userAssignedIdentities/<id>": {}
+                }
+            }
             command=["/bin/echo", "world"],
             task_id="start_container",
         )
@@ -169,6 +187,7 @@ class AzureContainerInstancesOperator(BaseOperator):
         gpu: Any | None = None,
         command: list[str] | None = None,
         remove_on_error: bool = True,
+        remove_on_success: bool = True,
         fail_if_exists: bool = True,
         tags: dict[str, str] | None = None,
         xcom_all: bool | None = None,
@@ -180,6 +199,9 @@ class AzureContainerInstancesOperator(BaseOperator):
         dns_config: DnsConfiguration | None = None,
         diagnostics: ContainerGroupDiagnostics | None = None,
         priority: str | None = "Regular",
+        identity: ContainerGroupIdentity | dict | None = None,
+        deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
+        polling_interval: float = 30.0,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -198,8 +220,8 @@ class AzureContainerInstancesOperator(BaseOperator):
         self.gpu = gpu
         self.command = command
         self.remove_on_error = remove_on_error
+        self.remove_on_success = remove_on_success
         self.fail_if_exists = fail_if_exists
-        self._ci_hook: Any = None
         self.tags = tags
         self.xcom_all = xcom_all
         self.os_type = os_type
@@ -222,22 +244,87 @@ class AzureContainerInstancesOperator(BaseOperator):
         self.dns_config = dns_config
         self.diagnostics = diagnostics
         self.priority = priority
+        self.identity = self._ensure_identity(identity)
         if self.priority not in ["Regular", "Spot"]:
             raise AirflowException(
                 "Invalid value for the priority argument. "
                 "Please set 'Regular' or 'Spot' as the priority. "
                 f"Found `{self.priority}`."
             )
+        self.deferrable = deferrable
+        self.polling_interval = polling_interval
+
+    # helper to accept dict (user-friendly) or ContainerGroupIdentity (SDK object)
+    @staticmethod
+    def _ensure_identity(identity: ContainerGroupIdentity | dict | None) -> ContainerGroupIdentity | None:
+        """
+        Normalize identity input into a ContainerGroupIdentity instance.
+
+        Accepts:
+         - None -> returns None
+         - ContainerGroupIdentity -> returned as-is
+         - dict -> converted to ContainerGroupIdentity
+         - any other object -> returned as-is (pass-through) to preserve backwards compatibility
+
+        Expected dict shapes:
+          {"type": "UserAssigned", "resource_ids": ["/.../userAssignedIdentities/id1", ...]}
+        or
+          {"type": "SystemAssigned"}
+        or
+          {"type": "SystemAssigned,UserAssigned", "resource_ids": [...]}
+        """
+        if identity is None:
+            return None
+
+        if isinstance(identity, ContainerGroupIdentity):
+            return identity
+
+        if isinstance(identity, dict):
+            # require type
+            id_type = identity.get("type")
+            if not id_type:
+                raise AirflowException(
+                    "identity dict must include 'type' key with value 'UserAssigned' or 'SystemAssigned'"
+                )
+
+            # map common string type names to ResourceIdentityType enum values if available
+            type_map = {
+                "SystemAssigned": ResourceIdentityType.system_assigned,
+                "UserAssigned": ResourceIdentityType.user_assigned,
+                "SystemAssigned,UserAssigned": ResourceIdentityType.system_assigned_user_assigned,
+                "SystemAssigned, UserAssigned": ResourceIdentityType.system_assigned_user_assigned,
+            }
+            cg_type = type_map.get(id_type, id_type)
+
+            # build user_assigned_identities mapping if resource_ids provided
+            resource_ids = identity.get("resource_ids")
+            if resource_ids:
+                if not isinstance(resource_ids, (list, tuple)):
+                    raise AirflowException("identity['resource_ids'] must be a list of resource id strings")
+                user_assigned_identities: dict[str, Any] = {rid: {} for rid in resource_ids}
+            else:
+                # accept a pre-built mapping if given
+                user_assigned_identities = identity.get("user_assigned_identities") or {}
+
+            return ContainerGroupIdentity(
+                type=cg_type,
+                user_assigned_identities=cast(
+                    "dict[str, UserAssignedIdentities] | None", user_assigned_identities
+                ),
+            )
+        return identity
+
+    @cached_property
+    def hook(self) -> AzureContainerInstanceHook:
+        return AzureContainerInstanceHook(azure_conn_id=self.ci_conn_id)
 
     def execute(self, context: Context) -> int:
         # Check name again in case it was templated.
         self._check_name(self.name)
 
-        self._ci_hook = AzureContainerInstanceHook(azure_conn_id=self.ci_conn_id)
-
         if self.fail_if_exists:
             self.log.info("Testing if container group already exists")
-            if self._ci_hook.exists(self.resource_group, self.name):
+            if self.hook.exists(self.resource_group, self.name):
                 raise AirflowException("Container group exists")
 
         if self.registry_conn_id:
@@ -266,6 +353,7 @@ class AzureContainerInstancesOperator(BaseOperator):
             volume_mounts.append(VolumeMount(name=mount_name, mount_path=mount_path, read_only=read_only))
 
         exit_code = 1
+        _cleanup = True
         try:
             self.log.info("Starting container group with %.1f cpu %.1f mem", self.cpu, self.memory_in_gb)
             if self.gpu:
@@ -304,15 +392,29 @@ class AzureContainerInstancesOperator(BaseOperator):
                 dns_config=self.dns_config,
                 diagnostics=self.diagnostics,
                 priority=self.priority,
+                identity=self.identity,
             )
 
-            self._ci_hook.create_or_update(self.resource_group, self.name, container_group)
+            self.hook.create_or_update(self.resource_group, self.name, container_group)
 
             self.log.info("Container group started %s/%s", self.resource_group, self.name)
 
+            if self.deferrable:
+                _cleanup = False
+                self.defer(
+                    trigger=AzureContainerInstanceTrigger(
+                        resource_group=self.resource_group,
+                        name=self.name,
+                        ci_conn_id=self.ci_conn_id,
+                        polling_interval=self.polling_interval,
+                    ),
+                    method_name=self.execute_complete.__name__,
+                    timeout=self.execution_timeout,
+                )
+
             exit_code = self._monitor_logging(self.resource_group, self.name)
             if self.xcom_all is not None:
-                logs = self._ci_hook.get_logs(self.resource_group, self.name)
+                logs = self.hook.get_logs(self.resource_group, self.name)
                 if logs is None:
                     context["ti"].xcom_push(key="logs", value=[])
                 else:
@@ -332,15 +434,56 @@ class AzureContainerInstancesOperator(BaseOperator):
             raise AirflowException("Could not start container group")
 
         finally:
-            if exit_code == 0 or self.remove_on_error:
-                self.on_kill()
+            if _cleanup:
+                if exit_code == 0 and self.remove_on_success:
+                    self.on_kill()
+                elif exit_code != 0 and self.remove_on_error:
+                    self.on_kill()
 
     def on_kill(self) -> None:
         self.log.info("Deleting container group")
         try:
-            self._ci_hook.delete(self.resource_group, self.name)
+            self.hook.delete(self.resource_group, self.name)
         except Exception:
             self.log.exception("Could not delete container group")
+
+    def execute_complete(self, context: Context, event: dict[str, Any] | None) -> int:
+        """
+        Handle the trigger event after deferral.
+
+        Called by the Triggerer when the container reaches a terminal state.
+        Raises on failure; returns the exit code on success.
+        """
+        if event is None:
+            raise ValueError("Trigger error: event is None")
+
+        exit_code: int = event.get("exit_code", 1)
+
+        if event["status"] == "error":
+            if self.remove_on_error:
+                self.on_kill()
+            raise RuntimeError(
+                event.get(
+                    "message",
+                    f"Container group {self.resource_group}/{self.name} failed with exit code {exit_code}",
+                )
+            )
+
+        try:
+            if self.xcom_all is not None:
+                logs = self.hook.get_logs(self.resource_group, self.name)
+                if logs is None:
+                    context["ti"].xcom_push(key="logs", value=[])
+                elif self.xcom_all:
+                    context["ti"].xcom_push(key="logs", value=logs)
+                else:
+                    context["ti"].xcom_push(key="logs", value=logs[-1:])
+
+            self.log.info("Container had exit code: %s", exit_code)
+            return exit_code
+        finally:
+            if self.remove_on_success:
+                self.on_kill()
 
     def _monitor_logging(self, resource_group: str, name: str) -> int:
         last_state = None
@@ -349,7 +492,7 @@ class AzureContainerInstancesOperator(BaseOperator):
 
         while True:
             try:
-                cg_state = self._ci_hook.get_state(resource_group, name)
+                cg_state = self.hook.get_state(resource_group, name)
                 instance_view = cg_state.containers[0].instance_view
                 # If there is no instance view, we show the provisioning state
                 if instance_view is not None:
@@ -374,7 +517,7 @@ class AzureContainerInstancesOperator(BaseOperator):
 
                 if state in ["Running", "Terminated", "Succeeded"]:
                     try:
-                        logs = self._ci_hook.get_logs(resource_group, name)
+                        logs = self.hook.get_logs(resource_group, name)
                         if logs and logs[0] is None:
                             self.log.error("Container log is broken, marking as failed.")
                             return 1

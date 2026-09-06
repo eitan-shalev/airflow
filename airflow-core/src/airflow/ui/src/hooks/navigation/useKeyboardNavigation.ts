@@ -16,12 +16,10 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useCallback } from "react";
-import { useHotkeys } from "react-hotkeys-hook";
+import { SHORTCUTS } from "src/context/keyboardShortcuts";
+import { useShortcut } from "src/hooks/useShortcut";
 
 import type { ArrowKey, NavigationDirection } from "./types";
-
-const ARROW_KEYS = ["shift+ArrowDown", "shift+ArrowUp", "shift+ArrowLeft", "shift+ArrowRight"] as const;
 
 type Props = {
   enabled?: boolean;
@@ -45,23 +43,28 @@ const mapKeyToDirection = (key: ArrowKey): NavigationDirection => {
 };
 
 export const useKeyboardNavigation = ({ enabled = true, onNavigate, onToggleGroup }: Props) => {
-  const createKeyHandler = useCallback(
-    () => (event: KeyboardEvent) => {
-      const direction = mapKeyToDirection(event.key as ArrowKey);
+  const handleNormalKeyPress = (event: KeyboardEvent) => {
+    const direction = mapKeyToDirection(event.key as ArrowKey);
 
-      event.preventDefault();
-      event.stopPropagation();
+    event.preventDefault();
+    event.stopPropagation();
 
-      onNavigate(direction);
-    },
-    [onNavigate],
-  );
-
-  const handleNormalKeyPress = createKeyHandler();
+    onNavigate(direction);
+  };
 
   const hotkeyOptions = { enabled, preventDefault: true };
 
-  useHotkeys(ARROW_KEYS.join(","), handleNormalKeyPress, hotkeyOptions, [onNavigate]);
+  useShortcut({
+    ...SHORTCUTS.navigation.navigateTasks,
+    callback: handleNormalKeyPress,
+    dependencies: [onNavigate],
+    options: hotkeyOptions,
+  });
 
-  useHotkeys("space", () => onToggleGroup?.(), hotkeyOptions, [onToggleGroup]);
+  useShortcut({
+    ...SHORTCUTS.navigation.toggleTaskGroup,
+    callback: () => onToggleGroup?.(),
+    dependencies: [onToggleGroup],
+    options: hotkeyOptions,
+  });
 };

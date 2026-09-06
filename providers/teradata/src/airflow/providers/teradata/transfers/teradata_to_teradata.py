@@ -21,15 +21,11 @@ from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.teradata.hooks.teradata import TeradataHook
-from airflow.providers.teradata.version_compat import BaseOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class TeradataToTeradataOperator(BaseOperator):
@@ -42,7 +38,7 @@ class TeradataToTeradataOperator(BaseOperator):
 
     :param dest_teradata_conn_id: destination Teradata connection.
     :param destination_table: destination table to insert rows.
-    :param source_teradata_conn_id: :ref:`Source Teradata connection <howto/connection:Teradata>`.
+    :param source_teradata_conn_id: :ref:`Source Teradata connection <howto/connection:teradata>`.
     :param sql: SQL query to execute against the source Teradata database
     :param sql_params: Parameters to use in sql query.
     :param rows_chunk: number of rows per chunk to commit.
@@ -68,8 +64,6 @@ class TeradataToTeradataOperator(BaseOperator):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        if sql_params is None:
-            sql_params = {}
         self.dest_teradata_conn_id = dest_teradata_conn_id
         self.destination_table = destination_table
         self.source_teradata_conn_id = source_teradata_conn_id
@@ -90,7 +84,7 @@ class TeradataToTeradataOperator(BaseOperator):
         dest_hook = self.dest_hook
         with src_hook.get_conn() as src_conn:
             cursor = src_conn.cursor()
-            cursor.execute(self.sql, self.sql_params)
+            cursor.execute(self.sql, self.sql_params or {})
             target_fields = [field[0] for field in cursor.description]
             rows_total = 0
             if len(target_fields) != 0:

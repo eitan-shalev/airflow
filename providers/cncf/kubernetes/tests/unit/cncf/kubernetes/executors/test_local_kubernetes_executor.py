@@ -22,11 +22,11 @@ from unittest import mock
 import pytest
 
 from airflow.callbacks.callback_requests import CallbackRequest
-from airflow.configuration import conf
 from airflow.executors.local_executor import LocalExecutor
 from airflow.providers.cncf.kubernetes.executors.local_kubernetes_executor import (
     LocalKubernetesExecutor,
 )
+from airflow.providers.common.compat.sdk import conf
 
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 
@@ -109,6 +109,27 @@ class TestLocalKubernetesExecutor:
         simple_task_instance.queue = "test-queue"
         messages, logs = local_k8s_exec.get_task_log(ti=simple_task_instance, try_number=3)
         k8s_executor_mock.get_task_log.assert_not_called()
+        assert logs == []
+        assert messages == []
+
+    def test_streaming_log_is_fetched_from_k8s_executor_only_for_k8s_queue(self):
+        local_executor_mock = mock.MagicMock()
+        k8s_executor_mock = mock.MagicMock()
+        local_k8s_exec = LocalKubernetesExecutor(local_executor_mock, k8s_executor_mock)
+        simple_task_instance = mock.MagicMock()
+        simple_task_instance.queue = conf.get("local_kubernetes_executor", "kubernetes_queue")
+
+        local_k8s_exec.get_streaming_task_log(ti=simple_task_instance, try_number=3)
+
+        k8s_executor_mock.get_streaming_task_log.assert_called_once_with(
+            ti=simple_task_instance, try_number=3
+        )
+
+        k8s_executor_mock.reset_mock()
+        simple_task_instance.queue = "test-queue"
+        messages, logs = local_k8s_exec.get_streaming_task_log(ti=simple_task_instance, try_number=3)
+
+        k8s_executor_mock.get_streaming_task_log.assert_not_called()
         assert logs == []
         assert messages == []
 

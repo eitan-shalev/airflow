@@ -16,26 +16,17 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, HStack, Table } from "@chakra-ui/react";
+import { Box, Table } from "@chakra-ui/react";
 import { useParams } from "react-router-dom";
-import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
-import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
-import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
-import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
-import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
-import { oneLight, oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 import { useTaskInstanceServiceGetMappedTaskInstance } from "openapi/queries";
+import { SqlParserProvider } from "src/components/SqlParserProvider";
 import { ClipboardRoot, ClipboardIconButton } from "src/components/ui";
 import { useColorMode } from "src/context/colorMode";
 import { detectLanguage } from "src/utils/detectLanguage";
+import { oneDark, oneLight, SyntaxHighlighter } from "src/utils/syntaxHighlighter";
 
-SyntaxHighlighter.registerLanguage("json", json);
-SyntaxHighlighter.registerLanguage("yaml", yaml);
-SyntaxHighlighter.registerLanguage("sql", sql);
-SyntaxHighlighter.registerLanguage("bash", bash);
-
-export const RenderedTemplates = () => {
+const RenderedTemplatesContent = () => {
   const { dagId = "", mapIndex = "-1", runId = "", taskId = "" } = useParams();
   const { colorMode } = useColorMode();
 
@@ -54,31 +45,47 @@ export const RenderedTemplates = () => {
         <Table.Body>
           {Object.entries(taskInstance?.rendered_fields ?? {}).map(([key, value]) => {
             if (value !== null && value !== undefined) {
-              const renderedValue = typeof value === "string" ? value : JSON.stringify(value);
+              const renderedValue =
+                typeof value === "string"
+                  ? value.replaceAll("\\n", "\n").replaceAll(/\\$/gmu, "")
+                  : JSON.stringify(value, null, 2);
               const language = detectLanguage(renderedValue);
 
               return (
                 <Table.Row key={key}>
                   <Table.Cell>{key}</Table.Cell>
                   <Table.Cell>
-                    <HStack alignItems="flex-start">
-                      <Box flex="1">
-                        <Box as="pre" borderRadius="md" fontSize="sm" m={0} overflowX="auto" p={2}>
-                          <SyntaxHighlighter
-                            language={language}
-                            PreTag="div" // Prevents double <pre> nesting
-                            showLineNumbers
-                            style={style}
-                            wrapLongLines
-                          >
-                            {renderedValue}
-                          </SyntaxHighlighter>
-                        </Box>
+                    <Box
+                      css={{
+                        "&:hover .copy-button": {
+                          opacity: 1,
+                        },
+                      }}
+                    >
+                      <Box borderRadius="md" fontSize="sm" m={0} overflowX="auto" p={2}>
+                        <SyntaxHighlighter
+                          language={language}
+                          PreTag="pre"
+                          showLineNumbers
+                          style={style}
+                          wrapLongLines
+                        >
+                          {renderedValue}
+                        </SyntaxHighlighter>
                       </Box>
-                      <ClipboardRoot value={renderedValue}>
+                      <ClipboardRoot
+                        className="copy-button"
+                        float="right"
+                        marginTop="-3.5rem"
+                        opacity={0}
+                        position="sticky"
+                        right={4}
+                        transition="opacity 0.2s ease-in-out"
+                        value={renderedValue}
+                      >
                         <ClipboardIconButton />
                       </ClipboardRoot>
-                    </HStack>
+                    </Box>
                   </Table.Cell>
                 </Table.Row>
               );
@@ -91,3 +98,9 @@ export const RenderedTemplates = () => {
     </Box>
   );
 };
+
+export const RenderedTemplates = () => (
+  <SqlParserProvider>
+    <RenderedTemplatesContent />
+  </SqlParserProvider>
+);

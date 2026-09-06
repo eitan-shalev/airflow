@@ -22,7 +22,6 @@ from unittest.mock import AsyncMock
 import pytest
 from botocore.exceptions import WaiterError
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.triggers.neptune import (
     NeptuneClusterAvailableTrigger,
     NeptuneClusterInstancesAvailableTrigger,
@@ -31,6 +30,44 @@ from airflow.providers.amazon.aws.triggers.neptune import (
 from airflow.triggers.base import TriggerEvent
 
 CLUSTER_ID = "test-cluster"
+REGION_NAME = "eu-west-2"
+VERIFY = False
+BOTOCORE_CONFIG = {"read_timeout": 42}
+WAITER_DELAY = 12
+WAITER_MAX_ATTEMPTS = 34
+
+
+@pytest.mark.parametrize(
+    "trigger_class",
+    [
+        NeptuneClusterAvailableTrigger,
+        NeptuneClusterStoppedTrigger,
+        NeptuneClusterInstancesAvailableTrigger,
+    ],
+)
+def test_hook_configuration_survives_serialization(trigger_class):
+    trigger = trigger_class(
+        db_cluster_id=CLUSTER_ID,
+        aws_conn_id="aws_default",
+        region_name=REGION_NAME,
+        verify=VERIFY,
+        botocore_config=BOTOCORE_CONFIG,
+        waiter_delay=WAITER_DELAY,
+        waiter_max_attempts=WAITER_MAX_ATTEMPTS,
+    )
+
+    assert trigger.region_name == REGION_NAME
+    assert trigger.verify == VERIFY
+    assert trigger.botocore_config == BOTOCORE_CONFIG
+    assert trigger.serialize()[1] == {
+        "db_cluster_id": CLUSTER_ID,
+        "aws_conn_id": "aws_default",
+        "region_name": REGION_NAME,
+        "verify": VERIFY,
+        "botocore_config": BOTOCORE_CONFIG,
+        "waiter_delay": WAITER_DELAY,
+        "waiter_max_attempts": WAITER_MAX_ATTEMPTS,
+    }
 
 
 class TestNeptuneClusterAvailableTrigger:
@@ -125,5 +162,6 @@ class TestNeptuneClusterInstancesAvailableTrigger:
             db_cluster_id=CLUSTER_ID, waiter_delay=1, waiter_max_attempts=2
         )
 
-        with pytest.raises(AirflowException):
-            await trigger.run().asend(None)
+        event = await trigger.run().asend(None)
+        assert event.payload["status"] == "error"
+        assert "message" in event.payload

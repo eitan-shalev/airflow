@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.10,<3.11"
 # dependencies = [
 #   "pyyaml>=6.0.3",
 #   "rich>=13.6.0",
@@ -33,8 +33,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
-sys.path.insert(0, str(Path(__file__).parent.resolve()))  # make sure common_prek_utils is imported
 from common_prek_utils import (
     AIRFLOW_CORE_SOURCES_PATH,
     AIRFLOW_PROVIDERS_ROOT_PATH,
@@ -71,7 +69,7 @@ def load_pyproject_toml(pyproject_toml_file_path: Path) -> dict[str, Any]:
     try:
         import tomllib
     except ImportError:
-        import tomli as tomllib
+        import tomli as tomllib  # type: ignore[no-redef]
     return tomllib.loads(pyproject_toml_file_path.read_text())
 
 
@@ -145,8 +143,7 @@ def get_provider_id_from_path(file_path: Path) -> str | None:
             for providers_root_candidate in parent.parents:
                 if providers_root_candidate.name == "providers":
                     return parent.relative_to(providers_root_candidate).as_posix().replace("/", ".")
-            else:
-                return None
+            return None
     return None
 
 
@@ -221,6 +218,8 @@ if __name__ == "__main__":
         )
         excluded_versions = ALL_PROVIDERS[key].get("excluded-python-versions")
         unique_sorted_dependencies[key]["excluded-python-versions"] = excluded_versions or []
+        excluded_platforms = ALL_PROVIDERS[key].get("excluded-platforms")
+        unique_sorted_dependencies[key]["excluded-platforms"] = excluded_platforms or []
         unique_sorted_dependencies[key]["state"] = STATES[key]
     if errors:
         console.print()

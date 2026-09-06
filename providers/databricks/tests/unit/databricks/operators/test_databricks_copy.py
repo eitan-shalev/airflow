@@ -21,12 +21,12 @@ from unittest import mock
 
 import pytest
 
-from airflow.exceptions import AirflowException
 from airflow.providers.common.compat.openlineage.facet import (
     Dataset,
     ExternalQueryRunFacet,
     SQLJobFacet,
 )
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.databricks.operators.databricks_sql import DatabricksCopyIntoOperator
 from airflow.providers.openlineage.extractors import OperatorLineage
 
@@ -195,37 +195,40 @@ VALIDATE 10 ROWS
 
 def test_incorrect_params_files_patterns():
     exception_message = "Only one of 'pattern' or 'files' should be specified"
+    op = DatabricksCopyIntoOperator(
+        task_id=TASK_ID,
+        file_location=COPY_FILE_LOCATION,
+        file_format="JSON",
+        table_name="test",
+        files=["file1", "file2", "file3"],
+        pattern="abc",
+    )
     with pytest.raises(AirflowException, match=exception_message):
-        DatabricksCopyIntoOperator(
-            task_id=TASK_ID,
-            file_location=COPY_FILE_LOCATION,
-            file_format="JSON",
-            table_name="test",
-            files=["file1", "file2", "file3"],
-            pattern="abc",
-        )
+        op.execute(context={})
 
 
 def test_incorrect_params_emtpy_table():
     exception_message = "table_name shouldn't be empty"
+    op = DatabricksCopyIntoOperator(
+        task_id=TASK_ID,
+        file_location=COPY_FILE_LOCATION,
+        file_format="JSON",
+        table_name="",
+    )
     with pytest.raises(AirflowException, match=exception_message):
-        DatabricksCopyIntoOperator(
-            task_id=TASK_ID,
-            file_location=COPY_FILE_LOCATION,
-            file_format="JSON",
-            table_name="",
-        )
+        op.execute(context={})
 
 
 def test_incorrect_params_emtpy_location():
     exception_message = "file_location shouldn't be empty"
+    op = DatabricksCopyIntoOperator(
+        task_id=TASK_ID,
+        file_location="",
+        file_format="JSON",
+        table_name="abc",
+    )
     with pytest.raises(AirflowException, match=exception_message):
-        DatabricksCopyIntoOperator(
-            task_id=TASK_ID,
-            file_location="",
-            file_format="JSON",
-            table_name="abc",
-        )
+        op.execute(context={})
 
 
 def test_incorrect_params_wrong_format():
@@ -238,6 +241,97 @@ def test_incorrect_params_wrong_format():
             file_format=file_format,
             table_name="abc",
         )
+
+
+@pytest.mark.parametrize(
+    "table_name",
+    [
+        "safe; DROP TABLE x",
+        "safe table",
+        "safe-table",
+        "safe()",
+        "safe--comment",
+        "1invalid",
+        ".table",
+        "schema.",
+    ],
+)
+def test_invalid_table_identifier_rejected(table_name):
+    op = DatabricksCopyIntoOperator(
+        file_location=COPY_FILE_LOCATION,
+        file_format="JSON",
+        table_name=table_name,
+        task_id=TASK_ID,
+    )
+
+    with pytest.raises(ValueError, match="Invalid table identifier"):
+        op._create_sql_query()
+
+
+@pytest.mark.parametrize(
+    "table_name",
+    [
+        "table",
+        "schema.table",
+        "catalog.schema.table",
+        "_table",
+        "table_123",
+    ],
+)
+def test_valid_table_identifier_allowed(table_name):
+    op = DatabricksCopyIntoOperator(
+        file_location=COPY_FILE_LOCATION,
+        file_format="JSON",
+        table_name=table_name,
+        task_id=TASK_ID,
+    )
+
+    sql = op._create_sql_query()
+    assert f"COPY INTO {table_name}" in sql
+
+
+@pytest.mark.parametrize(
+    "expression_list",
+    [
+        "col1; DROP TABLE x",
+        "col1 -- comment",
+        "col1 /* comment */",
+    ],
+)
+def test_expression_list_rejects_multi_statement(expression_list):
+    op = DatabricksCopyIntoOperator(
+        file_location=COPY_FILE_LOCATION,
+        file_format="JSON",
+        table_name="test",
+        task_id=TASK_ID,
+        expression_list=expression_list,
+    )
+
+    with pytest.raises(ValueError, match="expression_list"):
+        op._create_sql_query()
+
+
+@pytest.mark.parametrize(
+    "expression_list",
+    [
+        "*",
+        "col1",
+        "col1, col2",
+        "upper(col1) as col1",
+        "cast(_c0 as int) as id",
+    ],
+)
+def test_valid_expression_list_allowed(expression_list):
+    op = DatabricksCopyIntoOperator(
+        file_location=COPY_FILE_LOCATION,
+        file_format="JSON",
+        table_name="test",
+        task_id=TASK_ID,
+        expression_list=expression_list,
+    )
+
+    sql = op._create_sql_query()
+    assert f"SELECT {expression_list}" in sql
 
 
 @pytest.mark.db_test
@@ -257,8 +351,7 @@ def test_templating(create_task_instance_of_operator, session):
     )
     session.add(ti)
     session.commit()
-    ti.render_templates()
-    task: DatabricksCopyIntoOperator = ti.task
+    task = ti.render_templates()
     assert task.file_location == "file-location"
     assert task.files == "files"
     assert task.table_name == "table-name"

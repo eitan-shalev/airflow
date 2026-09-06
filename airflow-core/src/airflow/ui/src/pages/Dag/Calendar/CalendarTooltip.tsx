@@ -17,9 +17,8 @@
  * under the License.
  */
 import { Box, HStack, Text, VStack } from "@chakra-ui/react";
-import { useMemo } from "react";
-import type { RefObject } from "react";
 import { useTranslation } from "react-i18next";
+import { FiAlertTriangle, FiClock } from "react-icons/fi";
 
 import type { CalendarCellData, CalendarColorMode } from "./types";
 
@@ -28,67 +27,32 @@ const SQUARE_BORDER_RADIUS = "2px";
 
 type Props = {
   readonly cellData: CalendarCellData | undefined;
-  readonly triggerRef: RefObject<HTMLElement>;
   readonly viewMode?: CalendarColorMode;
 };
 
 const stateColorMap = {
   failed: "failed.solid",
   planned: "stone.solid",
+  queued: "queued.solid",
   running: "running.solid",
   success: "success.solid",
 };
 
-export const CalendarTooltip = ({ cellData, triggerRef, viewMode = "total" }: Props) => {
+export const CalendarTooltip = ({ cellData, viewMode = "total" }: Props) => {
   const { t: translate } = useTranslation(["dag", "common"]);
-
-  const tooltipStyle = useMemo(() => {
-    if (!triggerRef.current) {
-      return { display: "none" };
-    }
-
-    const rect = triggerRef.current.getBoundingClientRect();
-
-    return {
-      backgroundColor: "var(--chakra-colors-bg-inverted)",
-      borderRadius: "4px",
-      color: "var(--chakra-colors-fg-inverted)",
-      fontSize: "14px",
-      left: `${rect.left + globalThis.scrollX + rect.width / 2}px`,
-      minWidth: "200px",
-      padding: "8px",
-      position: "absolute" as const,
-      top: `${rect.bottom + globalThis.scrollY + 8}px`,
-      transform: "translateX(-50%)",
-      whiteSpace: "nowrap" as const,
-      zIndex: 1000,
-    };
-  }, [triggerRef]);
-
-  const arrowStyle = useMemo(
-    () => ({
-      borderBottom: "4px solid var(--chakra-colors-bg-inverted)",
-      borderLeft: "4px solid transparent",
-      borderRight: "4px solid transparent",
-      content: '""',
-      height: 0,
-      left: "50%",
-      position: "absolute" as const,
-      top: "-4px",
-      transform: "translateX(-50%)",
-      width: 0,
-    }),
-    [],
-  );
 
   if (!cellData) {
     return undefined;
   }
 
-  const { counts, date } = cellData;
+  const { counts, date, deadlineCounts } = cellData;
 
   const relevantCount = viewMode === "failed" ? counts.failed : counts.total;
   const hasRuns = relevantCount > 0;
+
+  const missedDeadlines = deadlineCounts?.missed ?? 0;
+  const pendingDeadlines = deadlineCounts?.pending ?? 0;
+  const hasDeadlines = missedDeadlines > 0 || pendingDeadlines > 0;
 
   // In failed mode, only show failed runs; in total mode, show all non-zero states
   const states = Object.entries(counts)
@@ -111,41 +75,61 @@ export const CalendarTooltip = ({ cellData, triggerRef, viewMode = "total" }: Pr
       state: translate(`common:states.${state}`),
     }));
 
-  return (
-    <div style={tooltipStyle}>
-      <div style={arrowStyle} />
+  return hasRuns || hasDeadlines ? (
+    <VStack align="start" data-testid="calendar-tooltip" data-view-mode={viewMode} gap={2}>
+      <Text fontSize="sm" fontWeight="medium">
+        {date}
+      </Text>
       {hasRuns ? (
-        <VStack align="start" gap={2}>
-          <Text fontSize="sm" fontWeight="medium">
-            {date}
-          </Text>
-          <VStack align="start" gap={1.5}>
-            {states.map(({ color, count, state }) => (
-              <HStack gap={3} key={state}>
-                <Box
-                  bg={color}
-                  border="1px solid"
-                  borderColor="border.emphasized"
-                  borderRadius={SQUARE_BORDER_RADIUS}
-                  height={SQUARE_SIZE}
-                  width={SQUARE_SIZE}
-                />
-                <Text fontSize="xs">
-                  {count} {state}
-                </Text>
-              </HStack>
-            ))}
-          </VStack>
+        <VStack align="start" gap={1.5}>
+          {states.map(({ color, count, state }) => (
+            <HStack data-testid={`calendar-tooltip-state-${state.toLowerCase()}`} gap={3} key={state}>
+              <Box
+                bg={color}
+                border="1px solid"
+                borderColor="border.emphasized"
+                borderRadius={SQUARE_BORDER_RADIUS}
+                height={SQUARE_SIZE}
+                width={SQUARE_SIZE}
+              />
+              <Text fontSize="xs">
+                {count} {state}
+              </Text>
+            </HStack>
+          ))}
         </VStack>
-      ) : (
-        <Text fontSize="sm">
-          {/* To do: remove fallback translations */}
-          {date}:{" "}
-          {viewMode === "failed"
-            ? translate("calendar.noFailedRuns", "No failed runs")
-            : translate("calendar.noRuns", "No runs")}
-        </Text>
-      )}
-    </div>
+      ) : null}
+      {hasDeadlines ? (
+        <VStack align="start" gap={1.5}>
+          <Text color="fg.muted" fontSize="xs" fontWeight="medium">
+            {translate("dag:overview.deadlines.title")}
+          </Text>
+          {missedDeadlines > 0 && (
+            <HStack data-testid="calendar-tooltip-deadline-missed" gap={3}>
+              <Box fontSize="16px" lineHeight={1}>
+                <FiAlertTriangle />
+              </Box>
+              <Text fontSize="xs">
+                {translate("dag:deadlineStatus.missedCount", { count: missedDeadlines })}
+              </Text>
+            </HStack>
+          )}
+          {pendingDeadlines > 0 && (
+            <HStack data-testid="calendar-tooltip-deadline-pending" gap={3}>
+              <Box fontSize="16px" lineHeight={1}>
+                <FiClock />
+              </Box>
+              <Text fontSize="xs">
+                {translate("dag:deadlineStatus.upcomingCount", { count: pendingDeadlines })}
+              </Text>
+            </HStack>
+          )}
+        </VStack>
+      ) : null}
+    </VStack>
+  ) : (
+    <Text fontSize="sm">
+      {date}: {viewMode === "failed" ? translate("calendar.noFailedRuns") : translate("calendar.noRuns")}
+    </Text>
   );
 };

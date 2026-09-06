@@ -27,6 +27,163 @@
 Changelog
 ---------
 
+4.13.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add HdfsRemoteLogIO.from_config and register hdfs remote logging scheme (#71278)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+
+
+4.12.2
+......
+
+Misc
+~~~~
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+   * ``Limit pandas to < 3 for DataFrame XComs (#70791)``
+   * ``Revert "Limit pandas to < 3 for DataFrame XComs (#70791)" (#71100)``
+
+4.12.1
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix remote-log providers not satisfying RemoteLogIO upload contract (#68300)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.12.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add uri sanitizers and asset factories for new schemes (#66426)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix: Some nits in asset normalization (#66710)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+
+4.11.5
+......
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+* ``Fix advertising some of the missing provider capabilities via provider info (#64127)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.11.4
+......
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Prepare providers release 2026-03-09 (#63198)``
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``Standardize connection docs labels across providers (#63455)``
+
+4.11.3
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Pin fastavro to minimum 1.10.0 for Python 3.13 compatibility (#60732)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.11.2
+......
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Source conf from 'airflow.sdk.configuration.conf' for apache providers (#59966)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.11.1
+......
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.11.0
+......
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.10.5
+......
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to 13 files in providers (apache) (#57998)``
+
+4.10.4
+......
+
+Misc
+~~~~
+
+* ``Migrate Apache providers to ''common.compat'' (#57016)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Remove placeholder Release Date in changelog and index files (#56056)``
+
 4.10.3
 ......
 

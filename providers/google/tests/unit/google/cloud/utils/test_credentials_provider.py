@@ -31,7 +31,7 @@ import pytest
 from google.auth.environment_vars import CREDENTIALS
 from google.auth.exceptions import DefaultCredentialsError
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.utils.credentials_provider import (
     _DEFAULT_SCOPES,
     AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT,
@@ -517,13 +517,22 @@ class TestGetGcpCredentialsAndProjectId:
                 client_secret=CLIENT_SECRET,
             )
 
+    @mock.patch("google.auth.default")
+    def test_get_credentials_and_project_id_with_default_auth_no_project_id(self, mock_auth_default):
+        mock_credentials = mock.MagicMock()
+        mock_auth_default.return_value = (mock_credentials, None)
+
+        result = get_credentials_and_project_id()
+        mock_auth_default.assert_called_once_with(scopes=None)
+        assert result == (mock_credentials, "")
+
 
 class TestGetScopes:
     def test_get_scopes_with_default(self):
         assert _get_scopes() == _DEFAULT_SCOPES
 
     @pytest.mark.parametrize(
-        "scopes_str, scopes",
+        ("scopes_str", "scopes"),
         [
             pytest.param("scope1", ["scope1"], id="single-scope"),
             pytest.param("scope1,scope2", ["scope1", "scope2"], id="multiple-scopes"),
@@ -538,7 +547,7 @@ class TestGetTargetPrincipalAndDelegates:
         assert _get_target_principal_and_delegates() == (None, None)
 
     @pytest.mark.parametrize(
-        "impersonation_chain, target_principal_and_delegates",
+        ("impersonation_chain", "target_principal_and_delegates"),
         [
             pytest.param(ACCOUNT_1_SAME_PROJECT, (ACCOUNT_1_SAME_PROJECT, None), id="string"),
             pytest.param([], (None, None), id="empty-list"),

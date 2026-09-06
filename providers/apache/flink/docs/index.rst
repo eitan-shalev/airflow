@@ -68,7 +68,7 @@ apache-airflow-providers-apache-flink package
 `Apache Flink <https://flink.apache.org/>`__
 
 
-Release: 1.7.2
+Release: 1.8.5
 
 Provider package
 ----------------
@@ -86,34 +86,16 @@ For the minimum Airflow version supported, see ``Requirements`` below.
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.10.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
 ============================================  ==================
 PIP package                                   Version required
 ============================================  ==================
-``apache-airflow``                            ``>=2.10.0``
-``cryptography``                              ``>=41.0.0``
+``apache-airflow``                            ``>=2.11.0``
+``apache-airflow-providers-common-compat``    ``>=1.10.1``
+``cryptography``                              ``>=44.0.3``
 ``apache-airflow-providers-cncf-kubernetes``  ``>=5.1.0``
 ============================================  ==================
-
-Cross provider package dependencies
------------------------------------
-
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified provider distributions in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
-
-.. code-block:: bash
-
-    pip install apache-airflow-providers-apache-flink[cncf.kubernetes]
-
-
-======================================================================================================================  ===================
-Dependent package                                                                                                       Extra
-======================================================================================================================  ===================
-`apache-airflow-providers-cncf-kubernetes <https://airflow.apache.org/docs/apache-airflow-providers-cncf-kubernetes>`_  ``cncf.kubernetes``
-======================================================================================================================  ===================
 
 Downloading official packages
 -----------------------------
@@ -121,5 +103,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-apache-flink 1.7.2 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.7.2.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.7.2.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.7.2.tar.gz.sha512>`__)
-* `The apache-airflow-providers-apache-flink 1.7.2 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.7.2-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.7.2-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.7.2-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-apache-flink 1.8.5 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.8.5.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.8.5.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.8.5.tar.gz.sha512>`__)
+* `The apache-airflow-providers-apache-flink 1.8.5 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.8.5-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.8.5-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_flink-1.8.5-py3-none-any.whl.sha512>`__)

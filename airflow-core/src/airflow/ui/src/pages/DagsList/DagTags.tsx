@@ -17,10 +17,10 @@
  * under the License.
  */
 import { FiTag } from "react-icons/fi";
-import { Link as RouterLink } from "react-router-dom";
 
 import type { DagTagResponse } from "openapi/requests/types.gen";
 import { LimitedItemsList } from "src/components/LimitedItemsList";
+import { RouterLink } from "src/components/ui";
 import { SearchParamsKeys } from "src/constants/searchParams";
 
 const MAX_TAGS = 3;
@@ -35,7 +35,7 @@ export const DagTags = ({ hideIcon = false, tags }: Props) => (
     icon={hideIcon ? undefined : <FiTag data-testid="dag-tag" />}
     interactive
     items={tags.map(({ name }) => (
-      <RouterLink key={name} to={`/dags?${SearchParamsKeys.TAGS}=${name}`}>
+      <RouterLink key={name} to={`/dags?${SearchParamsKeys.TAGS}=${encodeURIComponent(name)}`}>
         {name}
       </RouterLink>
     ))}

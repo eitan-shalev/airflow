@@ -24,62 +24,31 @@ import pytest
 from openlineage.client.event_v2 import Job, Run, RunEvent, RunState
 from openlineage.client.facet_v2 import job_type_job, parent_run
 
-from airflow.exceptions import AirflowOptionalProviderFeatureException
 from airflow.providers.common.compat.openlineage.facet import (
     ErrorMessageRunFacet,
     ExternalQueryRunFacet,
     SQLJobFacet,
 )
+from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException, timezone
 from airflow.providers.databricks.hooks.databricks import DatabricksHook
 from airflow.providers.databricks.hooks.databricks_sql import DatabricksSqlHook
 from airflow.providers.databricks.utils.openlineage import (
     _create_ol_event_pair,
-    _get_ol_run_id,
+    _extract_new_clusters_from_databricks_job,
     _get_parent_run_facet,
     _get_queries_details_from_databricks,
     _process_data_from_api,
     _run_api_call,
     emit_openlineage_events_for_databricks_queries,
+    inject_openlineage_properties_into_databricks_job,
 )
 from airflow.providers.openlineage.conf import namespace
-from airflow.utils import timezone
 from airflow.utils.state import TaskInstanceState
-
-
-def test_get_ol_run_id_ti_success():
-    logical_date = timezone.datetime(2025, 1, 1)
-    mock_ti = mock.MagicMock(
-        dag_id="dag_id",
-        task_id="task_id",
-        map_index=1,
-        try_number=1,
-        logical_date=logical_date,
-        state=TaskInstanceState.SUCCESS,
-    )
-    mock_ti.get_template_context.return_value = {"dag_run": mock.MagicMock(logical_date=logical_date)}
-
-    result = _get_ol_run_id(mock_ti)
-    assert result == "01941f29-7c00-7087-8906-40e512c257bd"
-
-
-def test_get_ol_run_id_ti_failed():
-    logical_date = timezone.datetime(2025, 1, 1)
-    mock_ti = mock.MagicMock(
-        dag_id="dag_id",
-        task_id="task_id",
-        map_index=1,
-        try_number=1,
-        logical_date=logical_date,
-        state=TaskInstanceState.FAILED,
-    )
-    mock_ti.get_template_context.return_value = {"dag_run": mock.MagicMock(logical_date=logical_date)}
-
-    result = _get_ol_run_id(mock_ti)
-    assert result == "01941f29-7c00-7087-8906-40e512c257bd"
 
 
 def test_get_parent_run_facet():
     logical_date = timezone.datetime(2025, 1, 1)
+    dr = mock.MagicMock(logical_date=logical_date, clear_number=0)
     mock_ti = mock.MagicMock(
         dag_id="dag_id",
         task_id="task_id",
@@ -87,14 +56,18 @@ def test_get_parent_run_facet():
         try_number=1,
         logical_date=logical_date,
         state=TaskInstanceState.SUCCESS,
+        dag_run=dr,
     )
-    mock_ti.get_template_context.return_value = {"dag_run": mock.MagicMock(logical_date=logical_date)}
+    mock_ti.get_template_context.return_value = {"dag_run": dr}
 
     result = _get_parent_run_facet(mock_ti)
 
     assert result.run.runId == "01941f29-7c00-7087-8906-40e512c257bd"
     assert result.job.namespace == namespace()
     assert result.job.name == "dag_id.task_id"
+    assert result.root.run.runId == "01941f29-7c00-743e-b109-28b18d0a19c5"
+    assert result.root.job.namespace == namespace()
+    assert result.root.job.name == "dag_id"
 
 
 def test_run_api_call_success():
@@ -283,7 +256,7 @@ def test_create_ol_event_pair_success(mock_generate_uuid, is_successful):
     assert start_event.job == end_event.job
 
 
-@mock.patch("importlib.metadata.version", return_value="2.3.0")
+@mock.patch("importlib.metadata.version", return_value="3.0.0")
 @mock.patch("openlineage.client.uuid.generate_new_uuid")
 def test_emit_openlineage_events_for_databricks_queries(mock_generate_uuid, mock_version, time_machine):
     fake_uuid = "01958e68-03a2-79e3-9ae9-26865cc40e2f"
@@ -520,7 +493,7 @@ def test_emit_openlineage_events_for_databricks_queries(mock_generate_uuid, mock
         assert fake_adapter.emit.call_args_list == expected_calls
 
 
-@mock.patch("importlib.metadata.version", return_value="2.3.0")
+@mock.patch("importlib.metadata.version", return_value="3.0.0")
 @mock.patch("openlineage.client.uuid.generate_new_uuid")
 def test_emit_openlineage_events_for_databricks_queries_without_metadata(
     mock_generate_uuid, mock_version, time_machine
@@ -638,7 +611,7 @@ def test_emit_openlineage_events_for_databricks_queries_without_metadata(
         assert fake_adapter.emit.call_args_list == expected_calls
 
 
-@mock.patch("importlib.metadata.version", return_value="2.3.0")
+@mock.patch("importlib.metadata.version", return_value="3.0.0")
 @mock.patch("openlineage.client.uuid.generate_new_uuid")
 def test_emit_openlineage_events_for_databricks_queries_without_explicit_query_ids(
     mock_generate_uuid, mock_version, time_machine
@@ -760,7 +733,7 @@ def test_emit_openlineage_events_for_databricks_queries_without_explicit_query_i
 @mock.patch(
     "airflow.providers.openlineage.sqlparser.SQLParser.create_namespace", return_value="databricks_ns"
 )
-@mock.patch("importlib.metadata.version", return_value="2.3.0")
+@mock.patch("importlib.metadata.version", return_value="3.0.0")
 @mock.patch("openlineage.client.uuid.generate_new_uuid")
 def test_emit_openlineage_events_for_databricks_queries_without_explicit_query_ids_and_namespace(
     mock_generate_uuid, mock_version, mock_parser, time_machine
@@ -878,7 +851,7 @@ def test_emit_openlineage_events_for_databricks_queries_without_explicit_query_i
         assert fake_adapter.emit.call_args_list == expected_calls
 
 
-@mock.patch("importlib.metadata.version", return_value="2.3.0")
+@mock.patch("importlib.metadata.version", return_value="3.0.0")
 @mock.patch("openlineage.client.uuid.generate_new_uuid")
 def test_emit_openlineage_events_for_databricks_queries_without_explicit_query_ids_and_namespace_raw_ns(
     mock_generate_uuid, mock_version, time_machine
@@ -997,7 +970,7 @@ def test_emit_openlineage_events_for_databricks_queries_without_explicit_query_i
         assert fake_adapter.emit.call_args_list == expected_calls
 
 
-@mock.patch("importlib.metadata.version", return_value="2.3.0")
+@mock.patch("importlib.metadata.version", return_value="3.0.0")
 @mock.patch("openlineage.client.uuid.generate_new_uuid")
 def test_emit_openlineage_events_for_databricks_queries_ith_query_ids_and_hook_query_ids(
     mock_generate_uuid, mock_version, time_machine
@@ -1117,7 +1090,7 @@ def test_emit_openlineage_events_for_databricks_queries_ith_query_ids_and_hook_q
         assert fake_adapter.emit.call_args_list == expected_calls
 
 
-@mock.patch("importlib.metadata.version", return_value="2.3.0")
+@mock.patch("importlib.metadata.version", return_value="3.0.0")
 def test_emit_openlineage_events_for_databricks_queries_missing_query_ids_and_hook(mock_version):
     query_ids = []
     original_query_ids = copy.deepcopy(query_ids)
@@ -1142,7 +1115,7 @@ def test_emit_openlineage_events_for_databricks_queries_missing_query_ids_and_ho
         fake_adapter.emit.assert_not_called()  # No events should be emitted
 
 
-@mock.patch("importlib.metadata.version", return_value="2.3.0")
+@mock.patch("importlib.metadata.version", return_value="3.0.0")
 def test_emit_openlineage_events_for_databricks_queries_missing_query_namespace_and_hook(mock_version):
     query_ids = ["1", "2"]
     original_query_ids = copy.deepcopy(query_ids)
@@ -1168,7 +1141,7 @@ def test_emit_openlineage_events_for_databricks_queries_missing_query_namespace_
         fake_adapter.emit.assert_not_called()  # No events should be emitted
 
 
-@mock.patch("importlib.metadata.version", return_value="2.3.0")
+@mock.patch("importlib.metadata.version", return_value="3.0.0")
 def test_emit_openlineage_events_for_databricks_queries_missing_hook_and_query_for_extra_metadata_true(
     mock_version,
 ):
@@ -1213,7 +1186,7 @@ def test_emit_openlineage_events_with_old_openlineage_provider(mock_version):
         return_value=fake_listener,
     ):
         expected_err = (
-            "OpenLineage provider version `1.99.0` is lower than required `2.3.0`, "
+            "OpenLineage provider version `1.99.0` is lower than required `2.5.0`, "
             "skipping function `emit_openlineage_events_for_databricks_queries` execution"
         )
 
@@ -1225,3 +1198,179 @@ def test_emit_openlineage_events_with_old_openlineage_provider(mock_version):
             )
         assert query_ids == original_query_ids  # Verify that the input query_ids list is unchanged.
         fake_adapter.emit.assert_not_called()  # No events should be emitted
+
+
+OL_UTILS = "airflow.providers.databricks.utils.openlineage"
+
+
+def test_extract_new_clusters_from_databricks_job():
+    top_cluster = {"spark_version": "13.3.x-scala2.12"}
+    task_cluster = {"spark_version": "14.3.x-scala2.12"}
+    job_cluster = {"spark_version": "15.4.x-scala2.12"}
+    for_each_cluster = {"spark_version": "16.4.x-scala2.12"}
+    job = {
+        "new_cluster": top_cluster,
+        "tasks": [
+            {"task_key": "a", "new_cluster": task_cluster},
+            {"task_key": "b", "existing_cluster_id": "existing"},
+            {"task_key": "c", "job_cluster_key": "shared"},
+            {
+                "task_key": "d",
+                "for_each_task": {"task": {"task_key": "d/iter", "new_cluster": for_each_cluster}},
+            },
+        ],
+        "job_clusters": [{"job_cluster_key": "shared", "new_cluster": job_cluster}],
+    }
+    assert _extract_new_clusters_from_databricks_job(job) == [
+        top_cluster,
+        task_cluster,
+        job_cluster,
+        for_each_cluster,
+    ]
+
+
+def test_extract_new_clusters_from_databricks_job_existing_cluster_only():
+    assert _extract_new_clusters_from_databricks_job({"existing_cluster_id": "existing"}) == []
+
+
+@mock.patch(f"{OL_UTILS}._is_openlineage_provider_accessible", return_value=True)
+def test_inject_openlineage_properties_disabled_returns_job_unchanged(mock_accessible):
+    job = {"new_cluster": {"spark_conf": {}}}
+    result = inject_openlineage_properties_into_databricks_job(
+        job, context=mock.MagicMock(), inject_parent_job_info=False, inject_transport_info=False
+    )
+    assert result == job
+    mock_accessible.assert_not_called()
+
+
+@mock.patch(f"{OL_UTILS}._is_openlineage_provider_accessible", return_value=False)
+def test_inject_openlineage_properties_provider_inaccessible_returns_job_unchanged(mock_accessible):
+    job = {"new_cluster": {"spark_conf": {}}}
+    result = inject_openlineage_properties_into_databricks_job(
+        job, context=mock.MagicMock(), inject_parent_job_info=True, inject_transport_info=True
+    )
+    assert result == job
+
+
+@mock.patch(f"{OL_UTILS}._is_openlineage_provider_accessible", return_value=True)
+def test_inject_openlineage_properties_no_new_cluster_returns_job_unchanged(mock_accessible):
+    job = {"existing_cluster_id": "existing"}
+    result = inject_openlineage_properties_into_databricks_job(
+        job, context=mock.MagicMock(), inject_parent_job_info=True, inject_transport_info=True
+    )
+    assert result == job
+
+
+@mock.patch(f"{OL_UTILS}.inject_transport_information_into_spark_properties")
+@mock.patch(f"{OL_UTILS}.inject_parent_job_information_into_spark_properties")
+@mock.patch(f"{OL_UTILS}._is_openlineage_provider_accessible", return_value=True)
+def test_inject_openlineage_properties_into_top_level_new_cluster(
+    mock_accessible, mock_parent, mock_transport
+):
+    mock_parent.side_effect = lambda properties, context: {
+        **properties,
+        "spark.openlineage.parentJobName": "dag_id.task_id",
+    }
+    mock_transport.side_effect = lambda properties, context: {
+        **properties,
+        "spark.openlineage.transport.type": "http",
+    }
+    job = {"new_cluster": {"spark_conf": {"spark.executor.memory": "8g"}}, "notebook_task": {"x": "y"}}
+
+    result = inject_openlineage_properties_into_databricks_job(
+        job, context=mock.MagicMock(), inject_parent_job_info=True, inject_transport_info=True
+    )
+
+    spark_conf = result["new_cluster"]["spark_conf"]
+    assert spark_conf["spark.executor.memory"] == "8g"
+    assert spark_conf["spark.openlineage.parentJobName"] == "dag_id.task_id"
+    assert spark_conf["spark.openlineage.transport.type"] == "http"
+
+
+@mock.patch(f"{OL_UTILS}.inject_parent_job_information_into_spark_properties")
+@mock.patch(f"{OL_UTILS}._is_openlineage_provider_accessible", return_value=True)
+def test_inject_openlineage_properties_into_multi_task_new_clusters(mock_accessible, mock_parent):
+    mock_parent.side_effect = lambda properties, context: {
+        **properties,
+        "spark.openlineage.parentJobName": "dag_id.task_id",
+    }
+    job = {
+        "tasks": [
+            {"task_key": "a", "new_cluster": {"spark_conf": {}}},
+            {"task_key": "b", "new_cluster": {"spark_conf": {}}},
+            {"task_key": "c", "existing_cluster_id": "existing"},
+        ]
+    }
+
+    result = inject_openlineage_properties_into_databricks_job(
+        job, context=mock.MagicMock(), inject_parent_job_info=True, inject_transport_info=False
+    )
+
+    assert result["tasks"][0]["new_cluster"]["spark_conf"]["spark.openlineage.parentJobName"] == (
+        "dag_id.task_id"
+    )
+    assert result["tasks"][1]["new_cluster"]["spark_conf"]["spark.openlineage.parentJobName"] == (
+        "dag_id.task_id"
+    )
+    assert result["tasks"][2] == {"task_key": "c", "existing_cluster_id": "existing"}
+
+
+@mock.patch(f"{OL_UTILS}.inject_parent_job_information_into_spark_properties")
+@mock.patch(f"{OL_UTILS}._is_openlineage_provider_accessible", return_value=True)
+def test_inject_openlineage_properties_into_shared_job_clusters(mock_accessible, mock_parent):
+    mock_parent.side_effect = lambda properties, context: {
+        **properties,
+        "spark.openlineage.parentJobName": "dag_id.task_id",
+    }
+    job = {
+        "tasks": [{"task_key": "a", "job_cluster_key": "shared"}],
+        "job_clusters": [{"job_cluster_key": "shared", "new_cluster": {"spark_conf": {}}}],
+    }
+
+    result = inject_openlineage_properties_into_databricks_job(
+        job, context=mock.MagicMock(), inject_parent_job_info=True, inject_transport_info=False
+    )
+
+    injected = result["job_clusters"][0]["new_cluster"]["spark_conf"]["spark.openlineage.parentJobName"]
+    assert injected == "dag_id.task_id"
+
+
+@mock.patch(f"{OL_UTILS}.inject_parent_job_information_into_spark_properties")
+@mock.patch(f"{OL_UTILS}._is_openlineage_provider_accessible", return_value=True)
+def test_inject_openlineage_properties_into_for_each_task_new_cluster(mock_accessible, mock_parent):
+    mock_parent.side_effect = lambda properties, context: {
+        **properties,
+        "spark.openlineage.parentJobName": "dag_id.task_id",
+    }
+    job = {
+        "tasks": [
+            {
+                "task_key": "a",
+                "for_each_task": {"task": {"task_key": "a/iter", "new_cluster": {"spark_conf": {}}}},
+            }
+        ]
+    }
+
+    result = inject_openlineage_properties_into_databricks_job(
+        job, context=mock.MagicMock(), inject_parent_job_info=True, inject_transport_info=False
+    )
+
+    injected = result["tasks"][0]["for_each_task"]["task"]["new_cluster"]["spark_conf"]
+    assert injected["spark.openlineage.parentJobName"] == "dag_id.task_id"
+
+
+@mock.patch(f"{OL_UTILS}.inject_parent_job_information_into_spark_properties")
+@mock.patch(f"{OL_UTILS}._is_openlineage_provider_accessible", return_value=True)
+def test_inject_openlineage_properties_does_not_mutate_input(mock_accessible, mock_parent):
+    mock_parent.side_effect = lambda properties, context: {
+        **properties,
+        "spark.openlineage.parentJobName": "dag_id.task_id",
+    }
+    job = {"new_cluster": {"spark_conf": {"spark.executor.memory": "8g"}}}
+    original = copy.deepcopy(job)
+
+    inject_openlineage_properties_into_databricks_job(
+        job, context=mock.MagicMock(), inject_parent_job_info=True, inject_transport_info=False
+    )
+
+    assert job == original

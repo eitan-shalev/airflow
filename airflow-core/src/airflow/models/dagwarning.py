@@ -17,18 +17,19 @@
 # under the License.
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Column, ForeignKeyConstraint, Index, String, Text, delete, select, true
-from sqlalchemy.orm import relationship
+from sqlalchemy import ForeignKeyConstraint, Index, String, Text, delete, select, true
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from airflow._shared.timezones import timezone
 from airflow.models.base import Base, StringID
 from airflow.models.dag import DagModel
 from airflow.utils.retries import retry_db_transaction
 from airflow.utils.session import NEW_SESSION, provide_session
-from airflow.utils.sqlalchemy import UtcDateTime
+from airflow.utils.sqlalchemy import UtcDateTime, get_dialect_name
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -43,10 +44,10 @@ class DagWarning(Base):
     when parsing DAG and displayed on the Webserver in a flash message.
     """
 
-    dag_id = Column(StringID(), primary_key=True)
-    warning_type = Column(String(50), primary_key=True)
-    message = Column(Text, nullable=False)
-    timestamp = Column(UtcDateTime, nullable=False, default=timezone.utcnow)
+    dag_id: Mapped[str] = mapped_column(StringID(), primary_key=True)
+    warning_type: Mapped[str] = mapped_column(String(50), primary_key=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=timezone.utcnow)
 
     dag_model = relationship("DagModel", viewonly=True, lazy="selectin")
 
@@ -76,13 +77,13 @@ class DagWarning(Base):
     @classmethod
     @provide_session
     @retry_db_transaction
-    def purge_inactive_dag_warnings(cls, session: Session = NEW_SESSION) -> None:
+    def purge_inactive_dag_warnings(cls, *, session: Session = NEW_SESSION) -> None:
         """
         Deactivate DagWarning records for inactive dags.
 
         :return: None
         """
-        if session.get_bind().dialect.name == "sqlite":
+        if get_dialect_name(session) == "sqlite":
             dag_ids_stmt = select(DagModel.dag_id).where(DagModel.is_stale == true())
             query = delete(cls).where(cls.dag_id.in_(dag_ids_stmt.scalar_subquery()))
         else:
@@ -101,4 +102,6 @@ class DagWarningType(str, Enum):
     """
 
     ASSET_CONFLICT = "asset conflict"
+    DUPLICATE_DAG_ID = "duplicate dag id"
     NONEXISTENT_POOL = "non-existent pool"
+    RUNTIME_VARYING_VALUE = "runtime varying value"

@@ -25,15 +25,17 @@ from unittest import mock
 
 import pytest
 import time_machine
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from airflow._shared.timezones.timezone import utc, utcnow
 from airflow.models.hitl import HITLDetail
 from airflow.models.log import Log
+from airflow.models.taskinstance import TaskInstance as TIModel
 from airflow.sdk.execution_time.hitl import HITLUser
 from airflow.utils.state import TaskInstanceState
 
+from tests_common.test_utils.asserts import assert_queries_count
 from tests_common.test_utils.format_datetime import from_datetime_to_zulu_without_ms
 
 if TYPE_CHECKING:
@@ -215,7 +217,7 @@ def expected_sample_hitl_detail_dict(sample_ti: TaskInstance) -> dict[str, Any]:
         "defaults": ["Approve"],
         "multiple": False,
         "options": ["Approve", "Reject"],
-        "params": {"input_1": 1},
+        "params": {"input_1": {"value": 1, "schema": {}, "description": None}},
         "assigned_users": [],
         "created_at": mock.ANY,
         "params_input": {},
@@ -243,7 +245,7 @@ def expected_sample_hitl_detail_dict(sample_ti: TaskInstance) -> dict[str, Any]:
             "executor": None,
             "executor_config": "{}",
             "hostname": "",
-            "id": sample_ti.id,
+            "id": str(sample_ti.id),
             "logical_date": mock.ANY,
             "map_index": -1,
             "max_tries": 0,
@@ -264,6 +266,7 @@ def expected_sample_hitl_detail_dict(sample_ti: TaskInstance) -> dict[str, Any]:
             "state": None,
             "task_display_name": "sample_task_hitl",
             "task_id": TASK_ID,
+            "team_name": None,
             "trigger": None,
             "triggerer_job": None,
             "try_number": 0,
@@ -274,7 +277,7 @@ def expected_sample_hitl_detail_dict(sample_ti: TaskInstance) -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def cleanup_audit_log(session: Session) -> None:
-    session.query(Log).delete()
+    session.execute(delete(Log))
     session.commit()
 
 
@@ -308,6 +311,26 @@ def sample_update_payload() -> dict[str, Any]:
 class TestUpdateHITLDetailEndpoint:
     @time_machine.travel(datetime(2025, 7, 3, 0, 0, 0), tick=False)
     @pytest.mark.usefixtures("sample_hitl_detail")
+    @mock.patch(
+        "airflow.api_fastapi.auth.managers.simple.user.SimpleAuthManagerUser.get_display_name",
+        return_value="Jane Doe",
+    )
+    def test_response_records_responder_display_name(
+        self,
+        mock_display_name: mock.MagicMock,
+        test_client: TestClient,
+        sample_ti_url_identifier: str,
+        sample_update_payload: dict[str, Any],
+    ) -> None:
+        response = test_client.patch(
+            f"{sample_ti_url_identifier}/hitlDetails",
+            json=sample_update_payload,
+        )
+        assert response.status_code == 200
+        assert response.json()["responded_by"] == {"id": "test", "name": "Jane Doe"}
+
+    @time_machine.travel(datetime(2025, 7, 3, 0, 0, 0), tick=False)
+    @pytest.mark.usefixtures("sample_hitl_detail")
     def test_should_respond_200_with_existing_response(
         self,
         test_client: TestClient,
@@ -328,7 +351,62 @@ class TestUpdateHITLDetailEndpoint:
         }
 
         audit_log = session.scalar(select(Log))
+        assert audit_log is not None
         _assert_sample_audit_log(audit_log)
+
+    @time_machine.travel(datetime(2025, 7, 3, 0, 0, 0), tick=False)
+    @pytest.mark.usefixtures("sample_hitl_detail")
+    def test_response_resumes_awaiting_input_task_without_trigger(
+        self,
+        test_client: TestClient,
+        sample_ti_url_identifier: str,
+        sample_update_payload: dict[str, Any],
+        sample_ti: TaskInstance,
+        session: Session,
+    ) -> None:
+        """A human response transitions a parked AWAITING_INPUT task straight to SCHEDULED, no trigger."""
+        # Park the task exactly as the 3.3 operator does: AWAITING_INPUT, next_method set, no trigger.
+        ti = session.get(TIModel, sample_ti.id)
+        assert ti is not None
+        ti.state = TaskInstanceState.AWAITING_INPUT
+        ti.next_method = "execute_complete"
+        ti.next_kwargs = {}
+        ti.trigger_id = None
+        session.commit()
+        # Sanity: the park persisted before we respond.
+        session.expire_all()
+        parked = session.get(TIModel, sample_ti.id)
+        assert parked is not None
+        assert parked.state == TaskInstanceState.AWAITING_INPUT
+
+        response = test_client.patch(
+            f"{sample_ti_url_identifier}/hitlDetails",
+            json=sample_update_payload,
+        )
+        assert response.status_code == 200
+
+        session.expire_all()
+        refreshed = session.get(TIModel, sample_ti.id)
+        assert refreshed is not None
+        # Resumed so the scheduler re-queues execute_complete -- with no triggerer involved.
+        assert refreshed.state == TaskInstanceState.SCHEDULED
+        assert refreshed.trigger_id is None
+        assert refreshed.next_method == "execute_complete"
+        assert "event" in (refreshed.next_kwargs or {})
+
+    @pytest.mark.usefixtures("sample_hitl_detail")
+    def test_should_respond_400_for_invalid_option(
+        self,
+        test_client: TestClient,
+        sample_ti_url_identifier: str,
+    ) -> None:
+        """Write-side validation rejects an out-of-set option (400) instead of failing the task on resume."""
+        response = test_client.patch(
+            f"{sample_ti_url_identifier}/hitlDetails",
+            json={"chosen_options": ["Maybe"], "params_input": {}},
+        )
+        assert response.status_code == 400
+        assert "Invalid options" in response.json()["detail"]
 
     @time_machine.travel(datetime(2025, 7, 3, 0, 0, 0), tick=False)
     @pytest.mark.usefixtures("sample_hitl_detail_respondent")
@@ -354,6 +432,7 @@ class TestUpdateHITLDetailEndpoint:
         }
 
         audit_log = session.scalar(select(Log))
+        assert audit_log is not None
         _assert_sample_audit_log(audit_log)
 
     def test_should_respond_401(
@@ -526,7 +605,8 @@ class TestGetHITLDetailsEndpoint:
         test_client: TestClient,
         expected_sample_hitl_detail_dict: dict[str, Any],
     ) -> None:
-        response = test_client.get("/dags/~/dagRuns/~/hitlDetails")
+        with assert_queries_count(3):
+            response = test_client.get("/dags/~/dagRuns/~/hitlDetails")
         assert response.status_code == 200
         assert response.json() == {
             "hitl_details": [expected_sample_hitl_detail_dict],
@@ -535,13 +615,16 @@ class TestGetHITLDetailsEndpoint:
 
     @pytest.mark.usefixtures("sample_hitl_details")
     @pytest.mark.parametrize(
-        "params, expected_ti_count",
+        ("params", "expected_ti_count"),
         [
             # ti related filter
             ({"dag_id_pattern": "hitl_dag"}, 5),
             ({"dag_id_pattern": "other_Dag_"}, 3),
             ({"task_id": "hitl_task_0"}, 1),
             ({"task_id_pattern": "another_hitl"}, 3),
+            ({"dag_id_prefix_pattern": "hitl_dag"}, 5),
+            ({"dag_id_prefix_pattern": "other_Dag_"}, 3),
+            ({"task_id_prefix_pattern": "another_hitl"}, 3),
             ({"map_index": -1}, 8),
             ({"map_index": 1}, 0),
             ({"state": "deferred"}, 5),
@@ -574,6 +657,9 @@ class TestGetHITLDetailsEndpoint:
             "dag_id_pattern_other_dag",
             "task_id",
             "task_id_pattern",
+            "dag_id_prefix_pattern_hitl_dag",
+            "dag_id_prefix_pattern_other_dag",
+            "task_id_prefix_pattern",
             "map_index_none",
             "map_index_1",
             "ti_state_deferred",
@@ -595,7 +681,8 @@ class TestGetHITLDetailsEndpoint:
         params: dict[str, Any],
         expected_ti_count: int,
     ) -> None:
-        response = test_client.get("/dags/~/dagRuns/~/hitlDetails", params=params)
+        with assert_queries_count(3):
+            response = test_client.get("/dags/~/dagRuns/~/hitlDetails", params=params)
         assert response.status_code == 200
         assert response.json()["total_entries"] == expected_ti_count
         assert len(response.json()["hitl_details"]) == expected_ti_count
@@ -616,9 +703,9 @@ class TestGetHITLDetailsEndpoint:
                     "body": "this is body 0",
                     "defaults": ["Approve"],
                     "multiple": False,
-                    "params": {"input_1": 1},
+                    "params": {"input_1": {"value": 1, "schema": {}, "description": None}},
                     "assigned_users": [],
-                    "created_at": DEFAULT_CREATED_AT.isoformat().replace("+00:00", "Z"),
+                    "created_at": from_datetime_to_zulu_without_ms(DEFAULT_CREATED_AT),
                     "responded_by_user": None,
                     "responded_at": None,
                     "chosen_options": None,
@@ -632,7 +719,7 @@ class TestGetHITLDetailsEndpoint:
     @pytest.mark.usefixtures("sample_hitl_details")
     @pytest.mark.parametrize("asc_desc_mark", ["", "-"], ids=["asc", "desc"])
     @pytest.mark.parametrize(
-        "key, get_key_lambda",
+        ("key", "get_key_lambda"),
         [
             # ti key
             ("ti_id", lambda x: x["task_instance"]["id"]),
@@ -642,7 +729,7 @@ class TestGetHITLDetailsEndpoint:
             ("rendered_map_index", lambda x: x["task_instance"]["rendered_map_index"]),
             ("task_instance_operator", lambda x: x["task_instance"]["operator_name"]),
             ("task_instance_state", lambda x: x["task_instance"]["state"]),
-            # htil key
+            # hitl key
             ("subject", itemgetter("subject")),
             ("responded_at", itemgetter("responded_at")),
             ("created_at", itemgetter("created_at")),
@@ -656,7 +743,7 @@ class TestGetHITLDetailsEndpoint:
             "rendered_map_index",
             "task_instance_operator",
             "task_instance_state",
-            # htil key
+            # hitl key
             "subject",
             "responded_at",
             "created_at",
@@ -691,6 +778,10 @@ class TestGetHITLDetailsEndpoint:
             ),
             reverse=reverse,
         )
+
+        # Remove entries with None, because None orders depends on the DB implementation
+        hitl_details = [d for d in hitl_details if get_key_lambda(d) is not None]
+        sorted_hitl_details = [d for d in sorted_hitl_details if get_key_lambda(d) is not None]
 
         assert hitl_details == sorted_hitl_details
 

@@ -10,18 +10,21 @@
   "filters": {
     "allRunTypes": "Alle Arten von Läufen",
     "allStates": "Alle Stati",
+    "anyRunState": "Beliebiger Lauf",
     "favorite": {
       "all": "Alle",
       "favorite": "Favorisierte",
       "unfavorite": "Nicht favorisierte"
     },
+    "lastRunState": "Letzter Lauf",
+    "noTimetableTypesFound": "Keine Zeitplantypen gefunden",
     "paused": {
       "active": "Aktiv",
       "all": "Alle",
       "paused": "Pausiert"
     },
     "runIdPatternFilter": "Dag Läufe suchen",
-    "triggeringUserNameFilter": "Suche Läufe ausgelöst von..."
+    "timetableType": "Zeitplantyp"
   },
   "ownerLink": "Besitzer Verlinkungen zu {{owner}}",
   "runAndTaskActions": {
@@ -34,6 +37,15 @@
       "buttonTooltip": "Umschalttaste+C zum Zurücksetzen tippen",
       "error": "Fehler beim Zurücksetzen von {{type}}",
       "title": "{{type}} bereinigen und neu planen"
+    },
+    "clearAllMapped": {
+      "button": "Alle gemappten Tasks zurücksetzen",
+      "buttonTooltip": "Umschalttaste+C zum Zurücksetzen aller gemappten Task-Instanzen tippen",
+      "title": "Alle gemappten Task-Instanzen zurücksetzen"
+    },
+    "confirmationDialog": {
+      "description": "Der Task befindet sich derzeit in dem Zustand {{state}}, ausgelöst durch den Benutzer {{user}} um {{time}}. \nDer Task kann nicht zurückgesetzt werden, bevor er abgeschlossen ist, oder ein Benutzer im Zurücksetz-Dialog die Option \"Zurücksetzen von laufenden Tasks verhindern\" deaktiviert.",
+      "title": "Task-Instanz kann nicht zurückgesetzt werden"
     },
     "delete": {
       "button": "{{type}} löschen",
@@ -62,10 +74,16 @@
       "future": "Zukünftige",
       "onlyFailed": "Nur fehlgeschlagene Tasks bereinigen",
       "past": "Vergangene",
+      "preventRunningTasks": "Zurücksetzen von laufenden Tasks verhindern",
       "queueNew": "Neue Tasks einplanen",
-      "runOnLatestVersion": "Mit neuester Bundle-Version ausführen",
+      "runOnLatestVersion": "Mit neuester Bündel-Version ausführen",
       "upstream": "Vorangegangene"
     }
+  },
+  "runStateCounts": {
+    "label": "Laufstatus",
+    "loading": "Laufstatuszahlen werden geladen",
+    "tooltip": "{{state}}: {{formattedCount}} – klicken, um Läufe zu filtern"
   },
   "search": {
     "advanced": "Erweiterte Suche",
@@ -79,9 +97,9 @@
       "asc": "Sortiert nach Anzeigename (A-Z)",
       "desc": "Sortiert nach Anzeigename (Z-A)"
     },
-    "lastRunStartDate": {
-      "asc": "Sortiert nach letztem Startdatum (Erster-Letzter)",
-      "desc": "Sortiert nach letztem Startdatum (Letzter-Erster)"
+    "lastRunAfter": {
+      "asc": "Nach spätestem Gelaufen-nach Zeitstempel sortieren (frühester–spätester)",
+      "desc": "Nach spätestem Gelaufen-nach Zeitstempel sortieren (spätester–frühester)"
     },
     "lastRunState": {
       "asc": "Sortiert nach dem Status des letzten Laufes (A-Z)",

@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from airflow.utils import timezone
+from airflow.providers.common.compat.sdk import timezone
 from airflow.utils.state import TaskInstanceState
 
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
@@ -203,7 +203,7 @@ class TestPythonVirtualenvDecorator:
         dag_maker.run_ti("f", dr)
 
     @pytest.mark.parametrize(
-        "serializer, extra_requirements",
+        ("serializer", "extra_requirements"),
         [
             pytest.param("pickle", [], id="pickle"),
             pytest.param("dill", ["dill"], marks=DILL_MARKER, id="dill"),
@@ -249,7 +249,7 @@ class TestPythonVirtualenvDecorator:
             dag_maker.run_ti("f", dr)
 
     @pytest.mark.parametrize(
-        "serializer, extra_requirements",
+        ("serializer", "extra_requirements"),
         [
             pytest.param("pickle", [], id="pickle"),
             pytest.param("dill", ["dill"], marks=DILL_MARKER, id="dill"),
@@ -276,7 +276,7 @@ class TestPythonVirtualenvDecorator:
         dag_maker.run_ti("f", dr)
 
     @pytest.mark.parametrize(
-        "serializer, extra_requirements",
+        ("serializer", "extra_requirements"),
         [
             pytest.param("pickle", [], id="pickle"),
             pytest.param("dill", ["dill"], marks=DILL_MARKER, id="dill"),

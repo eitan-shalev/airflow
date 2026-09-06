@@ -21,16 +21,30 @@ from typing import TYPE_CHECKING, Annotated
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from airflow.models.dagbag import DBDagBag
+from airflow.configuration import conf
+from airflow.models.dagbag import CachedDBDagBag, DBDagBag
+from airflow.models.serialized_dag import SerializedDagModel
 
 if TYPE_CHECKING:
     from airflow.models.dagrun import DagRun
-    from airflow.serialization.serialized_objects import SerializedDAG
+    from airflow.serialization.definitions.dag import SerializedDAG
 
 
-def create_dag_bag() -> DBDagBag:
-    """Create DagBag to retrieve DAGs from the database."""
-    return DBDagBag()
+def create_dag_bag() -> CachedDBDagBag:
+    """Create DagBag with configurable LRU+TTL caching for API server usage."""
+    cache_size = conf.getint("api", "dag_cache_size", fallback=64)
+    cache_ttl = conf.getint("api", "dag_cache_ttl", fallback=3600)
+
+    if cache_size < 0:
+        raise ValueError("[api] dag_cache_size must be greater than or equal to 0")
+    if cache_ttl < 0:
+        raise ValueError("[api] dag_cache_ttl must be greater than or equal to 0")
+
+    return CachedDBDagBag(
+        cache_size=cache_size,
+        cache_ttl=cache_ttl,
+        stats_prefix="api_server.dag_bag",
+    )
 
 
 def dag_bag_from_app(request: Request) -> DBDagBag:
@@ -70,14 +84,52 @@ def get_dag_for_run(dag_bag: DBDagBag, dag_run: DagRun, session: Session) -> Ser
 def get_dag_for_run_or_latest_version(
     dag_bag: DBDagBag, dag_run: DagRun | None, dag_id: str | None, session: Session
 ) -> SerializedDAG:
+    """
+    Retrieve the serialized Dag for a specific run, or the latest version if no run is given.
+
+    When a dag_run is provided, we prefer the exact Dag version the run was created with
+    (``created_dag_version_id``) so that task group lookups, operator metadata, etc. match
+    the Dag structure at the time of the run.
+
+    This is necessary because ``get_dag_for_run`` delegates to ``_version_from_dag_run``
+    which, for unversioned bundles (e.g. ``LocalDagBundle``), falls back to the *latest*
+    ``DagVersion``.
+    """
     dag: SerializedDAG | None = None
     if dag_run:
-        dag = dag_bag.get_dag_for_run(dag_run, session=session)
+        if dag_run.created_dag_version_id:
+            dag = dag_bag.get_dag(dag_run.created_dag_version_id, session=session)
+        if not dag:
+            dag = dag_bag.get_dag_for_run(dag_run, session=session)
     elif dag_id:
         dag = dag_bag.get_latest_version_of_dag(dag_id, session=session)
     if not dag:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"The Dag with ID: `{dag_id}` was not found")
     return dag
+
+
+def resolve_run_on_latest_version(
+    explicit_value: bool | None,
+    dag_id: str,
+    session: Session,
+    fallback: bool = False,
+) -> bool:
+    """
+    Resolve run_on_latest_version using precedence: explicit > DAG-level > global config > fallback.
+
+    :param explicit_value: Value from the API request body (or None if not specified).
+    :param dag_id: The DAG ID to look up.
+    :param session: Database session.
+    :param fallback: Default to use when neither DAG-level nor global config is set.
+        Clear/rerun endpoints use False (the historical default).
+        Backfill endpoint uses True (the historical default for backfills).
+    """
+    if explicit_value is not None:
+        return explicit_value
+    serialized = SerializedDagModel.get_dag(dag_id, session=session)
+    if serialized and serialized.rerun_with_latest_version is not None:
+        return serialized.rerun_with_latest_version
+    return conf.getboolean("core", "rerun_with_latest_version", fallback=fallback)
 
 
 DagBagDep = Annotated[DBDagBag, Depends(dag_bag_from_app)]

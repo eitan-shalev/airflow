@@ -101,6 +101,9 @@ class Query(NamedTuple):
             and self.file == other.file
         )
 
+    def __hash__(self):
+        return hash((self.function, self.sql, self.location, self.file))
+
     def to_dict(self):
         """
         Convert selected attributes of the instance into a dictionary.
@@ -142,7 +145,7 @@ def make_report() -> list[Query]:
     """
     queries = []
     with open(LOG_FILE, "r+") as f:
-        raw_queries = [line for line in f.readlines() if is_query(line)]
+        raw_queries = [line for line in f if is_query(line)]
 
     for query in raw_queries:
         time, info, stack, sql = query.replace("@SQLALCHEMY ", "").split("|$")

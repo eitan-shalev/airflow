@@ -71,7 +71,7 @@ Configuring the Connection
     * ``disable_ssl`` *(bool)* – Disable SSL/TLS entirely. Default ``false``.
     * ``disable_tls`` *(bool)* – Skip ``STARTTLS``. Default ``false``.
     * ``timeout`` *(int)* – Socket timeout (seconds). Default ``30``.
-    * ``retry_limit`` *(int)* – Connection attempts before raising. Default ``5``.
+    * ``retry_limit`` *(int)* – Number of retries after the first attempt before raising. Default ``5``.
     * ``ssl_context`` – ``"default"`` | ``"none"``
       See :ref:`howto/connection:smtp:ssl-context`.
 
@@ -247,7 +247,7 @@ Using ``SmtpHook`` in a Dag
 
    from datetime import datetime
 
-   from airflow import Dag
+   from airflow import DAG
    from airflow.operators.python import PythonOperator
    from airflow.providers.smtp.hooks.smtp import SmtpHook
 
@@ -261,7 +261,7 @@ Using ``SmtpHook`` in a Dag
            )
 
 
-   with Dag(
+   with DAG(
        dag_id="test_gmail_oauth2",
        start_date=datetime(2025, 7, 1),
        schedule=None,

@@ -66,7 +66,11 @@ def run_and_report(command, task_key):
     try:
         log.info("Starting execution for task: %s", task_key)
         result = subprocess.run(
-            command, shell=isinstance(command, str), stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            command,
+            check=False,
+            shell=isinstance(command, str),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
         return_code = result.returncode
         log.info("Execution completed for task %s with return code %s", task_key, return_code)
@@ -107,8 +111,8 @@ def get_queue_url():
 
 
 def fetch_dags_from_s3(s3_uri):
-    """Fetch DAGs from S3 and sync them to the local dags directory."""
-    log.info("Fetching DAGs from S3 URI: %s", s3_uri)
+    """Fetch Dags from S3 and sync them to the local dags directory."""
+    log.info("Fetching Dags from S3 URI: %s", s3_uri)
     # Use a named temporary directory for the local dags folder, only tmp is writeable in Lambda
     local_dags_dir = mkdtemp(prefix="airflow_dags_")
     log.info("Setting AIRFLOW__CORE__DAGS_FOLDER to: %s", local_dags_dir)

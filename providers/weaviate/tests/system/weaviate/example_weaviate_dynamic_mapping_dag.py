@@ -16,8 +16,10 @@
 # under the License.
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pendulum
-from weaviate.collections.classes.config import Configure
+from weaviate.classes.config import Configure
 
 try:
     from airflow.sdk import dag, setup, task, teardown
@@ -28,10 +30,17 @@ from airflow.providers.weaviate.operators.weaviate import WeaviateIngestOperator
 
 COLLECTION_NAMES = ["Weaviate_DTM_example_collection_1", "Weaviate_DTM_example_collection_2"]
 
+default_args = {
+    "retries": 5,
+    "retry_delay": timedelta(seconds=15),
+    "pool": "weaviate_pool",
+}
+
 
 @dag(
     schedule=None,
     start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
+    default_args=default_args,
     catchup=False,
     tags=["example", "weaviate"],
 )
@@ -49,7 +58,7 @@ def example_weaviate_dynamic_mapping_dag():
 
         weaviate_hook = WeaviateHook()
         # collection definition object. Weaviate's autoschema feature will infer properties when importing.
-        weaviate_hook.create_collection(data[0], vectorizer_config=data[1])
+        weaviate_hook.create_collection(data[0], vector_config=data[1])
 
     @setup
     @task
@@ -87,7 +96,10 @@ def example_weaviate_dynamic_mapping_dag():
 
     (
         create_weaviate_collection.expand(
-            data=[[COLLECTION_NAMES[0], None], [COLLECTION_NAMES[1], Configure.Vectorizer.text2vec_openai()]]
+            data=[
+                [COLLECTION_NAMES[0], Configure.Vectors.self_provided()],
+                [COLLECTION_NAMES[1], Configure.Vectors.text2vec_openai(vectorize_collection_name=True)],
+            ]
         )
         >> perform_ingestion
         >> delete_weaviate_collection.expand(collection_name=COLLECTION_NAMES)
@@ -98,5 +110,5 @@ example_weaviate_dynamic_mapping_dag()
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

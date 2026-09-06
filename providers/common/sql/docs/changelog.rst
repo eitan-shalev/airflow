@@ -25,6 +25,327 @@
 Changelog
 ---------
 
+2.1.1
+.....
+
+Misc
+~~~~
+
+* ``Add type annotations to sql hooks (#70815)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+   * ``Update changelog with better wording (#71161)``
+
+
+2.1.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add SQLBulkLoadOperator to Common SQL Provider (#69362)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix SQLColumnCheckOperator crash on non-numeric column bounds (#70895)``
+* ``Fix SQL check tolerance for negative expected values (#69736)``
+* ``Fix SQL value checks for negative expected values (#69893)``
+
+Misc
+~~~~
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Use common.compat.sdk for timezone imports in providers (#70492)``
+   * ``Limit pandas to < 3 for DataFrame XComs (#70791)``
+   * ``Revert "Limit pandas to < 3 for DataFrame XComs (#70791)" (#71100)``
+
+2.0.3
+.....
+
+Misc
+~~~~
+
+* ``Make psycopg (v3) the default synchronous Postgres driver (#69526)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+2.0.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Align hook run() annotations with None-able handler results (#69230)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Document each provider's optional extras in its docs index (#69478)``
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+2.0.1
+.....
+
+Misc
+~~~~
+
+* ``Add prek hook enforcing the "example" tag on example DAGs (#67354)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+2.0.0
+.....
+
+.. warning::
+   **Breaking Change:** The default execution mode for paginated (``page_size`` + string SQL) GenericTransfer tasks has changed. Previously, these tasks always ran in deferred mode (using deferrable execution). Starting with this release, they now run synchronously by default unless you explicitly opt in to deferrable mode.
+
+   This is a silent behavior change for any existing DAG using paginated GenericTransfer. If you want to restore the old behavior (always defer execution):
+
+   1. Pass ``deferrable=True`` to each affected GenericTransfer task, **or**
+   2. Set the global config option ``[operators] default_deferrable = true`` to make all operators deferrable by default.
+
+   Review your DAGs and configuration if you rely on deferred execution for paginated GenericTransfer tasks.
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Add standardized SQL check representation for listeners (#66849)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.36.0
+......
+
+Features
+~~~~~~~~
+
+* ``GenericTransfer: switch paginated mode to non-deferred default with opt-in deferral (#64321)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Providers wave 2026-04-21 (#65614)``
+   * ``Providers wave 2026-04-21``
+
+1.35.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add 'accept_none' to 'SQLTableCheckOperator' (#63210)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix stale system test documentation links (#65071)``
+
+1.34.0
+......
+
+Features
+~~~~~~~~
+
+* ``Simplify default rows limit return result (#64183)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Removed logging of rows length in SQLInsertRowsOperator to avoid crash on non materialized rows (#63346)``
+* ``Fix provider YAML validation for common SQL analytics operator (#63393)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix flaky test_run_no_log in DbApiHook by verifying caplog text instead of length. (#63860)``
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+
+1.33.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add Iceberg support to AnalyticsOperator (#62754)``
+* ``Add @task.analytics Decorator (#62648)``
+* ``Add ObjectStorage support to LLMSQLQueryOperator via DataFusion (#62640)``
+* ``Add 'LLMSQLQueryOperator' and '@task.llm_sql' to common.ai provider (#62599)``
+* ``AIP-99: Add AnalyticsOperator (#62232)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Cache DbApiHook.inspector to avoid creating N engines (#62594)``
+
+Misc
+~~~~
+
+* ``Consolidate 'SkipMixin' imports through 'common-compat' layer (#62776)``
+* ``Move determine_kwargs and KeywordParameters to SDK DecoratedOperator (#62746)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix removal of '__str__' method from Datafusion Format enums (#62830)``
+   * ``Explicitly set extra for connections in generic transfer tests (#62581)``
+
+1.32.0
+......
+
+Features
+~~~~~~~~
+
+* ``feat: Add Hook Level Lineage to SQL hooks (#61535)``
+* ``'task-sql-decorator': Introducing the '@task.sql' decorator (#60851)``
+
+Misc
+~~~~
+
+* ``Bump min sqlalchemy version to 1.4.54 (#62299)``
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``Providers ad-hoc 2026-02-20 (#62209)``
+
+1.31.0
+......
+
+Features
+~~~~~~~~
+
+* ``Implement specialized get_first and get_records method in OracleHook to avoid serialization issues with XCom's (#61144)``
+* ``Add rows processor to GenericTransfer (#61143)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.30.4
+......
+
+Misc
+~~~~
+
+* ``Add SQLAlchemy to the dev‑dependency group in providers (#60472)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.30.3
+......
+
+Misc
+~~~~
+
+* ``Consume ''AirflowOptionalProviderFeatureException'' from compat sdk in providers (#60335)``
+* ``New year means updated Copyright notices (#60344)``
+* ``Assorted SQLA2/Mypy fixes (#60094)``
+* ``Add proper dependencies for sqlalchemy - common.sql (#59945)``
+* ``Migrate common provider to use airflow.sdk.configuration.conf (#59989)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.30.2
+......
+
+Misc
+~~~~
+
+* ``Remove top-level SDK reference in Core (#59817)``
+* ``Extract shared "module_loading" distribution (#59139)``
+
+Doc-only
+~~~~~~~~
+
+* ``Add missing fields to SQLValueCheckOperator docstring (#59409)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``TaskInstance unused method cleanup (#59835)``
+
+1.30.1
+......
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+* ``chore: Move OpenLineage methods to BaseSQLOperator (#58897)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.30.0
+......
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Move out some exceptions to TaskSDK (#54505)``
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+* ``Fix lower bound dependency to common-compat provider (#58833)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+   * ``Prepare release for 2025-11-27 wave of providers (#58697)``
+
+1.29.0
+......
+
+Features
+~~~~~~~~
+
+* ``Allow a list of SQL statements in GenericTransfer (#56041)``
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+* ``Migrate 'common/sql' provider to 'common.compat' (#57135)``
+* ``Migrate 'common.sql' provider to 'common.compat' (#57075)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to 19 files in providers (cncf,common) (#57995)``
+   * ``Fix code formatting via ruff preview (#57641)``
+   * ``Enable ruff PLW0127 rule (#57298)``
+
+1.28.2
+......
+
+Misc
+~~~~
+
+* ``fix mypy type errors in common/sql provider for sqlalchemy 2 upgrade (#56824)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT011 rule to prvoider tests (#56495)``
+
 1.28.1
 ......
 
@@ -70,8 +391,6 @@ Doc-only
    * ``Replace API server's direct Connection access workaround in BaseHook (#54083)``
    * ``Switch pre-commit to prek (#54258)``
    * ``make bundle_name not nullable (#47592)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Fix Airflow 2 reference in README/index of providers (#55240)``
 
 1.27.5
@@ -273,7 +592,7 @@ Misc
 ......
 
 .. note::
-  This version has no code changes. It's released due to yank of previous version due to packaging issues.
+  This version contains no code changes. It was released to replace a previous version that was yanked due to a packaging issue.
 
 1.22.0
 ......
@@ -343,9 +662,6 @@ Misc
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Use Python 3.9 as target version for Ruff & Black rules (#44298)``
-
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
 
 1.20.0
@@ -515,7 +831,6 @@ Misc
   `Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>`_.
 
 
-
 Features
 ~~~~~~~~
 
@@ -582,7 +897,8 @@ Misc
 * ``feat: Switch all class, functions, methods deprecations to decorators (#36876)``
 * ``Add more-itertools as dependency of common-sql (#37359)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Prepare docs 1st wave of Providers February 2024 (#37326)``
 
 1.10.1
@@ -639,7 +955,8 @@ Misc
 * ``Add '_make_serializable' method which other SQL operators can overrides when result from cursor is not JSON-serializable (#32319)``
 * ``Remove backcompat inheritance for DbApiHook (#35754)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Use reproducible builds for providers (#35693)``
    * ``Fix and reapply templates for provider documentation (#35686)``
    * ``Prepare docs 1st wave of Providers November 2023 (#35537)``

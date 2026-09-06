@@ -20,15 +20,15 @@ from typing import Any
 
 import yandexcloud
 
+from airflow.providers.common.compat.sdk import BaseHook
 from airflow.providers.yandex.utils.credentials import (
     CredentialsType,
     get_credentials,
     get_service_account_id,
 )
-from airflow.providers.yandex.utils.defaults import conn_name_attr, conn_type, default_conn_name, hook_name
+from airflow.providers.yandex.utils.defaults import conn_name_attr, conn_type, default_conn_name
 from airflow.providers.yandex.utils.fields import get_field_from_extras
 from airflow.providers.yandex.utils.user_agent import provider_user_agent
-from airflow.providers.yandex.version_compat import BaseHook
 
 
 class YandexCloudBaseHook(BaseHook):
@@ -44,7 +44,7 @@ class YandexCloudBaseHook(BaseHook):
     conn_name_attr = conn_name_attr
     default_conn_name = default_conn_name
     conn_type = conn_type
-    hook_name = hook_name
+    hook_name = "Yandex Cloud"
 
     @classmethod
     def get_connection_form_widgets(cls) -> dict[str, Any]:

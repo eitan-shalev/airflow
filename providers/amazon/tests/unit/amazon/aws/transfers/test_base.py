@@ -22,15 +22,12 @@ import pytest
 from airflow import DAG
 from airflow.models import DagRun, TaskInstance
 from airflow.providers.amazon.aws.transfers.base import AwsToAwsBaseOperator
-
-try:
-    from airflow.sdk import timezone
-except ImportError:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunType
 
+from tests_common.test_utils.compat import timezone
 from tests_common.test_utils.dag import sync_dag_to_db
+from tests_common.test_utils.taskinstance import create_task_instance, render_template_fields
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 
 DEFAULT_DATE = timezone.datetime(2020, 1, 1)
@@ -40,6 +37,23 @@ class TestAwsToAwsBaseOperator:
     def setup_method(self):
         args = {"owner": "airflow", "start_date": DEFAULT_DATE}
         self.dag = DAG("test_dag_id", schedule=None, default_args=args)
+
+    def test_dest_aws_conn_id_defaults_to_source_aws_conn_id(self):
+        operator = AwsToAwsBaseOperator(
+            task_id="dynamodb_to_s3_test_default_dest",
+            source_aws_conn_id="source_conn",
+        )
+
+        assert operator.dest_aws_conn_id == "source_conn"
+
+    def test_dest_aws_conn_id_allows_explicit_none(self):
+        operator = AwsToAwsBaseOperator(
+            task_id="dynamodb_to_s3_test_dest_none",
+            source_aws_conn_id="source_conn",
+            dest_aws_conn_id=None,
+        )
+
+        assert operator.dest_aws_conn_id is None
 
     @pytest.mark.db_test
     def test_render_template(self, session, clean_dags_dagruns_and_dagbundles, testing_dag_bundle):
@@ -55,13 +69,14 @@ class TestAwsToAwsBaseOperator:
 
             sync_dag_to_db(self.dag)
             dag_version = DagVersion.get_latest_version(self.dag.dag_id)
-            ti = TaskInstance(operator, run_id="something", dag_version_id=dag_version.id)
+            ti = create_task_instance(operator, run_id="something", dag_version_id=dag_version.id)
             ti.dag_run = DagRun(
                 dag_id=self.dag.dag_id,
                 run_id="something",
                 logical_date=timezone.datetime(2020, 1, 1),
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
+                run_after=timezone.utcnow(),
             )
         else:
             ti = TaskInstance(operator, run_id="something")
@@ -72,8 +87,6 @@ class TestAwsToAwsBaseOperator:
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
             )
-        session.add(ti)
-        session.commit()
-        ti.render_templates()
+        render_template_fields(ti, operator)
         assert getattr(operator, "source_aws_conn_id") == "2020-01-01"
         assert getattr(operator, "dest_aws_conn_id") == "2020-01-01"

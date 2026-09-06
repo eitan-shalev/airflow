@@ -16,9 +16,10 @@
 # under the License.
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pendulum
-from weaviate.classes.config import DataType, Property
-from weaviate.collections.classes.config import Configure
+from weaviate.classes.config import Configure, DataType, Property
 
 try:
     from airflow.sdk import dag, task, teardown
@@ -92,9 +93,17 @@ def get_data_without_vectors(*args, **kwargs):
     return sample_data_without_vector
 
 
+default_args = {
+    "retries": 5,
+    "retry_delay": timedelta(seconds=15),
+    "pool": "weaviate_pool",
+}
+
+
 @dag(
     schedule=None,
     start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
+    default_args=default_args,
     catchup=False,
     tags=["example", "weaviate"],
 )
@@ -114,7 +123,7 @@ def example_weaviate_using_operator():
 
         weaviate_hook = WeaviateHook()
         # collection definition object. Weaviate's autoschema feature will infer properties when importing.
-        weaviate_hook.create_collection(COLLECTION_NAME)
+        weaviate_hook.create_collection(COLLECTION_NAME, vector_config=Configure.Vectors.self_provided())
 
     @task(trigger_rule="all_done")
     def store_data_with_vectors_in_xcom():
@@ -158,7 +167,7 @@ def example_weaviate_using_operator():
                 Property(name="answer", description="The answer", data_type=DataType.TEXT),
                 Property(name="category", description="The category", data_type=DataType.TEXT),
             ],
-            vectorizer_config=Configure.Vectorizer.text2vec_openai(),
+            vector_config=Configure.Vectors.text2vec_openai(),
         )
 
     @task()
@@ -178,7 +187,7 @@ def example_weaviate_using_operator():
                 Property(name="category", description="The category", data_type=DataType.TEXT),
                 Property(name="docLink", description="URL for source document", data_type=DataType.TEXT),
             ],
-            vectorizer_config=Configure.Vectorizer.text2vec_openai(),
+            vector_config=Configure.Vectors.text2vec_openai(),
         )
 
     @task(trigger_rule="all_done")
@@ -303,5 +312,5 @@ example_weaviate_using_operator()
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

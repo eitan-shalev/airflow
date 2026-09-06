@@ -50,18 +50,28 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SENSITIVE_FIELDS = frozenset(
     {
+        "access_key",
         "access_token",
         "api_key",
         "apikey",
+        "auth_header",
         "authorization",
+        "bearer",
+        "connection_string",
+        "dsn",
         "passphrase",
         "passwd",
         "password",
         "private_key",
+        "proxy",
+        "proxy_password",
+        "proxies",
         "secret",
+        "service_account",
+        "service_key",
         "token",
         "keyfile_dict",
-        "service_account",
+        "webhook_url",
     }
 )
 """Names of fields (Connection extra, Variable key name etc.) that are deemed sensitive"""
@@ -127,9 +137,7 @@ def merge(
     return _secrets_masker().merge(new_value, old_value, name, max_depth)
 
 
-_global_secrets_masker: SecretsMasker | None = None
-
-
+@cache
 def _secrets_masker() -> SecretsMasker:
     """
     Get or create the module-level secrets masker instance.
@@ -139,10 +147,7 @@ def _secrets_masker() -> SecretsMasker:
     airflow.sdk._shared) will have separate global variables and thus separate
     masker instances.
     """
-    global _global_secrets_masker
-    if _global_secrets_masker is None:
-        _global_secrets_masker = SecretsMasker()
-    return _global_secrets_masker
+    return SecretsMasker()
 
 
 def reset_secrets_masker() -> None:
@@ -158,18 +163,27 @@ def reset_secrets_masker() -> None:
     _secrets_masker().reset_masker()
 
 
+def _is_v1_env_var(v: Any) -> TypeGuard[_V1EnvVarLike]:
+    """Check if object is V1EnvVar, avoiding unnecessary imports."""
+    # Quick check: if k8s not imported, can't be a V1EnvVar instance
+    if "kubernetes.client" not in sys.modules:
+        return False
+
+    # K8s is loaded, safe to get/cache the type
+    v1_type = _get_v1_env_var_type_cached()
+    return isinstance(v, v1_type)
+
+
 @cache
-def _get_v1_env_var_type() -> type:
+def _get_v1_env_var_type_cached() -> type:
+    """Get V1EnvVar type (cached, only called when k8s is already loaded)."""
     try:
         from kubernetes.client import V1EnvVar
 
         return V1EnvVar
     except ImportError:
+        # Shouldn't happen since we check sys.modules first
         return type("V1EnvVar", (), {})
-
-
-def _is_v1_env_var(v: Any) -> TypeGuard[_V1EnvVarLike]:
-    return isinstance(v, _get_v1_env_var_type())
 
 
 class SecretsMasker(logging.Filter):
@@ -190,6 +204,7 @@ class SecretsMasker(logging.Filter):
         super().__init__()
         self.patterns = set()
         self.sensitive_variables_fields = []
+        self.hide_sensitive_var_conn_fields = True
 
     @classmethod
     def __init_subclass__(cls, **kwargs):
@@ -250,15 +265,38 @@ class SecretsMasker(logging.Filter):
         )
         return frozenset(record.__dict__).difference({"msg", "args"})
 
-    def _redact_exception_with_context(self, exception):
+    def _redact_exception_with_context_or_cause(self, exception, visited=None):
         # Exception class may not be modifiable (e.g. declared by an
         # extension module such as JDBC).
         with contextlib.suppress(AttributeError):
-            exception.args = (self.redact(v) for v in exception.args)
-        if exception.__context__:
-            self._redact_exception_with_context(exception.__context__)
-        if exception.__cause__ and exception.__cause__ is not exception.__context__:
-            self._redact_exception_with_context(exception.__cause__)
+            if visited is None:
+                visited = set()
+
+            if id(exception) in visited:
+                # already visited - it was redacted earlier
+                return exception
+
+            # Check depth before adding to visited to ensure we skip exceptions beyond the limit
+            if len(visited) >= self.MAX_RECURSION_DEPTH:
+                return RuntimeError(
+                    f"Stack trace redaction hit recursion limit of {self.MAX_RECURSION_DEPTH} "
+                    f"when processing exception of type {type(exception).__name__}. "
+                    f"The remaining exceptions will be skipped to avoid "
+                    f"infinite recursion and protect against revealing sensitive information."
+                )
+
+            visited.add(id(exception))
+
+            exception.args = tuple(self.redact(v) for v in exception.args)
+            if exception.__context__:
+                exception.__context__ = self._redact_exception_with_context_or_cause(
+                    exception.__context__, visited
+                )
+            if exception.__cause__ and exception.__cause__ is not exception.__context__:
+                exception.__cause__ = self._redact_exception_with_context_or_cause(
+                    exception.__cause__, visited
+                )
+        return exception
 
     def filter(self, record) -> bool:
         if not self.is_log_masking_enabled():
@@ -275,7 +313,7 @@ class SecretsMasker(logging.Filter):
                     record.__dict__[k] = self.redact(v)
             if record.exc_info and record.exc_info[1] is not None:
                 exc = record.exc_info[1]
-                self._redact_exception_with_context(exc)
+                self._redact_exception_with_context_or_cause(exc)
         record.__dict__[self.ALREADY_FILTERED_FLAG] = True
 
         return True
@@ -311,14 +349,18 @@ class SecretsMasker(logging.Filter):
     def _redact(
         self, item: Redactable, name: str | None, depth: int, max_depth: int, replacement: str = "***"
     ) -> Redacted:
-        # Avoid spending too much effort on redacting on deeply nested
-        # structures. This also avoid infinite recursion if a structure has
-        # reference to self.
-        if depth > max_depth:
-            return item
         try:
+            # Key-name-based redaction is unbounded by depth — sensitive keys
+            # must fail closed at any nesting level. The depth cutoff below is
+            # only used to bound the work of pattern-based string masking and
+            # to terminate recursion through self-referential iterables.
             if name and self.should_hide_value_for_key(name):
                 return self._redact_all(item, depth, max_depth, replacement=replacement)
+            # Always walk dicts so deeper sensitive keys are still caught;
+            # JSON-loaded payloads cannot be self-referential, and any
+            # in-memory cycle hits Python's own recursion limit and is caught
+            # by the except clause below (which fails closed via
+            # "<redaction-failed>").
             if isinstance(item, dict):
                 to_return = {
                     dict_key: self._redact(
@@ -327,6 +369,31 @@ class SecretsMasker(logging.Filter):
                     for dict_key, subval in item.items()
                 }
                 return to_return
+            # Always walk lists/tuples/sets too, mirroring the unconditional dict
+            # walk above, so a sensitive key wrapped in an iterable is still
+            # caught at any nesting depth. Self-referential iterables hit Python's
+            # own recursion limit and are caught by the except clause below, which
+            # fails closed.
+            if isinstance(item, (tuple, set)):
+                # Turn set in to tuple!
+                return tuple(
+                    self._redact(
+                        subval, name=None, depth=(depth + 1), max_depth=max_depth, replacement=replacement
+                    )
+                    for subval in item
+                )
+            if isinstance(item, list):
+                return [
+                    self._redact(
+                        subval, name=None, depth=(depth + 1), max_depth=max_depth, replacement=replacement
+                    )
+                    for subval in item
+                ]
+            # The depth cutoff only bounds the work of pattern-based string
+            # masking below — key-name redaction (dicts and iterables above) is
+            # unbounded so sensitive keys fail closed at any depth.
+            if depth > max_depth:
+                return item
             if isinstance(item, Enum):
                 return self._redact(
                     item=item.value, name=name, depth=depth, max_depth=max_depth, replacement=replacement
@@ -347,21 +414,6 @@ class SecretsMasker(logging.Filter):
                     # the structure.
                     return self.replacer.sub(replacement, str(item))
                 return item
-            if isinstance(item, (tuple, set)):
-                # Turn set in to tuple!
-                return tuple(
-                    self._redact(
-                        subval, name=None, depth=(depth + 1), max_depth=max_depth, replacement=replacement
-                    )
-                    for subval in item
-                )
-            if isinstance(item, list):
-                return [
-                    self._redact(
-                        subval, name=None, depth=(depth + 1), max_depth=max_depth, replacement=replacement
-                    )
-                    for subval in item
-                ]
             return item
         # I think this should never happen, but it does not hurt to leave it just in case
         # Well. It happened (see https://github.com/apache/airflow/issues/19816#issuecomment-983311373)
@@ -399,12 +451,20 @@ class SecretsMasker(logging.Filter):
             # Determine if we should treat this as sensitive
             is_sensitive = force_sensitive or (name is not None and self.should_hide_value_for_key(name))
 
+            v1_env_var_name = None
+            if isinstance(new_item, dict) and _is_v1_env_var(old_item):
+                # redact(V1EnvVar) returns a dict, so merge against the old object's serialized shape.
+                old_item = old_item.to_dict()
+                v1_env_var_name = old_item.get("name")
+
             if isinstance(new_item, dict) and isinstance(old_item, dict):
                 merged = {}
                 for key in new_item.keys():
                     if key in old_item:
                         # For dicts, pass the key as name unless we're in sensitive mode
                         child_name = None if is_sensitive else key
+                        if key == "value" and v1_env_var_name:
+                            child_name = v1_env_var_name
                         merged[key] = self._merge(
                             new_item[key],
                             old_item[key],
@@ -521,11 +581,10 @@ class SecretsMasker(logging.Filter):
 
         Name might be a Variable name, or key in conn.extra_dejson, for example.
         """
-        from airflow import settings
-
-        if isinstance(name, str) and settings.HIDE_SENSITIVE_VAR_CONN_FIELDS:
+        if isinstance(name, str) and self.hide_sensitive_var_conn_fields:
             name = name.strip().lower()
-            return any(s in name for s in self.sensitive_variables_fields)
+            normalized = re.sub(r"\W+", "_", name)
+            return any(s in normalized for s in self.sensitive_variables_fields)
         return False
 
     def add_mask(self, secret: JsonValue, name: str | None = None):

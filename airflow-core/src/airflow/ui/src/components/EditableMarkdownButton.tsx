@@ -16,15 +16,13 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading, VStack, Flex } from "@chakra-ui/react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { PiNoteBlankLight, PiNoteLight } from "react-icons/pi";
 
-import { Button, Dialog } from "src/components/ui";
+import { IconButton } from "src/components/ui";
 
-import EditableMarkdownArea from "./EditableMarkdownArea";
-import ActionButton from "./ui/ActionButton";
+import MarkdownModal from "./MarkdownModal";
+import NoteIcon from "./NoteIcon";
 
 const EditableMarkdownButton = ({
   header,
@@ -34,8 +32,6 @@ const EditableMarkdownButton = ({
   onOpen,
   placeholder,
   setMdContent,
-  text,
-  withText = true,
 }: {
   readonly header: string;
   readonly isPending: boolean;
@@ -44,77 +40,36 @@ const EditableMarkdownButton = ({
   readonly onOpen: () => void;
   readonly placeholder: string;
   readonly setMdContent: (value: string) => void;
-  readonly text: string;
-  readonly withText?: boolean;
 }) => {
-  const { t: translate } = useTranslation("common");
+  const { t: translate } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
 
-  const noteIcon = Boolean(mdContent?.trim()) ? <PiNoteLight /> : <PiNoteBlankLight />;
+  const hasContent = Boolean(mdContent?.trim());
+  const label = hasContent ? translate("note.label") : translate("note.add");
+
+  const handleOpen = () => {
+    if (!isOpen) {
+      onOpen();
+    }
+    setIsOpen(true);
+  };
 
   return (
-    <Box>
-      <Box display="inline-block" position="relative">
-        <ActionButton
-          actionName={placeholder}
-          icon={noteIcon}
-          onClick={() => {
-            if (!isOpen) {
-              onOpen();
-            }
-            setIsOpen(true);
-          }}
-          text={text}
-          variant="outline"
-          withText={withText}
-        />
-        {Boolean(mdContent?.trim()) && (
-          <Box
-            bg="brand.500"
-            borderRadius="full"
-            height={2.5}
-            position="absolute"
-            right={-0.5}
-            top={-0.5}
-            width={2.5}
-          />
-        )}
-      </Box>
-      <Dialog.Root
-        data-testid="markdown-modal"
-        lazyMount
-        onOpenChange={() => setIsOpen(false)}
-        open={isOpen}
-        size="md"
-        unmountOnExit={true}
-      >
-        <Dialog.Content backdrop>
-          <Dialog.Header bg="brand.muted">
-            <Heading size="xl">{header}</Heading>
-            <Dialog.CloseTrigger closeButtonProps={{ size: "xl" }} />
-          </Dialog.Header>
-          <Dialog.Body alignItems="flex-start" as={VStack} gap="0">
-            <EditableMarkdownArea
-              mdContent={mdContent}
-              placeholder={placeholder}
-              setMdContent={setMdContent}
-            />
-            <Flex justifyContent="end" mt={3} width="100%">
-              <Button
-                colorPalette="brand"
-                loading={isPending}
-                onClick={() => {
-                  onConfirm();
-                  setIsOpen(false);
-                }}
-              >
-                {noteIcon} {translate("modal.confirm")}
-              </Button>
-            </Flex>
-          </Dialog.Body>
-        </Dialog.Content>
-      </Dialog.Root>
-    </Box>
+    <>
+      <IconButton label={label} onClick={handleOpen}>
+        <NoteIcon hasNote={hasContent} />
+      </IconButton>
+      <MarkdownModal
+        header={header}
+        isOpen={isOpen}
+        isPending={isPending}
+        mdContent={mdContent}
+        onClose={() => setIsOpen(false)}
+        onConfirm={onConfirm}
+        placeholder={placeholder}
+        setMdContent={setMdContent}
+      />
+    </>
   );
 };
 

@@ -26,14 +26,14 @@ type Props = {
 };
 
 export const ResetButton = ({ filterCount, onClearFilters }: Props) => {
-  const { t: translate } = useTranslation("common");
+  const { t: translate } = useTranslation();
 
   if (filterCount === 0) {
     return undefined;
   }
 
   return (
-    <Button onClick={onClearFilters} size="sm" variant="outline">
+    <Button onClick={onClearFilters} variant="outline">
       <LuX />
       {translate("table.filterReset", { count: filterCount })}
     </Button>

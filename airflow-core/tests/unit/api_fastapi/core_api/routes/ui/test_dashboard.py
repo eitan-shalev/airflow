@@ -18,16 +18,21 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest import mock
 
 import pendulum
 import pytest
 
+from airflow.api_fastapi.core_api.routes.ui import dashboard
 from airflow.models.dag import DagModel
 from airflow.models.dagbag import DBDagBag
+from airflow.models.dagrun import DagRun
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.utils.state import DagRunState, TaskInstanceState
 from airflow.utils.types import DagRunType
 
+from tests_common.test_utils.asserts import assert_queries_count
 from tests_common.test_utils.db import clear_db_runs
 
 pytestmark = pytest.mark.db_test
@@ -69,6 +74,7 @@ def make_dag_runs(dag_maker, session, time_machine):
         run_type=DagRunType.SCHEDULED,
         logical_date=date,
         start_date=date,
+        run_after=date,
     )
 
     run2 = dag_maker.create_dagrun(
@@ -77,6 +83,7 @@ def make_dag_runs(dag_maker, session, time_machine):
         run_type=DagRunType.ASSET_TRIGGERED,
         logical_date=date + timedelta(days=1),
         start_date=date + timedelta(days=1),
+        run_after=date + timedelta(days=1),
     )
 
     run3 = dag_maker.create_dagrun(
@@ -85,6 +92,7 @@ def make_dag_runs(dag_maker, session, time_machine):
         run_type=DagRunType.SCHEDULED,
         logical_date=date + timedelta(days=2),
         start_date=date + timedelta(days=2),
+        run_after=date + timedelta(days=2),
     )
 
     run3.end_date = None
@@ -94,6 +102,7 @@ def make_dag_runs(dag_maker, session, time_machine):
         state=DagRunState.QUEUED,
         run_type=DagRunType.SCHEDULED,
         logical_date=date + timedelta(days=3),
+        run_after=date + timedelta(days=3),
     )
 
     for ti in run1.task_instances:
@@ -237,14 +246,14 @@ def make_multiple_dags(dag_maker, session):
 
 class TestHistoricalMetricsDataEndpoint:
     @pytest.mark.parametrize(
-        "params, expected",
+        ("params", "expected"),
         [
             (
                 {"start_date": "2023-01-01T00:00", "end_date": "2023-08-02T00:00"},
                 {
                     "dag_run_states": {"failed": 1, "queued": 1, "running": 1, "success": 1},
-                    "dag_run_types": {"backfill": 0, "asset_triggered": 1, "manual": 0, "scheduled": 3},
                     "task_instance_states": {
+                        "awaiting_input": 0,
                         "deferred": 0,
                         "failed": 2,
                         "no_status": 4,
@@ -259,17 +268,19 @@ class TestHistoricalMetricsDataEndpoint:
                         "up_for_retry": 0,
                         "upstream_failed": 0,
                     },
+                    "dag_run_counts_are_lower_bounds": False,
+                    "task_instance_counts_are_lower_bounds": False,
                 },
             ),
             (
-                {"start_date": "2023-02-02T00:00", "end_date": "2023-06-02T00:00"},
+                {"start_date": "2023-02-02T00:00", "end_date": "2023-02-03T12:00"},
                 {
-                    "dag_run_states": {"failed": 1, "queued": 0, "running": 0, "success": 0},
-                    "dag_run_types": {"backfill": 0, "asset_triggered": 1, "manual": 0, "scheduled": 0},
+                    "dag_run_states": {"failed": 1, "queued": 0, "running": 1, "success": 0},
                     "task_instance_states": {
+                        "awaiting_input": 0,
                         "deferred": 0,
                         "failed": 2,
-                        "no_status": 0,
+                        "no_status": 2,
                         "queued": 0,
                         "removed": 0,
                         "restarting": 0,
@@ -281,14 +292,16 @@ class TestHistoricalMetricsDataEndpoint:
                         "up_for_retry": 0,
                         "upstream_failed": 0,
                     },
+                    "dag_run_counts_are_lower_bounds": False,
+                    "task_instance_counts_are_lower_bounds": False,
                 },
             ),
             (
                 {"start_date": "2023-02-02T00:00"},
                 {
                     "dag_run_states": {"failed": 1, "queued": 1, "running": 1, "success": 0},
-                    "dag_run_types": {"backfill": 0, "asset_triggered": 1, "manual": 0, "scheduled": 2},
                     "task_instance_states": {
+                        "awaiting_input": 0,
                         "deferred": 0,
                         "failed": 2,
                         "no_status": 4,
@@ -303,15 +316,43 @@ class TestHistoricalMetricsDataEndpoint:
                         "up_for_retry": 0,
                         "upstream_failed": 0,
                     },
+                    "dag_run_counts_are_lower_bounds": False,
+                    "task_instance_counts_are_lower_bounds": False,
                 },
             ),
         ],
     )
     @pytest.mark.usefixtures("freeze_time_for_dagruns", "make_dag_runs")
     def test_should_response_200(self, test_client, params, expected):
-        response = test_client.get("/dashboard/historical_metrics_data", params=params)
+        with assert_queries_count(4):
+            response = test_client.get("/dashboard/historical_metrics_data", params=params)
         assert response.status_code == 200
         assert response.json() == expected
+
+    @pytest.mark.parametrize(
+        ("exact_limit", "dag_runs_bounded", "task_instances_bounded"),
+        [
+            pytest.param(8, False, False, id="both-counted-exactly"),
+            pytest.param(4, False, True, id="dag-runs-exact-task-instances-bounded"),
+            pytest.param(3, True, True, id="neither-counted-exactly"),
+        ],
+    )
+    @pytest.mark.usefixtures("freeze_time_for_dagruns", "make_dag_runs")
+    def test_exact_limit_applies_per_group(
+        self, test_client, exact_limit, dag_runs_bounded, task_instances_bounded
+    ):
+        """The fixture's 4 dag runs and 8 task instances cross EXACT_COUNT_LIMIT independently."""
+        with mock.patch.object(dashboard, "EXACT_COUNT_LIMIT", exact_limit):
+            response = test_client.get(
+                "/dashboard/historical_metrics_data",
+                params={"start_date": "2023-01-01T00:00", "end_date": "2023-08-02T00:00"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["dag_run_counts_are_lower_bounds"] is dag_runs_bounded
+        assert data["task_instance_counts_are_lower_bounds"] is task_instances_bounded
+        if not dag_runs_bounded:
+            assert data["dag_run_states"] == {"failed": 1, "queued": 1, "running": 1, "success": 1}
 
     def test_should_response_401(self, unauthenticated_test_client):
         response = unauthenticated_test_client.get(
@@ -329,7 +370,8 @@ class TestHistoricalMetricsDataEndpoint:
 class TestDagStatsEndpoint:
     @pytest.mark.usefixtures("freeze_time_for_dagruns", "make_multiple_dags")
     def test_should_response_200_multiple_dags(self, test_client):
-        response = test_client.get("/dashboard/dag_stats")
+        with assert_queries_count(3):
+            response = test_client.get("/dashboard/dag_stats")
         assert response.status_code == 200
         assert response.json() == {
             "active_dag_count": 4,
@@ -340,18 +382,20 @@ class TestDagStatsEndpoint:
 
     @pytest.mark.usefixtures("freeze_time_for_dagruns", "make_dag_runs")
     def test_should_response_200_single_dag(self, test_client):
-        response = test_client.get("/dashboard/dag_stats")
+        with assert_queries_count(3):
+            response = test_client.get("/dashboard/dag_stats")
         assert response.status_code == 200
         assert response.json() == {
             "active_dag_count": 1,
             "failed_dag_count": 0,
-            "running_dag_count": 0,
+            "running_dag_count": 1,
             "queued_dag_count": 1,
         }
 
     @pytest.mark.usefixtures("freeze_time_for_dagruns", "make_failed_dag_runs")
     def test_should_response_200_failed_dag(self, test_client):
-        response = test_client.get("/dashboard/dag_stats")
+        with assert_queries_count(3):
+            response = test_client.get("/dashboard/dag_stats")
         assert response.status_code == 200
         assert response.json() == {
             "active_dag_count": 1,
@@ -362,7 +406,8 @@ class TestDagStatsEndpoint:
 
     @pytest.mark.usefixtures("freeze_time_for_dagruns", "make_queued_dag_runs")
     def test_should_response_200_queued_dag(self, test_client):
-        response = test_client.get("/dashboard/dag_stats")
+        with assert_queries_count(3):
+            response = test_client.get("/dashboard/dag_stats")
         assert response.status_code == 200
         assert response.json() == {
             "active_dag_count": 1,
@@ -373,7 +418,8 @@ class TestDagStatsEndpoint:
 
     @pytest.mark.usefixtures("freeze_time_for_dagruns")
     def test_should_response_200_no_dag_runs(self, test_client):
-        response = test_client.get("/dashboard/dag_stats")
+        with assert_queries_count(3):
+            response = test_client.get("/dashboard/dag_stats")
         assert response.status_code == 200
         assert response.json() == {
             "active_dag_count": 0,
@@ -389,3 +435,24 @@ class TestDagStatsEndpoint:
     def test_should_response_403(self, unauthorized_test_client):
         response = unauthorized_test_client.get("/dashboard/dag_stats")
         assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("limit", "expected_counts", "expected_bounded"),
+    [
+        pytest.param(1_000, {"success": 4_200, "failed": 130}, True, id="bounded-counts-rounded-down"),
+        pytest.param(50_000, {"success": 4_250, "failed": 137}, False, id="exact-counts-left-alone"),
+    ],
+)
+def test_compute_state_counts_rounds_only_lower_bounds(limit, expected_counts, expected_bounded):
+    """Rounding applies to lower bounds and nothing else."""
+    session = mock.MagicMock()
+    session.execute.return_value.all.return_value = [
+        SimpleNamespace(state="success", cnt=4_250),
+        SimpleNamespace(state="failed", cnt=137),
+    ]
+    with mock.patch.object(dashboard, "EXACT_COUNT_LIMIT", limit):
+        counts, are_lower_bounds = dashboard._compute_state_counts(DagRun, [], session=session)
+
+    assert are_lower_bounds is expected_bounded
+    assert counts == expected_counts

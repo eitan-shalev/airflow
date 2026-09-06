@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from airflow_breeze.prepare_providers.provider_documentation import (
+    NEEDS_LLM_CLASSIFICATION,
     VERSION_MAJOR_INDEX,
     VERSION_MINOR_INDEX,
     VERSION_PATCHLEVEL_INDEX,
@@ -34,6 +35,7 @@ from airflow_breeze.prepare_providers.provider_documentation import (
     _get_changes_classified,
     _get_git_log_command,
     classification_result,
+    classify_change_deterministically,
     get_most_impactful_change,
     get_version_tag,
 )
@@ -89,7 +91,7 @@ def test_find_insertion_index_insert_new_changelog():
 
 
 @pytest.mark.parametrize(
-    "version, provider_id, suffix, tag",
+    ("version", "provider_id", "suffix", "tag"),
     [
         ("1.0.1", "asana", "", "providers-asana/1.0.1"),
         ("1.0.1", "asana", "rc1", "providers-asana/1.0.1rc1"),
@@ -101,7 +103,7 @@ def test_get_version_tag(version: str, provider_id: str, suffix: str, tag: str):
 
 
 @pytest.mark.parametrize(
-    "folder_paths, from_commit, to_commit, git_command",
+    ("folder_paths", "from_commit", "to_commit", "git_command"),
     [
         (None, None, None, ["git", "log", "--pretty=format:%H %h %cd %s", "--date=short", "--", "."]),
         (
@@ -145,7 +147,7 @@ def test_get_git_log_command_wrong():
 
 
 @pytest.mark.parametrize(
-    "line, version, change",
+    ("line", "version", "change"),
     [
         (
             "LONG_HASH_123144 SHORT_HASH 2023-01-01 Description `with` no pr",
@@ -180,7 +182,7 @@ def test_get_change_from_line(line: str, version: str, change: Change):
 
 
 @pytest.mark.parametrize(
-    "input, output, markdown, changes_len",
+    ("input", "output", "markdown", "changes_len"),
     [
         (
             """
@@ -197,7 +199,7 @@ LONG_HASH_123144 SHORT_HASH 2023-01-01 Description `with` pr (#12346)
 Latest change: 2023-01-01
 
 =============================================  ===========  ==================================
-Commit                                         Committed    Subject
+Commit                                          Committed   Subject
 =============================================  ===========  ==================================
 `SHORT_HASH <https://url/LONG_HASH_123144>`__  2023-01-01   ``Description 'with' no pr``
 `SHORT_HASH <https://url/LONG_HASH_123144>`__  2023-01-01   ``Description 'with' pr (#12345)``
@@ -215,8 +217,8 @@ LONG_HASH_123144 SHORT_HASH 2023-01-01 Description `with` pr (#12346)
 
 """,
             """
-| Commit                                     | Committed   | Subject                          |
-|:-------------------------------------------|:------------|:---------------------------------|
+| Commit                                     |  Committed  | Subject                          |
+|:-------------------------------------------|:-----------:|:---------------------------------|
 | [SHORT_HASH](https://url/LONG_HASH_123144) | 2023-01-01  | `Description 'with' no pr`       |
 | [SHORT_HASH](https://url/LONG_HASH_123144) | 2023-01-01  | `Description 'with' pr (#12345)` |
 | [SHORT_HASH](https://url/LONG_HASH_123144) | 2023-01-01  | `Description 'with' pr (#12346)` |
@@ -251,8 +253,17 @@ def generate_short_hash():
 
 
 @pytest.mark.parametrize(
-    "descriptions, with_breaking_changes, maybe_with_new_features,"
-    "breaking_count, feature_count, bugfix_count, other_count, misc_count, type_of_change",
+    (
+        "descriptions",
+        "with_breaking_changes",
+        "maybe_with_new_features",
+        "breaking_count",
+        "feature_count",
+        "bugfix_count",
+        "other_count",
+        "misc_count",
+        "type_of_change",
+    ),
     [
         (["Added feature x"], True, True, 0, 1, 0, 0, 0, [TypeOfChange.FEATURE]),
         (["Added feature x"], False, True, 0, 1, 0, 0, 0, [TypeOfChange.FEATURE]),
@@ -307,7 +318,7 @@ def test_classify_changes_automatically(
 
 
 @pytest.mark.parametrize(
-    "initial_version, bump_index, expected_version",
+    ("initial_version", "bump_index", "expected_version"),
     [
         ("4.2.1", VERSION_MAJOR_INDEX, "5.0.0"),
         ("3.5.9", VERSION_MINOR_INDEX, "3.6.0"),
@@ -322,7 +333,7 @@ def test_version_bump_for_provider_documentation(initial_version, bump_index, ex
 
 
 @pytest.mark.parametrize(
-    "changes, expected",
+    ("changes", "expected"),
     [
         pytest.param([TypeOfChange.SKIP], TypeOfChange.SKIP, id="only-skip"),
         pytest.param([TypeOfChange.DOCUMENTATION], TypeOfChange.DOCUMENTATION, id="only-doc"),
@@ -395,7 +406,7 @@ def test_get_most_impactful_change(changes, expected):
 
 
 @pytest.mark.parametrize(
-    "provider_id, changed_files, expected",
+    ("provider_id", "changed_files", "expected"),
     [
         pytest.param("slack", ["providers/slack/docs/slack.rst"], "documentation", id="only_docs"),
         pytest.param(
@@ -476,8 +487,79 @@ def test_get_most_impactful_change(changes, expected):
         ),
         pytest.param("slack", ["airflow/utils/db.py"], "other", id="non_provider_file"),
         pytest.param("slack", [], "other", id="empty_commit"),
+        pytest.param(
+            "informatica",
+            ["providers/informatica/dev/informatica_simulator/requirements.txt"],
+            "test_or_example_only",
+            id="only_dev_tooling",
+        ),
+        pytest.param(
+            "slack",
+            [
+                "providers/slack/tests/test_slack.py",
+                "providers/slack/dev/some_tool.py",
+            ],
+            "test_or_example_only",
+            id="tests_and_dev_tooling",
+        ),
+        pytest.param(
+            "slack",
+            [
+                "providers/slack/src/airflow/providers/slack/hooks/slack.py",
+                "providers/slack/dev/some_tool.py",
+            ],
+            "other",
+            id="dev_tooling_and_real_code",
+        ),
     ],
 )
 def test_classify_provider_pr_files_logic(provider_id, changed_files, expected):
     result = classification_result(provider_id, changed_files)
     assert result == expected
+
+
+def _make_change(subject: str) -> Change:
+    return Change(
+        full_hash="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        short_hash="deadbee",
+        date="2026-06-08",
+        version="1.0.0",
+        message=subject,
+        message_without_backticks=subject.replace("`", "'"),
+        pr="123",
+    )
+
+
+@pytest.mark.parametrize(
+    ("files_class", "subject", "expected"),
+    [
+        # changed-files verdict wins, regardless of the subject
+        pytest.param("documentation", "Fix typo in docs", "documentation", id="doc_only"),
+        pytest.param("documentation", "Bump aiohttp", "documentation", id="doc_only_beats_bump"),
+        pytest.param("test_or_example_only", "Add a flaky test", "skip", id="test_only"),
+        # subject-based deterministic rule: release-preparation commits
+        pytest.param(
+            "other", "Prepare providers release 2026-07-22 (#70256)", "skip", id="release_prep_skip"
+        ),
+        pytest.param(
+            "other", "prepare providers release 2026-01-01", "skip", id="release_prep_lowercase_skip"
+        ),
+        # subject-based deterministic rule: dependency bumps
+        pytest.param("other", "Bump aiohttp regarding dependabot warning", "misc", id="bump_misc"),
+        pytest.param("other", "bump the deps group across 1 directory", "misc", id="lowercase_bump_misc"),
+        # everything else is intentionally left to the LLM (conservative)
+        pytest.param("other", "Fix the ftp tls", NEEDS_LLM_CLASSIFICATION, id="fix_needs_llm"),
+        pytest.param("other", "Add DmsModifyTaskOperator", NEEDS_LLM_CLASSIFICATION, id="add_needs_llm"),
+        pytest.param("other", "Rename resumablemixin file", NEEDS_LLM_CLASSIFICATION, id="rename_needs_llm"),
+    ],
+)
+def test_classify_change_deterministically(files_class, subject, expected):
+    from unittest import mock
+
+    with mock.patch(
+        "airflow_breeze.prepare_providers.provider_documentation.classify_provider_pr_files",
+        return_value=files_class,
+    ):
+        classification, reason = classify_change_deterministically("amazon", _make_change(subject))
+    assert classification == expected
+    assert reason, "a non-empty reason must always be returned"

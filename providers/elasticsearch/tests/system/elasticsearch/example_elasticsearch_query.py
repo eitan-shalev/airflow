@@ -24,16 +24,9 @@ import os
 from datetime import datetime
 
 from airflow import models
+from airflow.providers.common.compat.sdk import task
 from airflow.providers.elasticsearch.hooks.elasticsearch import ElasticsearchPythonHook, ElasticsearchSQLHook
 from airflow.providers.standard.operators.python import PythonOperator
-
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.sdk import task
-else:
-    # Airflow 2 path
-    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
 DAG_ID = "elasticsearch_dag"
@@ -89,5 +82,5 @@ with models.DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

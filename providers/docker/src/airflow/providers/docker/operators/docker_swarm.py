@@ -18,8 +18,10 @@
 
 from __future__ import annotations
 
+import random
 import re
 import shlex
+import string
 from datetime import datetime
 from time import sleep
 from typing import TYPE_CHECKING, Literal
@@ -27,16 +29,17 @@ from typing import TYPE_CHECKING, Literal
 from docker import types
 from docker.errors import APIError
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.docker.operators.docker import DockerOperator
-from airflow.utils.strings import get_random_string
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
+
+
+def _generate_service_name(prefix: str) -> str:
+    """Generate a unique Docker Swarm service name."""
+    suffix = "".join(random.choices(string.ascii_letters + string.digits, k=8))
+    return f"{prefix}-{suffix}"
 
 
 class DockerSwarmOperator(DockerOperator):
@@ -171,6 +174,7 @@ class DockerSwarmOperator(DockerOperator):
             self.log_driver_config = None
 
     def execute(self, context: Context) -> None:
+        self._normalize_mounts()
         self.environment["AIRFLOW_TMP_DIR"] = self.tmp_dir
         return self._run_service()
 
@@ -195,7 +199,7 @@ class DockerSwarmOperator(DockerOperator):
                 placement=self.placement,
                 log_driver=self.log_driver_config,
             ),
-            name=f"{self.service_prefix}-{get_random_string()}",
+            name=_generate_service_name(self.service_prefix),
             labels={"name": f"airflow__{self.dag_id}__{self.task_id}"},
             mode=self.mode,
         )
@@ -218,9 +222,8 @@ class DockerSwarmOperator(DockerOperator):
         if self.service and self._service_status() == "complete":
             self.tasks = self.cli.tasks(filters={"service": self.service["ID"]})
             for task in self.tasks:
-                container_id = task["Status"]["ContainerStatus"]["ContainerID"]
-                container = self.cli.inspect_container(container_id)
-                self.containers.append(container)
+                docker_service = self.cli.inspect_service(task["ServiceID"])
+                self.containers.append(docker_service)
 
         if self.retrieve_output:
             return self._attempt_to_retrieve_results()

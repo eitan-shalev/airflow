@@ -17,13 +17,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 from unittest import mock
 
 import pendulum
 import pytest
+from botocore.exceptions import WaiterError
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.models import DAG, DagRun, TaskInstance
 from airflow.models.variable import Variable
 from airflow.providers.amazon.aws.hooks.dms import DmsHook
@@ -35,6 +36,8 @@ from airflow.providers.amazon.aws.operators.dms import (
     DmsDescribeReplicationConfigsOperator,
     DmsDescribeReplicationsOperator,
     DmsDescribeTasksOperator,
+    DmsModifyTaskOperator,
+    DmsReloadTablesOperator,
     DmsStartReplicationOperator,
     DmsStartTaskOperator,
     DmsStopReplicationOperator,
@@ -43,18 +46,22 @@ from airflow.providers.amazon.aws.operators.dms import (
 from airflow.providers.amazon.aws.triggers.dms import (
     DmsReplicationDeprovisionedTrigger,
     DmsReplicationTerminalStatusTrigger,
+    DmsTableReloadCompleteTrigger,
+    DmsTaskModifyCompleteTrigger,
 )
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunType
 
+from tests_common.test_utils.compat import timezone
 from tests_common.test_utils.dag import sync_dag_to_db
+from tests_common.test_utils.taskinstance import (
+    create_task_instance,
+    get_template_context,
+    render_template_fields,
+)
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
-
-try:
-    from airflow.sdk import timezone
-except ImportError:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
 
 if AIRFLOW_V_3_0_PLUS:
     from airflow.models.dag_version import DagVersion
@@ -177,6 +184,279 @@ class TestDmsCreateTaskOperator:
             botocore_config={"read_timeout": 42},
         )
         assert op.hook.aws_conn_id == DEFAULT_CONN
+
+
+class TestDmsModifyTaskOperator:
+    TASK_ARN = "arn:aws:dms:us-east-1:123456789012:task:EXAMPLE"
+    TABLE_MAPPINGS = {
+        "rules": [
+            {
+                "rule-type": "selection",
+                "rule-id": "1",
+                "rule-name": "1",
+                "object-locator": {"schema-name": "myschema", "table-name": "mytable"},
+                "rule-action": "include",
+            }
+        ]
+    }
+
+    def _stopped_task(self):
+        return [{"ReplicationTaskArn": self.TASK_ARN, "Status": "stopped"}]
+
+    def _running_task(self):
+        return [{"ReplicationTaskArn": self.TASK_ARN, "Status": "running"}]
+
+    def _modifying_task(self):
+        return [{"ReplicationTaskArn": self.TASK_ARN, "Status": "modifying"}]
+
+    def test_init_raises_if_both_cdc_start_params_provided(self):
+        with pytest.raises(ValueError, match="Only one of"):
+            DmsModifyTaskOperator(
+                task_id="modify_task",
+                replication_task_arn=self.TASK_ARN,
+                cdc_start_time=datetime(2024, 1, 1),
+                cdc_start_position="mysql-bin.000001:4",
+            )
+
+    @pytest.mark.parametrize("status", ["stopped", "ready", "failed"])
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_modifiable_states(self, mock_conn, mock_find, status):
+        mock_find.return_value = [{"ReplicationTaskArn": self.TASK_ARN, "Status": status}]
+        expected = {"ReplicationTaskArn": self.TASK_ARN}
+        with mock.patch.object(DmsHook, "modify_replication_task", return_value=expected) as mock_modify:
+            op = DmsModifyTaskOperator(
+                task_id="modify_task",
+                replication_task_arn=self.TASK_ARN,
+                table_mappings=self.TABLE_MAPPINGS,
+                wait_for_completion=False,
+            )
+            result = op.execute(None)
+
+            mock_modify.assert_called_once_with(
+                replication_task_arn=self.TASK_ARN,
+                table_mappings=self.TABLE_MAPPINGS,
+                migration_type=None,
+                replication_task_settings=None,
+                cdc_start_time=None,
+                cdc_start_position=None,
+                cdc_stop_position=None,
+            )
+            assert result == expected
+
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_raises_if_running(self, mock_conn, mock_find):
+        mock_find.return_value = self._running_task()
+        op = DmsModifyTaskOperator(
+            task_id="modify_task",
+            replication_task_arn=self.TASK_ARN,
+        )
+        with pytest.raises(RuntimeError, match="must be in a modifiable state"):
+            op.execute(None)
+
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_raises_if_not_found(self, mock_conn, mock_find):
+        mock_find.return_value = []
+        op = DmsModifyTaskOperator(task_id="modify_task", replication_task_arn=self.TASK_ARN)
+        with pytest.raises(ValueError, match="not found"):
+            op.execute(None)
+
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_defers_for_completion(self, mock_conn, mock_find):
+        mock_find.return_value = self._stopped_task()
+        expected = {"ReplicationTaskArn": self.TASK_ARN}
+        with mock.patch.object(DmsHook, "modify_replication_task", return_value=expected):
+            op = DmsModifyTaskOperator(
+                task_id="modify_task",
+                replication_task_arn=self.TASK_ARN,
+                deferrable=True,
+                wait_for_completion=True,
+            )
+            with pytest.raises(TaskDeferred) as exc_info:
+                op.execute(None)
+
+        assert isinstance(exc_info.value.trigger, DmsTaskModifyCompleteTrigger)
+        assert exc_info.value.method_name == "execute_complete"
+        assert exc_info.value.kwargs == {"result": expected}
+
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_with_all_params(self, mock_conn, mock_find):
+
+        mock_find.return_value = self._stopped_task()
+        cdc_start = datetime(2024, 1, 1)
+        expected = {"ReplicationTaskArn": self.TASK_ARN}
+        with mock.patch.object(DmsHook, "modify_replication_task", return_value=expected) as mock_modify:
+            op = DmsModifyTaskOperator(
+                task_id="modify_task",
+                replication_task_arn=self.TASK_ARN,
+                table_mappings=self.TABLE_MAPPINGS,
+                migration_type="full-load-and-cdc",
+                replication_task_settings={"TargetMetadata": {}},
+                cdc_start_time=cdc_start,
+                cdc_stop_position="2024-01-31:00:00:00",
+                wait_for_completion=False,
+            )
+            op.execute(None)
+
+            mock_modify.assert_called_once_with(
+                replication_task_arn=self.TASK_ARN,
+                table_mappings=self.TABLE_MAPPINGS,
+                migration_type="full-load-and-cdc",
+                replication_task_settings={"TargetMetadata": {}},
+                cdc_start_time=cdc_start,
+                cdc_start_position=None,
+                cdc_stop_position="2024-01-31:00:00:00",
+            )
+
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_waiter")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_waits_if_modifying(self, mock_conn, mock_get_waiter, mock_find):
+        stopped_task = self._stopped_task()
+        expected = {"ReplicationTaskArn": self.TASK_ARN}
+        mock_find.side_effect = [
+            self._modifying_task(),
+            stopped_task,
+        ]
+        with mock.patch.object(DmsHook, "modify_replication_task", return_value=expected) as mock_modify:
+            op = DmsModifyTaskOperator(
+                task_id="modify_task",
+                replication_task_arn=self.TASK_ARN,
+                table_mappings=self.TABLE_MAPPINGS,
+                wait_for_completion=True,
+                waiter_delay=0,
+            )
+            op.execute(None)
+
+            mock_modify.assert_called_once()
+            assert mock_get_waiter.call_args_list == [
+                mock.call("replication_task_modified"),
+                mock.call("replication_task_modified"),
+            ]
+
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_waiter")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_raises_if_modifying_then_running(self, mock_conn, mock_get_waiter, mock_find):
+        mock_find.side_effect = [
+            self._modifying_task(),
+            self._running_task(),
+        ]
+        with mock.patch.object(DmsHook, "modify_replication_task") as mock_modify:
+            op = DmsModifyTaskOperator(
+                task_id="modify_task",
+                replication_task_arn=self.TASK_ARN,
+                waiter_delay=0,
+            )
+            with pytest.raises(RuntimeError, match="must be in a modifiable state"):
+                op.execute(None)
+        mock_modify.assert_not_called()
+        mock_get_waiter.assert_called_once_with("replication_task_modified")
+
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_waiter")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_raises_if_task_disappears_during_pre_wait(
+        self, mock_conn, mock_get_waiter, mock_find
+    ):
+        mock_find.side_effect = [
+            self._modifying_task(),
+            [],
+        ]
+        mock_get_waiter.return_value.wait.return_value = None
+        with mock.patch.object(DmsHook, "modify_replication_task") as mock_modify:
+            op = DmsModifyTaskOperator(
+                task_id="modify_task",
+                replication_task_arn=self.TASK_ARN,
+                waiter_delay=0,
+            )
+            with pytest.raises(ValueError, match="not found"):
+                op.execute(None)
+        mock_modify.assert_not_called()
+        mock_get_waiter.assert_called_once_with("replication_task_modified")
+
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_waiter")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_raises_if_waiter_exceeded(self, mock_conn, mock_get_waiter, mock_find):
+        stopped_task = self._stopped_task()
+        expected = {"ReplicationTaskArn": self.TASK_ARN}
+        mock_find.return_value = stopped_task
+        mock_get_waiter.return_value.wait.side_effect = WaiterError(
+            name="replication_task_modified", reason="Max attempts exceeded", last_response={}
+        )
+        with mock.patch.object(DmsHook, "modify_replication_task", return_value=expected):
+            op = DmsModifyTaskOperator(
+                task_id="modify_task",
+                replication_task_arn=self.TASK_ARN,
+                wait_for_completion=True,
+                waiter_delay=0,
+                waiter_max_attempts=2,
+            )
+            with pytest.raises(WaiterError, match="Max attempts exceeded"):
+                op.execute(None)
+
+    @mock.patch.object(DmsHook, "find_replication_tasks_by_arn")
+    @mock.patch.object(DmsHook, "get_waiter")
+    @mock.patch.object(DmsHook, "get_conn")
+    def test_modify_task_wait_for_completion_uses_waiter(self, mock_conn, mock_get_waiter, mock_find):
+        expected = {"ReplicationTaskArn": self.TASK_ARN}
+        mock_find.return_value = self._stopped_task()
+        with mock.patch.object(DmsHook, "modify_replication_task", return_value=expected):
+            op = DmsModifyTaskOperator(
+                task_id="modify_task",
+                replication_task_arn=self.TASK_ARN,
+                wait_for_completion=True,
+                waiter_delay=0,
+            )
+            result = op.execute(None)
+
+        assert result == expected
+        mock_get_waiter.return_value.wait.assert_called_once_with(
+            Filters=[{"Name": "replication-task-arn", "Values": [self.TASK_ARN]}],
+            WithoutSettings=True,
+            WaiterConfig={"Delay": 0, "MaxAttempts": 60},
+        )
+
+    def test_execute_complete_success(self):
+        op = DmsModifyTaskOperator(
+            task_id="modify_task",
+            replication_task_arn=self.TASK_ARN,
+        )
+        task_details = {"ReplicationTaskArn": self.TASK_ARN, "Status": "stopped"}
+        success_event = {"status": "success", "replication_task_arn": self.TASK_ARN}
+        result = op.execute_complete({}, success_event, result=task_details)
+        assert result == task_details
+
+    def test_execute_complete_success_no_result(self):
+        op = DmsModifyTaskOperator(
+            task_id="modify_task",
+            replication_task_arn=self.TASK_ARN,
+        )
+        success_event = {"status": "success", "replication_task_arn": self.TASK_ARN}
+        result = op.execute_complete({}, success_event)
+        assert result == {}
+
+    def test_execute_complete_error(self):
+        op = DmsModifyTaskOperator(
+            task_id="modify_task",
+            replication_task_arn=self.TASK_ARN,
+        )
+        error_event = {"status": "error", "message": "Timeout", "replication_task_arn": self.TASK_ARN}
+        with pytest.raises(RuntimeError, match="Error waiting for DMS task modification to complete"):
+            op.execute_complete({}, error_event)
+
+    def test_template_fields(self):
+        op = DmsModifyTaskOperator(
+            task_id="modify_task",
+            replication_task_arn=self.TASK_ARN,
+            table_mappings=self.TABLE_MAPPINGS,
+        )
+        validate_template_fields(op)
 
 
 class TestDmsDeleteTaskOperator:
@@ -332,7 +612,7 @@ class TestDmsDescribeTasksOperator:
         if AIRFLOW_V_3_0_PLUS:
             sync_dag_to_db(self.dag)
             dag_version = DagVersion.get_latest_version(self.dag.dag_id)
-            ti = TaskInstance(task=describe_task, dag_version_id=dag_version.id)
+            ti = create_task_instance(task=describe_task, run_id="test", dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=self.dag.dag_id,
                 logical_date=timezone.utcnow(),
@@ -352,7 +632,7 @@ class TestDmsDescribeTasksOperator:
         ti.dag_run = dag_run
         session.add(ti)
         session.commit()
-        marker, response = describe_task.execute(ti.get_template_context())
+        marker, response = describe_task.execute(get_template_context(ti, describe_task))
 
         assert marker is None
         assert response == self.MOCK_RESPONSE
@@ -435,6 +715,223 @@ class TestDmsStartTaskOperator:
             region_name="us-west-1",
             verify=False,
             botocore_config={"read_timeout": 42},
+        )
+
+        validate_template_fields(op)
+
+
+class TestDmsReloadTablesOperator:
+    TABLES_TO_RELOAD = [{"SchemaName": "public", "TableName": "test_table"}]
+
+    def test_init(self):
+        op = DmsReloadTablesOperator(
+            task_id="reload_tables",
+            replication_task_arn=TASK_ARN,
+            tables_to_reload=self.TABLES_TO_RELOAD,
+            aws_conn_id="fake-conn-id",
+            region_name="us-west-1",
+            verify=False,
+            botocore_config={"read_timeout": 42},
+        )
+
+        assert op.replication_task_arn == TASK_ARN
+        assert op.tables_to_reload == self.TABLES_TO_RELOAD
+        assert op.reload_option == "data-reload"
+        assert op.wait_for_completion is True
+        assert op.deferrable is False
+        assert op.waiter_delay == 30
+        assert op.waiter_max_attempts == 60
+        assert op.hook.client_type == "dms"
+        assert op.hook.resource_type is None
+        assert op.hook.aws_conn_id == "fake-conn-id"
+        assert op.hook._region_name == "us-west-1"
+        assert op.hook._verify is False
+        assert op.hook._config is not None
+        assert op.hook._config.read_timeout == 42
+
+    @pytest.mark.parametrize("reload_option", ["data-reload", "validate-only"])
+    @mock.patch.object(DmsHook, "conn", new_callable=mock.PropertyMock)
+    def test_execute(self, mock_conn, reload_option):
+        mock_client = mock.MagicMock(spec=["reload_tables"])
+        mock_client.reload_tables.return_value = {"ReplicationTaskArn": TASK_ARN}
+        mock_conn.return_value = mock_client
+        op = DmsReloadTablesOperator(
+            task_id="reload_tables",
+            replication_task_arn=TASK_ARN,
+            tables_to_reload=self.TABLES_TO_RELOAD,
+            reload_option=reload_option,
+            wait_for_completion=False,
+        )
+
+        result = op.execute(None)
+
+        mock_client.reload_tables.assert_called_once_with(
+            ReplicationTaskArn=TASK_ARN,
+            TablesToReload=self.TABLES_TO_RELOAD,
+            ReloadOption=reload_option,
+        )
+        assert result == TASK_ARN
+
+    @pytest.mark.parametrize("reload_option", ["data-reload", "validate-only"])
+    @mock.patch.object(DmsHook, "conn", new_callable=mock.PropertyMock)
+    def test_execute_defers_for_completion(self, mock_conn, reload_option):
+        mock_client = mock.MagicMock(spec=["reload_tables"])
+        mock_client.reload_tables.return_value = {"ReplicationTaskArn": TASK_ARN}
+        mock_conn.return_value = mock_client
+        op = DmsReloadTablesOperator(
+            task_id="reload_tables",
+            replication_task_arn=TASK_ARN,
+            tables_to_reload=self.TABLES_TO_RELOAD,
+            reload_option=reload_option,
+            wait_for_completion=True,
+            deferrable=True,
+            waiter_delay=5,
+            waiter_max_attempts=10,
+            aws_conn_id="test_conn",
+            region_name="us-east-2",
+            verify=False,
+            botocore_config={"read_timeout": 42},
+        )
+
+        with pytest.raises(TaskDeferred) as exc_info:
+            op.execute(None)
+
+        trigger = exc_info.value.trigger
+        assert isinstance(trigger, DmsTableReloadCompleteTrigger)
+        assert trigger.replication_task_arn == TASK_ARN
+        assert trigger.tables_to_reload == self.TABLES_TO_RELOAD
+        assert trigger.reload_option == reload_option
+        assert trigger.waiter_delay == 5
+        assert trigger.waiter_max_attempts == 10
+        assert trigger.aws_conn_id == "test_conn"
+        assert trigger.region_name == "us-east-2"
+        assert trigger.verify is False
+        assert trigger.botocore_config == {"read_timeout": 42}
+        assert exc_info.value.method_name == "execute_complete"
+        mock_client.reload_tables.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("reload_option", "waiter_name"),
+        [
+            pytest.param("data-reload", "table_reload_complete", id="data-reload"),
+            pytest.param("validate-only", "table_validation_complete", id="validate-only"),
+        ],
+    )
+    @mock.patch.object(DmsHook, "get_waiter", autospec=True)
+    @mock.patch.object(DmsHook, "conn", new_callable=mock.PropertyMock)
+    def test_execute_waits_for_completion(
+        self,
+        mock_conn,
+        mock_get_waiter,
+        reload_option,
+        waiter_name,
+    ):
+        mock_client = mock.MagicMock(spec=["reload_tables"])
+        mock_client.reload_tables.return_value = {"ReplicationTaskArn": TASK_ARN}
+        mock_conn.return_value = mock_client
+        tables_to_reload = [
+            {"SchemaName": "public", "TableName": "first_table"},
+            {"SchemaName": "archive", "TableName": "second_table"},
+        ]
+        mock_waiter = mock.MagicMock(spec=["wait"])
+        mock_get_waiter.return_value = mock_waiter
+        op = DmsReloadTablesOperator(
+            task_id="reload_tables",
+            replication_task_arn=TASK_ARN,
+            tables_to_reload=tables_to_reload,
+            reload_option=reload_option,
+            waiter_delay=5,
+            waiter_max_attempts=10,
+        )
+
+        result = op.execute(None)
+
+        assert result == TASK_ARN
+        mock_client.reload_tables.assert_called_once()
+        assert mock_get_waiter.call_args_list == [
+            mock.call(op.hook, waiter_name),
+            mock.call(op.hook, waiter_name),
+        ]
+        assert mock_waiter.wait.call_args_list == [
+            mock.call(
+                ReplicationTaskArn=TASK_ARN,
+                Filters=[
+                    {"Name": "schema-name", "Values": ["public"]},
+                    {"Name": "table-name", "Values": ["first_table"]},
+                ],
+                WaiterConfig={"Delay": 5, "MaxAttempts": 10},
+            ),
+            mock.call(
+                ReplicationTaskArn=TASK_ARN,
+                Filters=[
+                    {"Name": "schema-name", "Values": ["archive"]},
+                    {"Name": "table-name", "Values": ["second_table"]},
+                ],
+                WaiterConfig={"Delay": 5, "MaxAttempts": 10},
+            ),
+        ]
+
+    @mock.patch.object(DmsHook, "get_waiter", autospec=True)
+    @mock.patch.object(DmsHook, "conn", new_callable=mock.PropertyMock)
+    def test_execute_propagates_waiter_error(
+        self,
+        mock_conn,
+        mock_get_waiter,
+    ):
+        mock_client = mock.MagicMock(spec=["reload_tables"])
+        mock_client.reload_tables.return_value = {"ReplicationTaskArn": TASK_ARN}
+        mock_conn.return_value = mock_client
+        mock_get_waiter.return_value.wait.side_effect = WaiterError(
+            name="table_reload_complete",
+            reason="Max attempts exceeded",
+            last_response={},
+        )
+        op = DmsReloadTablesOperator(
+            task_id="reload_tables",
+            replication_task_arn=TASK_ARN,
+            tables_to_reload=self.TABLES_TO_RELOAD,
+            wait_for_completion=True,
+            waiter_max_attempts=1,
+        )
+
+        with pytest.raises(WaiterError, match="Max attempts exceeded"):
+            op.execute(None)
+
+        mock_client.reload_tables.assert_called_once()
+
+    def test_execute_complete(self):
+        op = DmsReloadTablesOperator(
+            task_id="reload_tables",
+            replication_task_arn=TASK_ARN,
+            tables_to_reload=self.TABLES_TO_RELOAD,
+        )
+
+        assert (
+            op.execute_complete(
+                None,
+                event={"status": "success", "replication_task_arn": TASK_ARN},
+            )
+            == TASK_ARN
+        )
+
+    def test_execute_complete_raises_for_error(self):
+        op = DmsReloadTablesOperator(
+            task_id="reload_tables",
+            replication_task_arn=TASK_ARN,
+            tables_to_reload=self.TABLES_TO_RELOAD,
+        )
+
+        with pytest.raises(RuntimeError, match="Error waiting for DMS table reloads"):
+            op.execute_complete(
+                None,
+                event={"status": "error", "message": "reload failed"},
+            )
+
+    def test_template_fields(self):
+        op = DmsReloadTablesOperator(
+            task_id="reload_tables",
+            replication_task_arn=TASK_ARN,
+            tables_to_reload=self.TABLES_TO_RELOAD,
         )
 
         validate_template_fields(op)
@@ -534,23 +1031,14 @@ class TestDmsDescribeReplicationConfigsOperator:
         if AIRFLOW_V_3_0_PLUS:
             sync_dag_to_db(dag)
             dag_version = DagVersion.get_latest_version(dag.dag_id)
-            ti = TaskInstance(task=op, dag_version_id=dag_version.id)
+            ti = create_task_instance(task=op, run_id="test", dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=dag.dag_id,
                 run_id="test",
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
                 logical_date=logical_date,
-            )
-            sync_dag_to_db(dag)
-            dag_version = DagVersion.get_latest_version(dag.dag_id)
-            ti = TaskInstance(task=op, dag_version_id=dag_version.id)
-            dag_run = DagRun(
-                dag_id=dag.dag_id,
-                run_id="test",
-                run_type=DagRunType.MANUAL,
-                state=DagRunState.RUNNING,
-                logical_date=logical_date,
+                run_after=timezone.utcnow(),
             )
         else:
             dag_run = DagRun(
@@ -562,11 +1050,7 @@ class TestDmsDescribeReplicationConfigsOperator:
             )
             ti = TaskInstance(task=op)
         ti.dag_run = dag_run
-        session.add(ti)
-        session.commit()
-        context = ti.get_template_context(session)
-        ti.render_templates(context)
-
+        render_template_fields(ti, op)
         assert op.filter == self.filter
 
 
@@ -874,6 +1358,24 @@ class TestDmsDeleteReplicationConfigOperator:
 
         assert isinstance(defer.value.trigger, DmsReplicationTerminalStatusTrigger)
 
+    def test_execute_complete_error(self):
+        op = DmsDeleteReplicationConfigOperator(
+            task_id="delete_replication_config",
+            replication_config_arn="arn:test",
+        )
+        error_event = {"status": "error", "message": "Timeout", "replication_config_arn": "arn:test"}
+        with pytest.raises(AirflowException, match="Error deleting DMS replication config"):
+            op.execute_complete({}, error_event)
+
+    def test_retry_execution_error(self):
+        op = DmsDeleteReplicationConfigOperator(
+            task_id="delete_replication_config",
+            replication_config_arn="arn:test",
+        )
+        error_event = {"status": "error", "message": "Timeout", "replication_config_arn": "arn:test"}
+        with pytest.raises(AirflowException, match="Error waiting for DMS replication config"):
+            op.retry_execution({}, error_event)
+
 
 class TestDmsDescribeReplicationsOperator:
     FILTER = [{"Name": "replication-type", "Values": ["cdc"]}]
@@ -941,8 +1443,8 @@ class TestDmsStartReplicationOperator:
             }
         }
 
-    def test_arg_validation(self):
-        with pytest.raises(AirflowException):
+    def test_init_raises_if_both_cdc_start_params_provided(self):
+        with pytest.raises(ValueError, match="Only one of"):
             DmsStartReplicationOperator(
                 task_id="start_replication",
                 replication_config_arn="XXXXXXXXXXXXXXX",
@@ -950,19 +1452,6 @@ class TestDmsStartReplicationOperator:
                 cdc_start_pos=1,
                 cdc_start_time="2024-01-01 00:00:00",
             )
-        DmsStartReplicationOperator(
-            task_id="start_replication",
-            replication_config_arn="XXXXXXXXXXXXXXX",
-            replication_start_type="cdc",
-            cdc_start_pos=1,
-        )
-
-        DmsStartReplicationOperator(
-            task_id="start_replication",
-            replication_config_arn="XXXXXXXXXXXXXXX",
-            replication_start_type="cdc",
-            cdc_start_time="2024-01-01 00:00:00",
-        )
 
     @mock.patch.object(DmsHook, "describe_replications")
     @mock.patch.object(DmsHook, "start_replication")
@@ -1019,6 +1508,30 @@ class TestDmsStartReplicationOperator:
         )
         op.execute({})
         assert mock_conn.start_replication.call_count == 1
+
+    def test_execute_complete_error(self):
+        op = DmsStartReplicationOperator(
+            task_id="start_replication",
+            replication_config_arn="arn:test",
+            replication_start_type="reload",
+        )
+        error_event = {
+            "status": "error",
+            "message": "Replication failed",
+            "replication_config_arn": "arn:test",
+        }
+        with pytest.raises(AirflowException, match="Error in DMS replication"):
+            op.execute_complete({}, error_event)
+
+    def test_retry_execution_error(self):
+        op = DmsStartReplicationOperator(
+            task_id="start_replication",
+            replication_config_arn="arn:test",
+            replication_start_type="reload",
+        )
+        error_event = {"status": "error", "message": "Timeout", "replication_config_arn": "arn:test"}
+        with pytest.raises(AirflowException, match="Error waiting for DMS replication"):
+            op.retry_execution({}, error_event)
 
 
 class TestDmsStopReplicationOperator:
@@ -1078,3 +1591,12 @@ class TestDmsStopReplicationOperator:
         op.execute({})
         mock_get_waiter.assert_called_with("replication_stopped")
         mock_get_waiter.assert_called_once()
+
+    def test_execute_complete_error(self):
+        op = DmsStopReplicationOperator(
+            task_id="stop_replication",
+            replication_config_arn="arn:test",
+        )
+        error_event = {"status": "error", "message": "Timeout", "replication_config_arn": "arn:test"}
+        with pytest.raises(AirflowException, match="Error stopping DMS replication"):
+            op.execute_complete({}, error_event)

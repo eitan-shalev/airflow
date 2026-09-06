@@ -42,13 +42,13 @@
     :caption: Internal DB details
 
     Database Migrations <migrations-ref>
+    Database ERD Schema <database-erd-ref>
 
 .. toctree::
     :hidden:
     :caption: References
 
-    Fab auth manager API <api-ref/fab-public-api-ref>
-    Fab auth manager token API <api-ref/fab-token-api-ref>
+    Fab auth manager API <api-ref/fab-api-ref>
 
 .. toctree::
     :hidden:
@@ -84,7 +84,7 @@ apache-airflow-providers-fab package
 `Flask App Builder <https://flask-appbuilder.readthedocs.io/>`__
 
 
-Release: 2.4.4
+Release: 3.8.1
 
 Provider package
 ----------------
@@ -104,42 +104,48 @@ Requirements
 
 The minimum Apache Airflow version supported by this provider distribution is ``3.0.2``.
 
-==========================================  ==========================================
+==========================================  =====================================
 PIP package                                 Version required
-==========================================  ==========================================
+==========================================  =====================================
 ``apache-airflow``                          ``>=3.0.2``
-``apache-airflow-providers-common-compat``  ``>=1.2.1``
-``blinker``                                 ``>=1.6.2; python_version < "3.13"``
-``flask``                                   ``>=2.2.1,<2.3; python_version < "3.13"``
-``flask-appbuilder``                        ``==4.6.3; python_version < "3.13"``
-``flask-login``                             ``>=0.6.2; python_version < "3.13"``
-``flask-session``                           ``>=0.4.0,<0.6; python_version < "3.13"``
-``flask-wtf``                               ``>=1.1.0; python_version < "3.13"``
-``connexion[flask]``                        ``>=2.14.2,<3.0; python_version < "3.13"``
-``jmespath``                                ``>=0.7.0; python_version < "3.13"``
-``werkzeug``                                ``>=2.2,<4; python_version < "3.13"``
-``wtforms``                                 ``>=3.0,<4; python_version < "3.13"``
-``flask_limiter``                           ``>3,!=3.13,<4``
-==========================================  ==========================================
+``apache-airflow-providers-common-compat``  ``>=1.18.0``
+``blinker``                                 ``>=1.6.2``
+``flask``                                   ``>=2.2.1``
+``flask-appbuilder``                        ``==5.2.2``
+``pyjwt``                                   ``>=2.11.0``
+``flask-login``                             ``>=0.6.2; python_version < "3.14"``
+``flask-login``                             ``>=0.6.3; python_version >= "3.14"``
+``flask-session``                           ``>=0.8.0``
+``msgpack``                                 ``>=1.0.0``
+``flask-sqlalchemy``                        ``>=3.0.5``
+``flask-wtf``                               ``>=1.1.0; python_version < "3.14"``
+``flask-wtf``                               ``>=1.2.2; python_version >= "3.14"``
+``jmespath``                                ``>=0.7.0``
+``werkzeug``                                ``>=2.2; python_version <= "3.13"``
+``werkzeug``                                ``>=3.1.6; python_version >= "3.14"``
+``wtforms``                                 ``>=3.0``
+``cachetools``                              ``>=6.0``
+``marshmallow``                             ``>=3``
+``flask_limiter``                           ``>3``
+==========================================  =====================================
 
-Cross provider package dependencies
------------------------------------
+Optional dependencies
+---------------------
 
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified provider distributions in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
 
 .. code-block:: bash
 
-    pip install apache-airflow-providers-fab[common.compat]
+    pip install apache-airflow-providers-fab[kerberos]
 
 
-==================================================================================================================  =================
-Dependent package                                                                                                   Extra
-==================================================================================================================  =================
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_  ``common.compat``
-==================================================================================================================  =================
+============  ===================
+Extra         Dependencies
+============  ===================
+``kerberos``  ``kerberos>=1.3.0``
+``oauth``     ``authlib>=1.0.0``
+============  ===================
 
 Downloading official packages
 -----------------------------
@@ -147,5 +153,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-fab 2.4.4 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-2.4.4.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-2.4.4.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-2.4.4.tar.gz.sha512>`__)
-* `The apache-airflow-providers-fab 2.4.4 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-2.4.4-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-2.4.4-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-2.4.4-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-fab 3.8.1 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-3.8.1.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-3.8.1.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-3.8.1.tar.gz.sha512>`__)
+* `The apache-airflow-providers-fab 3.8.1 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-3.8.1-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-3.8.1-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_fab-3.8.1-py3-none-any.whl.sha512>`__)

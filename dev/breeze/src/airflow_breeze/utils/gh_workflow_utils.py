@@ -24,8 +24,9 @@ import time
 from shutil import which
 
 from airflow_breeze.global_constants import MIN_GH_VERSION
-from airflow_breeze.utils.console import get_console
-from airflow_breeze.utils.run_utils import run_command
+from airflow_breeze.utils.console import console_print
+from airflow_breeze.utils.github import run_gh_command
+from airflow_breeze.utils.shared_options import get_dry_run
 
 
 def tigger_workflow(workflow_name: str, repo: str, branch: str = "main", **kwargs):
@@ -40,19 +41,26 @@ def tigger_workflow(workflow_name: str, repo: str, branch: str = "main", **kwarg
     command = ["gh", "workflow", "run", workflow_name, "--ref", branch, "--repo", repo]
 
     # These are the input parameters to workflow
-    for key, value in kwargs.items():
+    for key, value_raw in kwargs.items():
         # GH cli requires bool inputs to be converted to string format
-        if isinstance(value, bool):
-            value = "true" if value else "false"
+        if isinstance(value_raw, bool):
+            value = "true" if value_raw else "false"
+        else:
+            value = value_raw
 
         command.extend(["-f", f"{key}={value}"])
 
-    get_console().print(f"[blue]Running command: {' '.join(command)}[/blue]")
-    result = run_command(command, capture_output=True, check=False)
+    console_print(f"[blue]Running command: {' '.join(command)}[/blue]")
+    result = run_gh_command(command, capture_output=True)
 
     if result.returncode != 0:
-        get_console().print(f"[red]Error running workflow: {result.stderr}[/red]")
+        console_print(f"[red]Error running workflow: {result.stderr}[/red]")
         sys.exit(1)
+
+    if get_dry_run():
+        # A dry run dispatches nothing, so `gh run list` comes back empty.
+        console_print(f"[info]Dry run: not looking up or monitoring a run of {workflow_name}.")
+        return
 
     # Wait for a few seconds to start the workflow run
     time.sleep(5)
@@ -60,7 +68,7 @@ def tigger_workflow(workflow_name: str, repo: str, branch: str = "main", **kwarg
 
 def make_sure_gh_is_installed():
     if not which("gh"):
-        get_console().print(
+        console_print(
             "[red]Error! The `gh` tool is not installed.[/]\n\n"
             "[yellow]You need to install `gh` tool (see https://github.com/cli/cli) and "
             "run `gh auth login` to connect your repo to GitHub."
@@ -73,13 +81,13 @@ def make_sure_gh_is_installed():
         from packaging.version import Version
 
         if Version(version) < Version(MIN_GH_VERSION):
-            get_console().print(
+            console_print(
                 f"[red]Error! The `gh` tool version is too old. "
                 f"Please upgrade to at least version {MIN_GH_VERSION}[/]"
             )
             sys.exit(1)
     else:
-        get_console().print(
+        console_print(
             "[red]Error! Could not determine the version of the `gh` tool. Please ensure it is installed correctly.[/]"
         )
         sys.exit(1)
@@ -107,19 +115,19 @@ def get_workflow_run_id(workflow_name: str, repo: str) -> int:
         "databaseId",
     ]
 
-    result = run_command(command, capture_output=True, check=False)
+    result = run_gh_command(command, capture_output=True)
     if result.returncode != 0:
-        get_console().print(f"[red]Error fetching workflow run ID: {result.stderr}[/red]")
+        console_print(f"[red]Error fetching workflow run ID: {result.stderr}[/red]")
         sys.exit(1)
 
     runs_data = result.stdout.strip()
     if not runs_data:
-        get_console().print("[red]No workflow runs found.[/red]")
+        console_print("[red]No workflow runs found.[/red]")
         sys.exit(1)
 
     run_id = json.loads(runs_data)[0].get("databaseId")
 
-    get_console().print(
+    console_print(
         f"[blue]Running workflow {workflow_name} at https://github.com/{repo}/actions/runs/{run_id}[/blue]",
     )
 
@@ -137,9 +145,9 @@ def get_workflow_run_info(run_id: str, repo: str, fields: str) -> dict:
     make_sure_gh_is_installed()
     command = ["gh", "run", "view", run_id, "--json", fields, "--repo", repo]
 
-    result = run_command(command, capture_output=True, check=False)
+    result = run_gh_command(command, capture_output=True)
     if result.returncode != 0:
-        get_console().print(f"[red]Error fetching workflow run status: {result.stderr}[/red]")
+        console_print(f"[red]Error fetching workflow run status: {result.stderr}[/red]")
         sys.exit(1)
 
     return json.loads(result.stdout.strip())
@@ -164,15 +172,11 @@ def monitor_workflow_run(run_id: str, repo: str):
             conclusion = job["conclusion"]
 
             if name not in completed_jobs and status != "completed":
-                get_console().print(
-                    f"[yellow]- Job: {name} | Status: {status} | Conclusion: {conclusion}[/yellow]"
-                )
+                console_print(f"[yellow]- Job: {name} | Status: {status} | Conclusion: {conclusion}[/yellow]")
                 continue
 
             if name not in completed_jobs:
-                get_console().print(
-                    f"[green]- Job: {name} | Status: {status} | Conclusion: {conclusion}[/green]"
-                )
+                console_print(f"[green]- Job: {name} | Status: {status} | Conclusion: {conclusion}[/green]")
                 completed_jobs.append(name)
 
         workflow_run_status_conclusion = get_workflow_run_info(run_id, repo, "status,conclusion,name")
@@ -183,9 +187,9 @@ def monitor_workflow_run(run_id: str, repo: str):
 
         if status == "completed":
             if conclusion == "success":
-                get_console().print(f"[green]Workflow {name} run {run_id} completed successfully.[/green]")
+                console_print(f"[green]Workflow {name} run {run_id} completed successfully.[/green]")
             elif conclusion == "failure":
-                get_console().print(
+                console_print(
                     f"[red]Workflow {name} run {run_id} failed, see for more info: https://github.com/{repo}/actions/runs/{run_id}[/red]"
                 )
                 sys.exit(1)
@@ -206,12 +210,15 @@ def trigger_workflow_and_monitor(
         **workflow_fields,
     )
 
+    if get_dry_run():
+        return
+
     workflow_run_id = get_workflow_run_id(
         workflow_name=workflow_name,
         repo=repo,
     )
 
-    get_console().print(
+    console_print(
         f"[blue]Workflow run ID: {workflow_run_id}[/blue]",
     )
 

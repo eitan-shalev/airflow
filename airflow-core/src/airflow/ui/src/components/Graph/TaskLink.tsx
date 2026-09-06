@@ -20,27 +20,55 @@ import { forwardRef } from "react";
 import { useParams, useSearchParams, Link as RouterLink } from "react-router-dom";
 
 import { TaskName, type TaskNameProps } from "src/components/TaskName";
+import { SearchParamsKeys } from "src/constants/searchParams";
+import { taskNodeSeparator } from "src/utils/assetGraph";
 
 type Props = {
+  readonly dagId?: string;
+  readonly hasTaskInstance?: boolean;
   readonly id: string;
 } & TaskNameProps;
 
-export const TaskLink = forwardRef<HTMLAnchorElement, Props>(({ id, isGroup, isMapped, ...rest }, ref) => {
-  const { dagId = "", groupId, runId, taskId } = useParams();
-  const [searchParams] = useSearchParams();
+export const TaskLink = forwardRef<HTMLAnchorElement, Props>(
+  ({ hasTaskInstance = true, id, isGroup, isMapped, ...rest }, ref) => {
+    const { dagId: urlDagId = "", groupId, runId, taskId: urlTaskId } = useParams();
+    const [searchParams] = useSearchParams();
 
-  const basePath = `/dags/${dagId}${runId === undefined ? "" : `/runs/${runId}`}`;
-  const taskPath = isGroup
-    ? groupId === id
-      ? ""
-      : `/tasks/group/${id}`
-    : taskId === id
-      ? ""
-      : `/tasks/${id}${isMapped && taskId !== id && runId !== undefined ? "/mapped" : ""}`;
+    // Extract dagId and taskId from composite ID
+    const parseCompositeId = (compositeId: string) => {
+      const match = new RegExp(`^task:(?<dagId>.*?)${taskNodeSeparator}(?<taskId>.+)$`, "u").exec(
+        compositeId,
+      );
 
-  return (
-    <RouterLink ref={ref} to={{ pathname: basePath + taskPath, search: searchParams.toString() }}>
-      <TaskName isGroup={isGroup} isMapped={isMapped} {...rest} />
-    </RouterLink>
-  );
-});
+      if (match) {
+        return { dagId: match[1], taskId: match[2] };
+      }
+
+      return { dagId: undefined, taskId: undefined };
+    };
+
+    const { dagId: extractedDagId, taskId: extractedTaskId } = parseCompositeId(id);
+    const dagId = extractedDagId ?? urlDagId;
+    const taskId = extractedTaskId ?? id;
+
+    const includeRun = runId !== undefined && hasTaskInstance;
+    const basePath = `/dags/${dagId}${includeRun ? `/runs/${runId}` : ""}`;
+    const taskPath = isGroup
+      ? includeRun && groupId === taskId
+        ? ""
+        : `/tasks/group/${taskId}`
+      : includeRun && urlTaskId === taskId
+        ? ""
+        : `/tasks/${taskId}${isMapped && urlTaskId !== taskId && includeRun ? "/mapped" : ""}`;
+
+    const targetSearchParams = new URLSearchParams(searchParams);
+
+    targetSearchParams.delete(SearchParamsKeys.TRY_NUMBER);
+
+    return (
+      <RouterLink ref={ref} to={{ pathname: basePath + taskPath, search: targetSearchParams.toString() }}>
+        <TaskName isGroup={isGroup} isMapped={isMapped} {...rest} />
+      </RouterLink>
+    );
+  },
+);

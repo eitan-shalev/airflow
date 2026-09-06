@@ -29,10 +29,10 @@ from more_itertools import flatten
 from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.models.connection import Connection
 from airflow.models.dag import DAG
+from airflow.providers.common.compat.sdk import timezone
 from airflow.providers.common.sql.hooks.sql import DbApiHook
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.utils import timezone
 
 from tests_common.test_utils.compat import GenericTransfer
 from tests_common.test_utils.operators.run_deferrable import execute_operator, mock_context
@@ -89,10 +89,10 @@ class TestMySql:
                 self.init_client = self.connection.extra_dejson.get("client", "mysqlclient")
 
             def __enter__(self):
-                self.connection.set_extra(f'{{"client": "{self.client}"}}')
+                self.connection.extra = f'{{"client": "{self.client}"}}'
 
             def __exit__(self, exc_type, exc_val, exc_tb):
-                self.connection.set_extra(f'{{"client": "{self.init_client}"}}')
+                self.connection.extra = f'{{"client": "{self.init_client}"}}'
 
         with MySqlContext(client):
             sql = "SELECT * FROM connection;"
@@ -206,6 +206,10 @@ class TestGenericTransfer:
         mocked_conn.get_hook.return_value = mocked_hook
         return mocked_conn
 
+    @classmethod
+    def convert_to_tuples(cls, rows, **context):
+        return [tuple(row) for row in rows]
+
     def setup_method(self):
         # Reset mock states before each test
         self.mocked_source_hook.reset_mock()
@@ -289,7 +293,139 @@ class TestGenericTransfer:
             **{"rows": [[1, 2], [11, 12], [3, 4], [13, 14], [3, 4], [13, 14]], "table": "NEW_HR.EMPLOYEES"},
         }
 
-    def test_paginated_read(self):
+    def test_non_paginated_read_with_rows_processor(self):
+        with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection", side_effect=self.get_connection):
+            with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_hook", side_effect=self.get_hook):
+                operator = GenericTransfer(
+                    task_id="transfer_table",
+                    source_conn_id="my_source_conn_id",
+                    destination_conn_id="my_destination_conn_id",
+                    sql="SELECT * FROM HR.EMPLOYEES",
+                    destination_table="NEW_HR.EMPLOYEES",
+                    insert_args=INSERT_ARGS,
+                    execution_timeout=timedelta(hours=1),
+                    rows_processor=self.convert_to_tuples,
+                )
+
+                operator.execute(context=mock_context(task=operator))
+
+        assert self.mocked_source_hook.get_records.call_count == 1
+        assert self.mocked_source_hook.get_records.call_args_list[0].args[0] == "SELECT * FROM HR.EMPLOYEES"
+        assert self.mocked_destination_hook.insert_rows.call_count == 1
+        assert self.mocked_destination_hook.insert_rows.call_args_list[0].kwargs == {
+            **INSERT_ARGS,
+            **{"rows": [(1, 2), (11, 12), (3, 4), (13, 14), (3, 4), (13, 14)], "table": "NEW_HR.EMPLOYEES"},
+        }
+
+    def test_non_paginated_read_for_multiple_sql_statements(self):
+        with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection", side_effect=self.get_connection):
+            with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_hook", side_effect=self.get_hook):
+                operator = GenericTransfer(
+                    task_id="transfer_table",
+                    source_conn_id="my_source_conn_id",
+                    destination_conn_id="my_destination_conn_id",
+                    sql=["SELECT * FROM HR.EMPLOYEES", "SELECT * FROM HR.PEOPLE"],
+                    destination_table="NEW_HR.EMPLOYEES",
+                    insert_args=INSERT_ARGS,
+                    execution_timeout=timedelta(hours=1),
+                )
+
+                operator.execute(context=mock_context(task=operator))
+
+            assert self.mocked_source_hook.get_records.call_count == 2
+            assert [call.args[0] for call in self.mocked_source_hook.get_records.call_args_list] == [
+                "SELECT * FROM HR.EMPLOYEES",
+                "SELECT * FROM HR.PEOPLE",
+            ]
+            assert self.mocked_destination_hook.insert_rows.call_count == 2
+            assert self.mocked_destination_hook.insert_rows.call_args_list[0].kwargs == {
+                **INSERT_ARGS,
+                "rows": [[1, 2], [11, 12], [3, 4], [13, 14], [3, 4], [13, 14]],
+                "table": "NEW_HR.EMPLOYEES",
+            }
+            assert self.mocked_destination_hook.insert_rows.call_args_list[1].kwargs == {
+                **INSERT_ARGS,
+                "rows": [[1, 2], [11, 12], [3, 4], [13, 14], [3, 4], [13, 14]],
+                "table": "NEW_HR.EMPLOYEES",
+            }
+
+    def test_non_paginated_read_for_multiple_sql_statements_with_rows_processor(self):
+        with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection", side_effect=self.get_connection):
+            with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_hook", side_effect=self.get_hook):
+                operator = GenericTransfer(
+                    task_id="transfer_table",
+                    source_conn_id="my_source_conn_id",
+                    destination_conn_id="my_destination_conn_id",
+                    sql=["SELECT * FROM HR.EMPLOYEES", "SELECT * FROM HR.PEOPLE"],
+                    destination_table="NEW_HR.EMPLOYEES",
+                    insert_args=INSERT_ARGS,
+                    execution_timeout=timedelta(hours=1),
+                    rows_processor=self.convert_to_tuples,
+                )
+
+                operator.execute(context=mock_context(task=operator))
+
+            assert self.mocked_source_hook.get_records.call_count == 2
+            assert [call.args[0] for call in self.mocked_source_hook.get_records.call_args_list] == [
+                "SELECT * FROM HR.EMPLOYEES",
+                "SELECT * FROM HR.PEOPLE",
+            ]
+            assert self.mocked_destination_hook.insert_rows.call_count == 2
+            assert self.mocked_destination_hook.insert_rows.call_args_list[0].kwargs == {
+                **INSERT_ARGS,
+                "rows": [(1, 2), (11, 12), (3, 4), (13, 14), (3, 4), (13, 14)],
+                "table": "NEW_HR.EMPLOYEES",
+            }
+            assert self.mocked_destination_hook.insert_rows.call_args_list[1].kwargs == {
+                **INSERT_ARGS,
+                "rows": [(1, 2), (11, 12), (3, 4), (13, 14), (3, 4), (13, 14)],
+                "table": "NEW_HR.EMPLOYEES",
+            }
+
+    def test_non_deferred_paginated_read(self):
+        """
+        Test that GenericTransfer paginates eagerly (non-deferred) when page_size is set and deferrable is False.
+        It stops early when fewer rows than page_size are returned (no need for an extra empty-page fetch).
+        """
+        with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection", side_effect=self.get_connection):
+            with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_hook", side_effect=self.get_hook):
+                operator = GenericTransfer(
+                    task_id="transfer_table",
+                    source_conn_id="my_source_conn_id",
+                    destination_conn_id="my_destination_conn_id",
+                    sql="SELECT * FROM HR.EMPLOYEES",
+                    destination_table="NEW_HR.EMPLOYEES",
+                    page_size=2,
+                    insert_args=INSERT_ARGS,
+                    execution_timeout=timedelta(hours=1),
+                )
+
+                operator.execute(context=mock_context(task=operator))
+
+        assert self.mocked_source_hook.get_records.call_count == 3
+        assert (
+            self.mocked_source_hook.get_records.call_args_list[0].args[0]
+            == "SELECT * FROM HR.EMPLOYEES LIMIT 2 OFFSET 0"
+        )
+        assert (
+            self.mocked_source_hook.get_records.call_args_list[1].args[0]
+            == "SELECT * FROM HR.EMPLOYEES LIMIT 2 OFFSET 2"
+        )
+        assert (
+            self.mocked_source_hook.get_records.call_args_list[2].args[0]
+            == "SELECT * FROM HR.EMPLOYEES LIMIT 2 OFFSET 4"
+        )
+        assert self.mocked_destination_hook.insert_rows.call_count == 2
+        assert self.mocked_destination_hook.insert_rows.call_args_list[0].kwargs == {
+            **INSERT_ARGS,
+            **{"rows": [[1, 2], [11, 12], [3, 4], [13, 14]], "table": "NEW_HR.EMPLOYEES"},
+        }
+        assert self.mocked_destination_hook.insert_rows.call_args_list[1].kwargs == {
+            **INSERT_ARGS,
+            **{"rows": [[3, 4], [13, 14]], "table": "NEW_HR.EMPLOYEES"},
+        }
+
+    def test_deferred_paginated_read(self):
         """
         This unit test is based on the example described in the medium article:
         https://medium.com/apache-airflow/transfering-data-from-sap-hana-to-mssql-using-the-airflow-generictransfer-d29f147a9f1f
@@ -306,6 +442,7 @@ class TestGenericTransfer:
                     page_size=1000,  # Fetch data in chunks of 1000 rows for pagination
                     insert_args=INSERT_ARGS,
                     execution_timeout=timedelta(hours=1),
+                    deferrable=True,
                 )
 
                 results, events = execute_operator(operator)
@@ -320,6 +457,14 @@ class TestGenericTransfer:
         assert (
             self.mocked_source_hook.get_records.call_args_list[0].args[0]
             == "SELECT * FROM HR.EMPLOYEES LIMIT 1000 OFFSET 0"
+        )
+        assert (
+            self.mocked_source_hook.get_records.call_args_list[1].args[0]
+            == "SELECT * FROM HR.EMPLOYEES LIMIT 1000 OFFSET 1000"
+        )
+        assert (
+            self.mocked_source_hook.get_records.call_args_list[2].args[0]
+            == "SELECT * FROM HR.EMPLOYEES LIMIT 1000 OFFSET 2000"
         )
         assert self.mocked_destination_hook.insert_rows.call_count == 2
         assert self.mocked_destination_hook.insert_rows.call_args_list[0].kwargs == {

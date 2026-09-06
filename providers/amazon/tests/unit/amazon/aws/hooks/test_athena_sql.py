@@ -24,8 +24,6 @@ from airflow.models import Connection
 from airflow.providers.amazon.aws.hooks.athena_sql import AthenaSQLHook
 from airflow.providers.amazon.aws.utils.connection_wrapper import AwsConnectionWrapper
 
-from tests_common.test_utils.version_compat import SQLALCHEMY_V_1_4
-
 REGION_NAME = "us-east-1"
 WORK_GROUP = "test-work-group"
 SCHEMA_NAME = "athena_sql_schema"
@@ -63,10 +61,7 @@ class TestAthenaSQLHookConn:
 
         mock_get_credentials.assert_called_once_with(region_name=REGION_NAME)
 
-        if SQLALCHEMY_V_1_4:
-            assert str(athena_uri) == expected_athena_uri
-        else:
-            assert athena_uri.render_as_string(hide_password=False) == expected_athena_uri
+        assert athena_uri == expected_athena_uri
 
     @mock.patch("airflow.providers.amazon.aws.hooks.athena_sql.AthenaSQLHook._get_conn_params")
     def test_get_uri_change_driver(self, mock_get_conn_params):
@@ -76,7 +71,7 @@ class TestAthenaSQLHookConn:
 
         athena_uri = self.db_hook.get_uri()
 
-        assert str(athena_uri).startswith("awsathena+arrow://")
+        assert athena_uri.startswith("awsathena+arrow://")
 
     @mock.patch("airflow.providers.amazon.aws.hooks.athena_sql.pyathena.connect")
     @mock.patch("airflow.providers.amazon.aws.hooks.athena_sql.AthenaSQLHook.get_session")
@@ -107,7 +102,7 @@ class TestAthenaSQLHookConn:
         )
 
     @pytest.mark.parametrize(
-        "conn_params, conn_extra, expected_call_args",
+        ("conn_params", "conn_extra", "expected_call_args"),
         [
             (
                 {"schema": "athena_sql_schema1"},
@@ -153,3 +148,129 @@ class TestAthenaSQLHookConn:
         hook = AthenaSQLHook(athena_conn_id=AWS_ATHENA_CONN_ID, aws_conn_id=AWS_CONN_ID)
         assert hook.athena_conn_id == AWS_ATHENA_CONN_ID
         assert hook.aws_conn_id == AWS_CONN_ID
+
+    def test_init_ignores_unexpected_kwargs(self):
+        """Verify that connection extras passed as kwargs don't crash the constructor.
+
+        BaseSQLOperator.get_hook() passes all connection extras as hook_params which
+        end up as constructor kwargs. Extras like s3_staging_dir and work_group are
+        not valid params for AwsGenericHook.__init__ and must be filtered out.
+        """
+        hook = AthenaSQLHook(
+            athena_conn_id="athena_conn",
+            s3_staging_dir="s3://mybucket/athena/",
+            work_group="primary",
+            region_name="eu-west-1",
+            driver="rest",
+        )
+        assert hook.athena_conn_id == "athena_conn"
+        # region_name is a valid AwsGenericHook param and should be passed through
+        assert hook._region_name == "eu-west-1"
+
+    def test_init_passes_valid_aws_kwargs(self):
+        """Verify that valid AwsGenericHook kwargs are still forwarded correctly."""
+        hook = AthenaSQLHook(
+            athena_conn_id="athena_conn",
+            aws_conn_id="custom_aws",
+            verify=False,
+            region_name="us-west-2",
+            config={"retries": {"max_attempts": 5}},
+        )
+        assert hook.athena_conn_id == "athena_conn"
+        assert hook.aws_conn_id == "custom_aws"
+        assert hook._verify is False
+        assert hook._region_name == "us-west-2"
+        assert hook._config is not None
+
+
+class TestAthenaSQLHookOpenLineage:
+    """Static tests for the OpenLineage methods on AthenaSQLHook."""
+
+    EXPECTED_INFORMATION_SCHEMA_COLUMNS = [
+        "table_schema",
+        "table_name",
+        "column_name",
+        "ordinal_position",
+        "data_type",
+        "table_catalog",
+    ]
+
+    @staticmethod
+    def _make_hook(connection: Connection, hook_region: str | None = None) -> AthenaSQLHook:
+        hook = AthenaSQLHook(region_name=hook_region) if hook_region else AthenaSQLHook()
+        hook.get_connection = mock.Mock(return_value=connection)  # type: ignore[method-assign]
+        return hook
+
+    @pytest.mark.parametrize(
+        ("extras", "hook_region", "expected_authority"),
+        [
+            # region from connection extras when hook-constructor region not set
+            ({"region_name": "us-east-1"}, None, "athena.us-east-1.amazonaws.com"),
+            # hook-constructor region (explicit user override) wins over extras region
+            ({"region_name": "eu-west-1"}, "us-east-2", "athena.us-east-2.amazonaws.com"),
+            # hook-constructor region used when extras have none
+            ({}, "ap-south-1", "athena.ap-south-1.amazonaws.com"),
+            # graceful fallback when neither is set
+            ({}, None, "athena.amazonaws.com"),
+            # aws_domain extra changes the domain (AWS GovCloud / China / ISO partitions)
+            (
+                {"region_name": "cn-north-1", "aws_domain": "amazonaws.com.cn"},
+                None,
+                "athena.cn-north-1.amazonaws.com.cn",
+            ),
+            # aws_domain still applied when region falls back
+            ({"aws_domain": "amazonaws.com.cn"}, None, "athena.amazonaws.com.cn"),
+        ],
+    )
+    def test_get_openlineage_database_info_region_extraction(self, extras, hook_region, expected_authority):
+        conn = Connection(conn_type="athena", schema="default", extra=extras)
+        hook = self._make_hook(conn, hook_region)
+        info = hook.get_openlineage_database_info(conn)
+        assert info.authority == expected_authority
+
+    def test_get_openlineage_database_info_returns_expected_fields(self):
+        """Snapshot of the DatabaseInfo shape so accidental changes are caught."""
+        conn = Connection(
+            conn_type="athena",
+            schema="default",
+            extra={"region_name": "us-east-1"},
+        )
+        hook = self._make_hook(conn)
+        info = hook.get_openlineage_database_info(conn)
+        assert info.scheme == "awsathena"
+        assert info.authority == "athena.us-east-1.amazonaws.com"
+        assert info.database == "AwsDataCatalog"
+        assert info.is_information_schema_cross_db is True
+        assert info.information_schema_columns == self.EXPECTED_INFORMATION_SCHEMA_COLUMNS
+
+    def test_get_openlineage_database_info_custom_catalog(self):
+        conn = Connection(
+            conn_type="athena",
+            schema="default",
+            extra={"region_name": "us-east-1", "catalog": "MyCatalog"},
+        )
+        hook = self._make_hook(conn)
+        info = hook.get_openlineage_database_info(conn)
+        assert info.database == "MyCatalog"
+
+    def test_get_openlineage_database_dialect_returns_trino(self):
+        conn = Connection(conn_type="athena", extra={"region_name": "us-east-1"})
+        hook = self._make_hook(conn)
+        assert hook.get_openlineage_database_dialect(conn) == "trino"
+
+    @pytest.mark.parametrize(
+        ("connection_schema", "expected_schema"),
+        [
+            ("mydb", "mydb"),
+            (None, "default"),
+            ("", "default"),
+        ],
+    )
+    def test_get_openlineage_default_schema(self, connection_schema, expected_schema):
+        conn = Connection(
+            conn_type="athena",
+            schema=connection_schema,
+            extra={"region_name": "us-east-1"},
+        )
+        hook = self._make_hook(conn)
+        assert hook.get_openlineage_default_schema() == expected_schema

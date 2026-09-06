@@ -53,6 +53,14 @@ custom StatsD client. This module must be available on your :envvar:`PYTHONPATH`
 
 See :doc:`../modules_management` for details on how Python and Airflow manage modules.
 
+.. note::
+
+    StatsD has no resource concept, so metrics cannot be attributed to the process that
+    produced them. When several processes run the same component, such as schedulers in high
+    availability, each exports the same series and the server keeps whichever value arrived last.
+    Use OpenTelemetry to tell them apart, as described in
+    :ref:`identifying-components-and-their-instances`.
+
 
 Setup - OpenTelemetry
 ---------------------
@@ -63,7 +71,8 @@ To use OpenTelemetry you must first install the required packages:
 
    pip install 'apache-airflow[otel]'
 
-Add the following lines to your configuration file e.g. ``airflow.cfg``
+An OpenTelemetry `Collector <https://opentelemetry.io/docs/concepts/components/#collector>`_ (or compatible service) is required for connectivity to a metrics backend.
+Add the Collector details to your configuration file e.g. ``airflow.cfg``
 
 .. code-block:: ini
 
@@ -73,7 +82,74 @@ Add the following lines to your configuration file e.g. ``airflow.cfg``
     otel_port = 8889
     otel_prefix = airflow
     otel_interval_milliseconds = 30000  # The interval between exports, defaults to 60000
+    otel_service = Airflow
     otel_ssl_active = False
+
+.. note::
+
+    **The following config keys have been deprecated and will be removed in the future**
+
+        .. code-block:: ini
+
+            [metrics]
+            otel_host = localhost
+            otel_port = 8889
+            otel_interval_milliseconds = 30000
+            otel_debugging_on = False
+            otel_service = Airflow
+            otel_ssl_active = False
+
+    The OpenTelemetry SDK should be configured using standard OpenTelemetry environment variables
+    such as ``OTEL_EXPORTER_OTLP_ENDPOINT``, ``OTEL_EXPORTER_OTLP_PROTOCOL``, etc.
+
+    See the OpenTelemetry `exporter protocol specification <https://opentelemetry.io/docs/specs/otel/protocol/exporter/#configuration-options>`_  and
+    `SDK environment variable documentation <https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/#periodic-exporting-metricreader>`_ for more information.
+
+
+.. _identifying-components-and-their-instances:
+
+Identifying components and their instances
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+OpenTelemetry labels each metric with the resource that produced it. Two resource attributes
+decide how much of a deployment can be told apart:
+
+``service.name``
+    Which component reported the metric. It defaults to ``airflow`` for every Airflow process, so
+    a scheduler, a triggerer and a worker arrive under one name. Set it per component to attribute
+    a metric to the kind of process that produced it.
+
+``service.instance.id``
+    Which process of that component reported the metric. It is unset by default, so processes
+    running the same component (e.g. 2+ schedulers) are indistinguishable. Set it per process
+    to attribute a metric to one of them.
+
+Airflow reads ``service.name`` from ``OTEL_SERVICE_NAME``, and every other resource attribute from
+``OTEL_RESOURCE_ATTRIBUTES``:
+
+.. code-block:: bash
+
+    # on one of the schedulers
+    export OTEL_SERVICE_NAME="airflow-scheduler"
+    export OTEL_RESOURCE_ATTRIBUTES="service.instance.id=$(hostname)"
+
+Processes that share a resource also share a series, and the backend keeps whichever export
+arrived last. When several processes run the same component, data are lost instead of aggregated:
+each scheduler samples the metadata database on its own loop, so a gauge such as
+``pool.open_slots`` reports an arbitrary scheduler's sample rather than a value derived from all
+of them.
+
+Once each process is identified, its samples form their own series and can be combined
+deliberately — for example, the lowest number of open slots any scheduler observed:
+
+.. code-block:: text
+
+    min by (pool_name) (airflow_pool_open_slots)
+
+How the attributes surface depends on the backend. Those implementing the OpenTelemetry
+`Prometheus compatibility <https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/>`_
+spec expose them as the ``job`` and ``instance`` labels.
+
 
 Enable Https
 -----------------
@@ -92,11 +168,49 @@ You need to configure the SSL certificate and key within the OpenTelemetry colle
              cert_file: "/path/to/cert/cert.crt"
              key_file: "/path/to/key/key.pem"
 
+Histogram Metrics and Backend Requirements
+------------------------------------------
+
+Airflow's timing metrics (``timing()`` / ``timer()``) are emitted as OpenTelemetry
+histograms aggregated with
+`exponential bucket histograms <https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram>`_,
+so bucket boundaries adapt automatically to the observed range and you do not have to
+hand-tune explicit buckets for metrics that span very different scales (milliseconds to
+hours).
+
+To ingest these correctly end-to-end, the metrics backend you connect to must support
+OpenTelemetry exponential histograms and (for Prometheus) their conversion to native
+histograms:
+
+* **OpenTelemetry Collector** — use ``opentelemetry-collector-contrib`` version 0.115.0
+  or above. Older versions do not translate OTLP exponential histograms into Prometheus
+  native histograms.
+* **Prometheus** — native histograms must be enabled explicitly, and how you do that
+  depends on the Prometheus version:
+
+  * **2.40 to 3.8** — start Prometheus with the ``--enable-feature=native-histograms``
+    flag.
+  * **3.8 and above** — set ``scrape_native_histograms: true`` in the scrape
+    configuration (this option was added in 3.8, and from 3.9 the feature flag is a
+    no-op so the config setting is required):
+
+    .. code-block:: yaml
+
+        global:
+            scrape_native_histograms: true
+
+If the backend does not support native histograms, exponential-histogram data points may
+be dropped or rendered incorrectly. A reference stack (Collector, Prometheus, and Grafana)
+wired up for local development is available via ``breeze start-airflow --integration otel``;
+see the contributor docs for details.
+
 Allow/Block Lists
 -----------------
 
 If you want to avoid sending all the available metrics, you can configure an allow list or block list
-of prefixes to send or block only the metrics that start with the elements of the list:
+to send or block only certain metrics. Each list is a comma-separated set of regular expressions
+matched anywhere in the metric name (anchor a pattern with ``^`` to match a prefix). If both lists
+are set, the block list is ignored:
 
 .. code-block:: ini
 
@@ -122,6 +236,73 @@ to the stat name if necessary, and returns the transformed stat name. The functi
         return stat_name.lower()[:32]
 
 
+Custom Metrics
+--------------
+
+You can emit your own metrics from inside a task, plugin, or custom operator through
+the same stats client Airflow uses internally. In Airflow 3 the recommended import
+path is ``airflow.sdk.observability``:
+
+.. code-block:: python
+
+    from airflow.sdk.observability import stats
+
+    stats.incr("my_service.processed")
+    stats.decr("my_service.in_flight")
+    stats.gauge("my_service.queue_depth", 42)
+    stats.timing("my_service.batch_ms", 1234)
+
+    with stats.timer("my_service.batch"):
+        ...
+
+.. versionadded:: 3.3.0
+    The module-level ``stats`` functions (``stats.incr()``, ``stats.gauge()``, and so on).
+
+On earlier versions, use the ``Stats`` class instead:
+``from airflow.sdk.observability.stats import Stats``, then ``Stats.incr(...)``.
+
+``incr``, ``decr``, ``gauge``, ``timing`` and ``timer`` also accept an optional
+``tags`` mapping for dimensional metrics on backends that support them:
+
+.. code-block:: python
+
+    stats.incr("my_service.requests", tags={"endpoint": "checkout"})
+
+``incr`` and ``decr`` also accept ``count`` and ``rate``, and ``gauge`` accepts
+``rate`` and ``delta``, following the `StatsD data types
+<https://statsd.readthedocs.io/en/stable/types.html#data-types>`__.
+
+.. note::
+
+    Tag support depends on the backend. The classic StatsD protocol has no concept of tags.
+
+    * **OpenTelemetry** (``otel_on``) sends tags as native attributes.
+    * **StatsD** (``statsd_on``) drops the ``tags`` mapping by default. To turn tags into labels,
+      enable a tagged wire format, either ``statsd_influxdb_enabled = True`` (InfluxDB
+      ``name,key=value``) or ``statsd_datadog_enabled = True`` (DogStatsD ``|#key:value``). The
+      Prometheus ``statsd_exporter`` reads the tags from either format and turns them into labels.
+      These flags only change how tags are written on the wire. You can also embed the values in the
+      metric name and map those name segments back to labels with ``statsd_exporter`` mapping rules.
+
+.. note::
+
+    Metric names must be 250 characters or fewer and may only contain the characters
+    ``a-z``, ``A-Z``, ``0-9``, ``_``, ``.``, ``-`` and ``/``. An invalid name is logged
+    and the metric is not emitted.
+
+.. note::
+
+    These metrics are silently dropped unless a backend is enabled (see `Setup - StatsD`_
+    or `Setup - OpenTelemetry`_).
+
+.. note::
+
+    If your custom metrics do not appear, check ``[metrics] metrics_allow_list`` and
+    ``[metrics] metrics_block_list`` (see `Allow/Block Lists`_). When
+    ``metrics_allow_list`` is set, only metrics matching it are emitted, so a custom
+    metric that is not listed is silently dropped.
+
+
 Other Configuration Options
 ---------------------------
 
@@ -134,162 +315,4 @@ Other Configuration Options
 Metric Descriptions
 ===================
 
-
-Counters
---------
-
-====================================================================== ================================================================
-Name                                                                   Description
-====================================================================== ================================================================
-``<job_name>_start``                                                   Number of started ``<job_name>`` job, ex. ``SchedulerJob``, ``LocalTaskJob``
-``<job_name>_end``                                                     Number of ended ``<job_name>`` job, ex. ``SchedulerJob``, ``LocalTaskJob``
-``<job_name>_heartbeat_failure``                                       Number of failed Heartbeats for a ``<job_name>`` job, ex. ``SchedulerJob``,
-                                                                       ``LocalTaskJob``
-``local_task_job.task_exit.<job_id>.<dag_id>.<task_id>.<return_code>`` Number of ``LocalTaskJob`` terminations with a ``<return_code>``
-                                                                       while running a task ``<task_id>`` of a Dag  ``<dag_id>``.
-``local_task_job.task_exit``                                           Number of ``LocalTaskJob`` terminations with a ``<return_code>``
-                                                                       while running a task ``<task_id>`` of a Dag  ``<dag_id>``.
-                                                                       Metric with job_id, dag_id, task_id and return_code tagging.
-``operator_failures_<operator_name>``                                  Operator ``<operator_name>`` failures
-``operator_failures``                                                  Operator ``<operator_name>`` failures. Metric with operator_name tagging.
-``operator_successes_<operator_name>``                                 Operator ``<operator_name>`` successes
-``operator_successes``                                                 Operator ``<operator_name>`` successes. Metric with operator_name tagging.
-``ti_failures``                                                        Overall task instances failures. Metric with dag_id and task_id tagging.
-``ti_successes``                                                       Overall task instances successes. Metric with dag_id and task_id tagging.
-``previously_succeeded``                                               Number of previously succeeded task instances. Metric with dag_id and task_id tagging.
-``task_instances_without_heartbeats_killed``                           Task instances without heartbeats killed. Metric with dag_id and task_id tagging.
-``scheduler_heartbeat``                                                Scheduler heartbeats
-``dag_processor_heartbeat``                                            Standalone Dag processor heartbeats
-``dag_processing.processes``                                           Relative number of currently running Dag parsing processes (ie this delta
-                                                                       is negative when, since the last metric was sent, processes have completed).
-                                                                       Metric with file_path and action tagging.
-``dag_processing.processor_timeouts``                                  Number of file processors that have been killed due to taking too long.
-                                                                       Metric with file_path tagging.
-``dag_processing.other_callback_count``                                Number of non-SLA callbacks received
-``dag_processing.file_path_queue_update_count``                        Number of times we've scanned the filesystem and queued all existing Dags
-``dag_file_processor_timeouts``                                        (DEPRECATED) same behavior as ``dag_processing.processor_timeouts``
-``dag_processing.manager_stalls``                                      Number of stalled ``DagFileProcessorManager``
-``dag_file_refresh_error``                                             Number of failures loading any Dag files
-``scheduler.tasks.killed_externally``                                  Number of tasks killed externally. Metric with dag_id and task_id tagging.
-``scheduler.orphaned_tasks.cleared``                                   Number of Orphaned tasks cleared by the Scheduler
-``scheduler.orphaned_tasks.adopted``                                   Number of Orphaned tasks adopted by the Scheduler
-``scheduler.critical_section_busy``                                    Count of times a scheduler process tried to get a lock on the critical
-                                                                       section (needed to send tasks to the executor) and found it locked by
-                                                                       another process.
-``ti.start.<dag_id>.<task_id>``                                        Number of started task in a given Dag. Similar to <job_name>_start but for task
-``ti.start``                                                           Number of started task in a given Dag. Similar to <job_name>_start but for task.
-                                                                       Metric with dag_id and task_id tagging.
-``ti.finish.<dag_id>.<task_id>.<state>``                               Number of completed task in a given Dag. Similar to <job_name>_end but for task
-``ti.finish``                                                          Number of completed task in a given Dag. Similar to <job_name>_end but for task
-                                                                       Metric with dag_id and task_id tagging.
-``dag.callback_exceptions``                                            Number of exceptions raised from Dag callbacks. When this happens, it
-                                                                       means Dag callback is not working. Metric with dag_id tagging
-``celery.task_timeout_error``                                          Number of ``AirflowTaskTimeout`` errors raised when publishing Task to Celery Broker.
-``celery.execute_command.failure``                                     Number of non-zero exit code from Celery task.
-``task_removed_from_dag.<dag_id>``                                     Number of tasks removed for a given Dag (i.e. task no longer exists in Dag).
-``task_removed_from_dag``                                              Number of tasks removed for a given Dag (i.e. task no longer exists in Dag).
-                                                                       Metric with dag_id and run_type tagging.
-``task_restored_to_dag.<dag_id>``                                      Number of tasks restored for a given Dag (i.e. task instance which was
-                                                                       previously in REMOVED state in the DB is added to Dag file)
-``task_restored_to_dag.<dag_id>``                                      Number of tasks restored for a given Dag (i.e. task instance which was
-                                                                       previously in REMOVED state in the DB is added to Dag file).
-                                                                       Metric with dag_id and run_type tagging.
-``task_instance_created_<operator_name>``                              Number of tasks instances created for a given Operator
-``task_instance_created``                                              Number of tasks instances created for a given Operator.
-                                                                       Metric with dag_id and run_type tagging.
-``triggerer_heartbeat``                                                Triggerer heartbeats
-``triggers.blocked_main_thread``                                       Number of triggers that blocked the main thread (likely due to not being
-                                                                       fully asynchronous)
-``triggers.failed``                                                    Number of triggers that errored before they could fire an event
-``triggers.succeeded``                                                 Number of triggers that have fired at least one event
-``asset.updates``                                                      Number of updated assets
-``asset.orphaned``                                                     Number of assets marked as orphans because they are no longer referenced in Dag
-                                                                       schedule parameters or task outlets
-``asset.triggered_dagruns``                                            Number of Dag runs triggered by an asset update
-====================================================================== ================================================================
-
-Gauges
-------
-
-==================================================== ========================================================================
-Name                                                 Description
-==================================================== ========================================================================
-``dagbag_size``                                      Number of Dags found when the scheduler ran a scan based on its
-                                                     configuration
-``dag_processing.import_errors``                     Number of errors from trying to parse Dag files
-``dag_processing.total_parse_time``                  Seconds taken to scan and import ``dag_processing.file_path_queue_size`` Dag files
-``dag_processing.file_path_queue_size``              Number of Dag files to be considered for the next scan
-``dag_processing.last_run.seconds_ago.<dag_file>``   Seconds since ``<dag_file>`` was last processed
-``dag_processing.last_num_of_db_queries.<dag_file>`` Number of queries to Airflow database during parsing per ``<dag_file>``
-``scheduler.tasks.starving``                         Number of tasks that cannot be scheduled because of no open slot in pool
-``scheduler.tasks.executable``                       Number of tasks that are ready for execution (set to queued)
-                                                     with respect to pool limits, Dag concurrency, executor state,
-                                                     and priority.
-``executor.open_slots.<executor_class_name>``        Number of open slots on a specific executor. Only emitted when multiple executors are configured.
-``executor.open_slots``                              Number of open slots on executor
-``executor.queued_tasks.<executor_class_name>``      Number of queued tasks on on a specific executor. Only emitted when multiple executors are configured.
-``executor.queued_tasks``                            Number of queued tasks on executor
-``executor.running_tasks.<executor_class_name>``     Number of running tasks on on a specific executor. Only emitted when multiple executors are configured.
-``executor.running_tasks``                           Number of running tasks on executor
-``pool.open_slots.<pool_name>``                      Number of open slots in the pool
-``pool.open_slots``                                  Number of open slots in the pool. Metric with pool_name tagging.
-``pool.queued_slots.<pool_name>``                    Number of queued slots in the pool
-``pool.queued_slots``                                Number of queued slots in the pool. Metric with pool_name tagging.
-``pool.running_slots.<pool_name>``                   Number of running slots in the pool
-``pool.running_slots``                               Number of running slots in the pool. Metric with pool_name tagging.
-``pool.deferred_slots.<pool_name>``                  Number of deferred slots in the pool
-``pool.deferred_slots``                              Number of deferred slots in the pool. Metric with pool_name tagging.
-``pool.scheduled_slots.<pool_name>``                 Number of scheduled slots in the pool
-``pool.scheduled_slots``                             Number of scheduled slots in the pool. Metric with pool_name tagging.
-``pool.starving_tasks.<pool_name>``                  Number of starving tasks in the pool
-``pool.starving_tasks``                              Number of starving tasks in the pool. Metric with pool_name tagging.
-``triggers.running.<hostname>``                      Number of triggers currently running for a triggerer (described by hostname)
-``triggers.running``                                 Number of triggers currently running for a triggerer (described by hostname).
-                                                     Metric with hostname tagging.
-``triggerer.capacity_left.<hostname>``               Capacity left on a triggerer to run triggers (described by hostname)
-``triggerer.capacity_left``                          Capacity left on a triggerer to run triggers (described by hostname).
-                                                     Metric with hostname tagging.
-``ti.running.<queue>.<dag_id>.<task_id>``            Number of running tasks in a given Dag. As ti.start and ti.finish can run out of sync this metric shows all running tis.
-``ti.running``                                       Number of running tasks in a given Dag. As ti.start and ti.finish can run out of sync this metric shows all running tis.
-                                                     Metric with queue, dag_id and task_id tagging.
-==================================================== ========================================================================
-
-Timers
-------
-
-================================================================ ========================================================================
-Name                                                             Description
-================================================================ ========================================================================
-``dagrun.dependency-check.<dag_id>``                             Milliseconds taken to check Dag dependencies
-``dagrun.dependency-check``                                      Milliseconds taken to check Dag dependencies. Metric with dag_id tagging.
-``dag.<dag_id>.<task_id>.duration``                              Milliseconds taken to run a task
-``task.duration``                                                Milliseconds taken to run a task. Metric with dag_id and task-id tagging.
-``dag.<dag_id>.<task_id>.scheduled_duration``                    Milliseconds a task spends in the Scheduled state, before being Queued
-``task.scheduled_duration``                                      Milliseconds a task spends in the Scheduled state, before being Queued.
-                                                                 Metric with dag_id and task_id tagging.
-``dag.<dag_id>.<task_id>.queued_duration``                       Milliseconds a task spends in the Queued state, before being Running
-``task.queued_duration``                                         Milliseconds a task spends in the Queued state, before being Running.
-                                                                 Metric with dag_id and task_id tagging.
-``dag_processing.last_duration.<dag_file>``                      Milliseconds taken to load the given Dag file
-``dag_processing.last_duration``                                 Milliseconds taken to load the given Dag file. Metric with file_name tagging.
-``dagrun.duration.success.<dag_id>``                             Milliseconds taken for a DagRun to reach success state
-``dagrun.duration.success``                                      Milliseconds taken for a DagRun to reach success state.
-                                                                 Metric with dag_id and run_type tagging.
-``dagrun.duration.failed.<dag_id>``                              Milliseconds taken for a DagRun to reach failed state
-``dagrun.duration.failed``                                       Milliseconds taken for a DagRun to reach failed state.
-                                                                 Metric with dag_id and run_type tagging.
-``dagrun.schedule_delay.<dag_id>``                               Milliseconds of delay between the scheduled DagRun
-                                                                 start date and the actual DagRun start date
-``dagrun.schedule_delay``                                        Milliseconds of delay between the scheduled DagRun
-                                                                 start date and the actual DagRun start date. Metric with dag_id tagging.
-``scheduler.critical_section_duration``                          Milliseconds spent in the critical section of scheduler loop --
-                                                                 only a single scheduler can enter this loop at a time
-``scheduler.critical_section_query_duration``                    Milliseconds spent running the critical section task instance query
-``scheduler.scheduler_loop_duration``                            Milliseconds spent running one scheduler loop
-``dagrun.<dag_id>.first_task_scheduling_delay``                  Milliseconds elapsed between first task start_date and dagrun expected start
-``dagrun.first_task_scheduling_delay``                           Milliseconds elapsed between first task start_date and dagrun expected start.
-                                                                 Metric with dag_id and run_type tagging.
-``collect_db_dags``                                              Milliseconds taken for fetching all Serialized Dags from DB
-``kubernetes_executor.clear_not_launched_queued_tasks.duration`` Milliseconds taken for clearing not launched queued tasks in Kubernetes Executor
-``kubernetes_executor.adopt_task_instances.duration``            Milliseconds taken to adopt the task instances in Kubernetes Executor
-================================================================ ========================================================================
+.. include:: metric_tables.rst

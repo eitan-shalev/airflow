@@ -25,6 +25,7 @@ import functools
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Callable, Generator, Sequence
 from contextlib import ExitStack, contextmanager
@@ -32,12 +33,12 @@ from subprocess import check_output
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import google.auth
-import google.oauth2.service_account
 import google_auth_httplib2
 import requests
 import tenacity
 from asgiref.sync import sync_to_async
 from gcloud.aio.auth.token import Token, TokenResponse
+from google.api_core.client_options import ClientOptions
 from google.api_core.exceptions import Forbidden, ResourceExhausted, TooManyRequests
 from google.auth import _cloud_sdk, compute_engine
 from google.auth.environment_vars import CLOUD_SDK_CONFIG_DIR, CREDENTIALS
@@ -49,13 +50,12 @@ from googleapiclient.http import MediaIoBaseDownload, build_http, set_user_agent
 from requests import Session
 
 from airflow import version
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook
 from airflow.providers.google.cloud.utils.credentials_provider import (
     _get_scopes,
     _get_target_principal_and_delegates,
     get_credentials_and_project_id,
 )
-from airflow.providers.google.version_compat import BaseHook
 from airflow.utils.process_utils import patch_environ
 
 if TYPE_CHECKING:
@@ -125,6 +125,26 @@ def is_refresh_credentials_exception(exception: Exception) -> bool:
     return False
 
 
+_GCP_PROJECT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9\-]{4,28}[a-z0-9]$")
+
+
+def is_valid_gcp_project_id(project_id: str) -> bool:
+    """
+    Validate a Google Cloud Project ID format.
+
+    A valid project ID must:
+
+    - Be 6 to 30 characters long
+    - Start with a lowercase letter
+    - Contain only lowercase letters, digits, and hyphens
+    - Not end with a hyphen
+
+    :param project_id: The project ID string to validate.
+    :return: True if the project ID is valid, False otherwise.
+    """
+    return bool(_GCP_PROJECT_ID_PATTERN.match(project_id))
+
+
 class retry_if_temporary_quota(tenacity.retry_if_exception):
     """Retries if there was an exception for exceeding the temporary quote limit."""
 
@@ -155,6 +175,9 @@ PROVIDE_PROJECT_ID: str = cast("str", None)
 T = TypeVar("T", bound=Callable)
 RT = TypeVar("RT")
 
+# Sentinel value to distinguish "parameter not provided" from "parameter explicitly set to a value"
+_UNSET = object()
+
 
 def get_field(extras: dict, field_name: str) -> str | None:
     """Get field from extra, first checking short name, then for backcompat we check for prefixed name."""
@@ -164,9 +187,11 @@ def get_field(extras: dict, field_name: str) -> str | None:
             "when using this method."
         )
     if field_name in extras:
-        return extras[field_name] or None
+        value = extras[field_name]
+        return None if value == "" else value
     prefixed_name = f"extra__google_cloud_platform__{field_name}"
-    return extras.get(prefixed_name) or None
+    value = extras.get(prefixed_name)
+    return None if value == "" else value
 
 
 class GoogleBaseHook(BaseHook):
@@ -203,6 +228,10 @@ class GoogleBaseHook(BaseHook):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account.
+    :param quota_project_id: Optional Google Cloud project ID to use for billing and
+        quota purposes. If set, API usage will be charged to this project instead of
+        the project associated with the credentials. If not set, the connection's
+        ``quota_project_id`` field is used as a fallback.
     """
 
     conn_name_attr = "gcp_conn_id"
@@ -258,6 +287,7 @@ class GoogleBaseHook(BaseHook):
             "is_anonymous": BooleanField(
                 lazy_gettext("Anonymous credentials (ignores all other settings)"), default=False
             ),
+            "quota_project_id": StringField(lazy_gettext("Quota Project ID"), widget=BS3TextFieldWidget()),
         }
 
     @classmethod
@@ -272,11 +302,27 @@ class GoogleBaseHook(BaseHook):
         self,
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
+        *,
+        quota_project_id: str | None = None,
         **kwargs,
     ) -> None:
+        """
+        Initialize the Google Cloud Base Hook.
+
+        :param gcp_conn_id: The connection ID to use when fetching connection info.
+        :param impersonation_chain: Optional service account to impersonate using short-term
+            credentials.
+        :param quota_project_id: Optional Project ID to use for quota/billing purposes.
+            If None, no separate quota project is configured and the default behavior of the
+            credentials is used.
+        :param kwargs: Additional arguments to pass to parent constructor.
+        """
         super().__init__(**kwargs)
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
+        if quota_project_id is not None:
+            self._validate_quota_project(quota_project_id)
+        self.quota_project_id = quota_project_id
         self.extras: dict = self.get_connection(self.gcp_conn_id).extra_dejson
         self._cached_credentials: Credentials | None = None
         self._cached_project_id: str | None = None
@@ -339,6 +385,19 @@ class GoogleBaseHook(BaseHook):
             idp_extra_params_dict=idp_extra_params_dict,
         )
 
+        # Apply quota project before caching credentials
+        quota_project = self.quota_project_id or self._get_field("quota_project_id")
+        if quota_project and not is_anonymous:
+            self._validate_quota_project(quota_project)
+            if not hasattr(credentials, "with_quota_project"):
+                raise ValueError(
+                    f"Credentials of type {type(credentials).__name__} do not support "
+                    "quota project configuration. Please use a different authentication method "
+                    "or remove the quota_project_id setting."
+                )
+            credentials = credentials.with_quota_project(quota_project)
+
+        # Override project_id if set in extras
         overridden_project_id = self._get_field("project")
         if overridden_project_id:
             project_id = overridden_project_id
@@ -348,8 +407,65 @@ class GoogleBaseHook(BaseHook):
 
         return credentials, project_id
 
+    def _validate_quota_project(self, quota_project: str) -> None:
+        """
+        Validate the quota Project ID format.
+
+        :param quota_project: The quota Project ID to validate
+        :raises TypeError: If the quota Project ID is not a string
+        :raises ValueError: If the quota Project ID is empty or does not match the expected format
+        """
+        if not isinstance(quota_project, str):
+            raise TypeError(f"quota_project_id must be a string, got {type(quota_project)}")
+        if not quota_project.strip():
+            raise ValueError("quota_project_id cannot be empty")
+        # Check for valid GCP Project ID format
+        if not is_valid_gcp_project_id(quota_project):
+            raise ValueError(
+                f"Invalid quota_project_id '{quota_project}'. "
+                "Project IDs must be 6-30 characters long, start with a lowercase letter, "
+                "and can contain only lowercase letters, digits, and hyphens."
+            )
+
+    @staticmethod
+    def is_default_universe() -> bool:
+        global_universe_domain = os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", None)
+        if global_universe_domain in ("googleapis.com", "", None):
+            return True
+        return False
+
+    @staticmethod
+    def get_high_value_cookie_domain() -> str:
+        return os.getenv("GOOGLE_CLOUD_HIGH_VALUE_COOKIE_DOMAIN", "google.com")
+
+    def get_client_options(
+        self,
+        api_endpoint_override: str | None = None,
+    ) -> ClientOptions:
+        """Return the ClientOptions object for Google API."""
+        global_universe_domain = os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", None)
+
+        if api_endpoint_override:
+            if self.is_default_universe():
+                return ClientOptions(
+                    api_endpoint=api_endpoint_override,
+                )
+            self.log.info(
+                "Ignoring api_endpoint_override because the universe domain is not Google default universe."
+            )
+        if global_universe_domain:
+            return ClientOptions(
+                universe_domain=global_universe_domain,
+            )
+
+        return ClientOptions()
+
     def get_credentials(self) -> Credentials:
-        """Return the Credentials object for Google API."""
+        """
+        Return the Credentials object for Google API.
+
+        :return: Google Cloud credentials object
+        """
         credentials, _ = self.get_credentials_and_project_id()
         return credentials
 
@@ -406,7 +522,22 @@ class GoogleBaseHook(BaseHook):
         custom UI elements to the hook page, which allow admins to specify
         service_account, key_path, etc. They get formatted as shown below.
         """
-        return hasattr(self, "extras") and get_field(self.extras, f) or default
+        # New behavior: If default is _UNSET, parameter was not provided
+        # Check connection extras first, return None if not found (caller handles default)
+        if default is _UNSET:
+            if hasattr(self, "extras"):
+                value = get_field(self.extras, f)
+                if value is not None:
+                    return value
+            return None
+
+        # Old behavior (for backward compatibility):
+        # Check connection extras, but properly handle False values
+        if hasattr(self, "extras"):
+            value = get_field(self.extras, f)
+            if value is not None:
+                return value
+        return default
 
     @property
     def project_id(self) -> str:
@@ -700,6 +831,7 @@ class _CredentialsToken(Token):
         super().__init__(session=cast("Session", session), scopes=_scopes)
         self.credentials = credentials
         self.project = project
+        self.acquiring: asyncio.Task[None] | None = None
 
     @classmethod
     async def from_hook(
@@ -767,6 +899,7 @@ class GoogleBaseAsyncHook(BaseHook):
 
         self._hook_kwargs = kwargs
         self._sync_hook = None
+        super().__init__()
 
     async def get_sync_hook(self) -> Any:
         """Sync version of the Google Cloud Hook makes blocking calls in ``__init__``; don't inherit it."""

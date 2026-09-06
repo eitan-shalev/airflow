@@ -16,10 +16,9 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading, Link } from "@chakra-ui/react";
+import { Box, Link } from "@chakra-ui/react";
 import type { ColumnDef } from "@tanstack/react-table";
 import type { TFunction } from "i18next";
-import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useProviderServiceGetProviders } from "openapi/queries";
@@ -28,6 +27,7 @@ import { DataTable } from "src/components/DataTable";
 import { useTableURLState } from "src/components/DataTable/useTableUrlState";
 import { ErrorAlert } from "src/components/ErrorAlert";
 import { urlRegex } from "src/constants/urlRegex";
+import { useDocumentTitle } from "src/utils";
 
 const createColumns = (translate: TFunction): Array<ColumnDef<ProviderResponse>> => [
   {
@@ -36,7 +36,10 @@ const createColumns = (translate: TFunction): Array<ColumnDef<ProviderResponse>>
       <Link
         aria-label={original.package_name}
         color="fg.info"
-        href={`https://airflow.apache.org/docs/${original.package_name}/${original.version}/`}
+        href={
+          original.documentation_url ??
+          `https://airflow.apache.org/docs/${original.package_name}/${original.version}/`
+        }
         rel="noopener noreferrer"
         target="_blank"
       >
@@ -75,9 +78,12 @@ const createColumns = (translate: TFunction): Array<ColumnDef<ProviderResponse>>
 
 export const Providers = () => {
   const { t: translate } = useTranslation(["admin", "common"]);
+
+  useDocumentTitle(translate("common:admin.Providers"));
+
   const { setTableURLState, tableURLState } = useTableURLState();
 
-  const columns = useMemo(() => createColumns(translate), [translate]);
+  const columns = createColumns(translate);
 
   const { pagination } = tableURLState;
 
@@ -87,14 +93,13 @@ export const Providers = () => {
   });
 
   return (
-    <Box p={2}>
-      <Heading>{translate("common:admin.Providers")}</Heading>
+    <Box px={2}>
       <DataTable
         columns={columns}
         data={data?.providers ?? []}
         errorMessage={<ErrorAlert error={error} />}
         initialState={tableURLState}
-        modelName={translate("common:admin.Providers")}
+        modelName="admin:providers.provider"
         onStateChange={setTableURLState}
         total={data?.total_entries}
       />

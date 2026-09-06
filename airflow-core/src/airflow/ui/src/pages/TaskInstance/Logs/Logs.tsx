@@ -16,22 +16,25 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading, VStack } from "@chakra-ui/react";
+import { Box, Heading } from "@chakra-ui/react";
 import { useState } from "react";
-import { useHotkeys } from "react-hotkeys-hook";
 import { useTranslation } from "react-i18next";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useLocalStorage } from "usehooks-ts";
 
 import { useTaskInstanceServiceGetMappedTaskInstance } from "openapi/queries";
-import { Dialog } from "src/components/ui";
+import { Modal } from "src/components/ui";
+import { LOG_SHOW_SOURCE_KEY, LOG_SHOW_TIMESTAMP_KEY, LOG_WRAP_KEY } from "src/constants/localStorage";
 import { SearchParamsKeys } from "src/constants/searchParams";
+import { SHORTCUTS } from "src/context/keyboardShortcuts";
+import { useShortcut } from "src/hooks/useShortcut";
 import { useConfig } from "src/queries/useConfig";
 import { useLogs } from "src/queries/useLogs";
 
 import { ExternalLogLink } from "./ExternalLogLink";
-import { TaskLogContent } from "./TaskLogContent";
-import { TaskLogHeader } from "./TaskLogHeader";
+import { TaskLogContent, type TaskLogContentProps } from "./TaskLogContent";
+import { TaskLogHeader, type TaskLogHeaderProps } from "./TaskLogHeader";
+import { getDownloadText } from "./utils";
 
 export const Logs = () => {
   const { dagId = "", mapIndex = "-1", runId = "", taskId = "" } = useParams();
@@ -72,40 +75,20 @@ export const Logs = () => {
   const tryNumber = tryNumberParam === null ? taskInstance?.try_number : parseInt(tryNumberParam, 10);
 
   const defaultWrap = Boolean(useConfig("default_wrap"));
-  const defaultShowTimestamp = Boolean(true);
 
-  const [wrap, setWrap] = useLocalStorage<boolean>("log_wrap", defaultWrap);
-  const [showTimestamp, setShowTimestamp] = useLocalStorage<boolean>(
-    "log_show_timestamp",
-    defaultShowTimestamp,
-  );
-  const [showSource, setShowSource] = useLocalStorage<boolean>("log_show_source", true);
+  const [wrap, setWrap] = useLocalStorage<boolean>(LOG_WRAP_KEY, defaultWrap);
+  const [showTimestamp, setShowTimestamp] = useLocalStorage<boolean>(LOG_SHOW_TIMESTAMP_KEY, true);
+  const [showSource, setShowSource] = useLocalStorage<boolean>(LOG_SHOW_SOURCE_KEY, false);
   const [fullscreen, setFullscreen] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
-  const toggleWrap = () => setWrap(!wrap);
-  const toggleTimestamp = () => setShowTimestamp(!showTimestamp);
-  const toggleSource = () => setShowSource(!showSource);
-  const toggleFullscreen = () => setFullscreen(!fullscreen);
-  const toggleExpanded = () => setExpanded((act) => !act);
-
-  useHotkeys("w", toggleWrap);
-  useHotkeys("f", toggleFullscreen);
-  useHotkeys("e", toggleExpanded);
-  useHotkeys("t", toggleTimestamp);
-  useHotkeys("s", toggleSource);
-
-  const onOpenChange = () => {
-    setFullscreen(false);
-  };
-
   const {
-    data,
     error: logError,
+    fetchedData,
     isLoading: isLoadingLogs,
+    parsedData,
   } = useLogs({
     dagId,
-    expanded,
     logLevelFilters,
     showSource,
     showTimestamp,
@@ -114,26 +97,143 @@ export const Logs = () => {
     tryNumber,
   });
 
+  const downloadTextLines = getDownloadText({
+    fetchedData,
+    logLevelFilters,
+    showSource,
+    showTimestamp,
+    sourceFilters,
+    translate,
+  });
+
+  const getLogString = () => downloadTextLines.filter((line) => line !== "").join("\n");
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const [activeSearchIndex, setActiveSearchIndex] = useState(0);
+
+  const searchMatchIndices = (() => {
+    if (!searchQuery) {
+      return [];
+    }
+    const query = searchQuery.toLowerCase();
+    const indices: Array<number> = [];
+
+    parsedData.searchableText.forEach((line, index) => {
+      if (line.toLowerCase().includes(query)) {
+        indices.push(index);
+      }
+    });
+
+    return indices;
+  })();
+
+  const handleSearchChange = (query: string) => {
+    setSearchQuery(query);
+    setActiveSearchIndex(0);
+  };
+
+  const handleSearchNext = () => {
+    if (searchMatchIndices.length > 0) {
+      setActiveSearchIndex((prev) => (prev + 1) % searchMatchIndices.length);
+    }
+  };
+
+  const handleSearchPrevious = () => {
+    if (searchMatchIndices.length > 0) {
+      setActiveSearchIndex((prev) => (prev - 1 + searchMatchIndices.length) % searchMatchIndices.length);
+    }
+  };
+
+  const downloadLogs = () => {
+    const logContent = getLogString();
+    const element = document.createElement("a");
+
+    element.href = URL.createObjectURL(new Blob([logContent], { type: "text/plain" }));
+    element.download = `logs_${taskInstance?.dag_id}_${taskInstance?.dag_run_id}_${taskInstance?.task_id}_${taskInstance?.map_index}_${taskInstance?.try_number}.txt`;
+    document.body.append(element);
+    element.click();
+    element.remove();
+  };
+
+  const toggleWrap = () => setWrap(!wrap);
+  const toggleTimestamp = () => setShowTimestamp(!showTimestamp);
+  const toggleSource = () => setShowSource(!showSource);
+  const toggleFullscreen = () => setFullscreen(!fullscreen);
+  const toggleExpanded = () => setExpanded((act) => !act);
+
+  useShortcut({
+    ...SHORTCUTS.logs.toggleWrap,
+    callback: toggleWrap,
+  });
+  useShortcut({
+    ...SHORTCUTS.logs.toggleFullscreen,
+    callback: toggleFullscreen,
+  });
+  useShortcut({
+    ...SHORTCUTS.logs.toggleExpand,
+    callback: toggleExpanded,
+  });
+  useShortcut({
+    ...SHORTCUTS.logs.toggleTimestamp,
+    callback: toggleTimestamp,
+  });
+  useShortcut({
+    ...SHORTCUTS.logs.toggleSource,
+    callback: toggleSource,
+  });
+  useShortcut({
+    ...SHORTCUTS.logs.downloadLogs,
+    callback: downloadLogs,
+  });
+
+  const onOpenChange = () => {
+    setFullscreen(false);
+  };
+
   const externalLogName = useConfig("external_log_name") as string;
   const showExternalLogRedirect = Boolean(useConfig("show_external_log_redirect"));
 
+  const logHeaderProps: TaskLogHeaderProps = {
+    downloadLogs,
+    expanded,
+    getLogString,
+    onSelectTryNumber,
+    search: {
+      currentMatchIndex: activeSearchIndex,
+      onSearchChange: handleSearchChange,
+      onSearchNext: handleSearchNext,
+      onSearchPrevious: handleSearchPrevious,
+      searchQuery,
+      totalMatches: searchMatchIndices.length,
+    },
+    showSource,
+    showTimestamp,
+    sourceOptions: parsedData.sources,
+    taskInstance,
+    toggleExpanded,
+    toggleFullscreen,
+    toggleSource,
+    toggleTimestamp,
+    toggleWrap,
+    tryNumber,
+    wrap,
+  };
+
+  const logContentProps: TaskLogContentProps = {
+    currentMatchLineIndex: searchMatchIndices[activeSearchIndex],
+    error,
+    expanded,
+    isLoading: isLoading || isLoadingLogs,
+    logError,
+    parsedLogs: parsedData.parsedLogs ?? [],
+    searchMatchIndices: searchQuery ? new Set(searchMatchIndices) : undefined,
+    searchQuery: searchQuery || undefined,
+    wrap,
+  };
+
   return (
     <Box display="flex" flexDirection="column" h="100%" p={2}>
-      <TaskLogHeader
-        expanded={expanded}
-        onSelectTryNumber={onSelectTryNumber}
-        showSource={showSource}
-        showTimestamp={showTimestamp}
-        sourceOptions={data.sources}
-        taskInstance={taskInstance}
-        toggleExpanded={toggleExpanded}
-        toggleFullscreen={toggleFullscreen}
-        toggleSource={toggleSource}
-        toggleTimestamp={toggleTimestamp}
-        toggleWrap={toggleWrap}
-        tryNumber={tryNumber}
-        wrap={wrap}
-      />
+      <TaskLogHeader {...logHeaderProps} />
       {showExternalLogRedirect && externalLogName && taskInstance ? (
         tryNumber === undefined ? (
           <p>{translate("logs.noTryNumber")}</p>
@@ -145,49 +245,27 @@ export const Logs = () => {
           />
         )
       ) : undefined}
-      <TaskLogContent
-        error={error}
-        isLoading={isLoading || isLoadingLogs}
-        logError={logError}
-        parsedLogs={data.parsedLogs ?? []}
-        wrap={wrap}
-      />
-      <Dialog.Root onOpenChange={onOpenChange} open={fullscreen} scrollBehavior="inside" size="full">
-        <Dialog.Content backdrop>
-          <Dialog.Header>
-            <VStack alignItems="flex-start" gap={2}>
-              <Heading size="xl">{taskId}</Heading>
-              <TaskLogHeader
-                expanded={expanded}
-                isFullscreen
-                onSelectTryNumber={onSelectTryNumber}
-                showSource={showSource}
-                showTimestamp={showTimestamp}
-                taskInstance={taskInstance}
-                toggleExpanded={toggleExpanded}
-                toggleFullscreen={toggleFullscreen}
-                toggleSource={toggleSource}
-                toggleTimestamp={toggleTimestamp}
-                toggleWrap={toggleWrap}
-                tryNumber={tryNumber}
-                wrap={wrap}
-              />
-            </VStack>
-          </Dialog.Header>
-
-          <Dialog.CloseTrigger />
-
-          <Dialog.Body display="flex" flexDirection="column">
-            <TaskLogContent
-              error={error}
-              isLoading={isLoading || isLoadingLogs}
-              logError={logError}
-              parsedLogs={data.parsedLogs ?? []}
-              wrap={wrap}
-            />
-          </Dialog.Body>
-        </Dialog.Content>
-      </Dialog.Root>
+      <TaskLogContent {...logContentProps} />
+      <Modal
+        bodyProps={{ display: "flex", flexDirection: "column" }}
+        headerProps={{
+          children: (
+            <Box display="flex" flexDirection="column" width="100%">
+              <Heading mb={2} size="xl">
+                {taskId}
+              </Heading>
+              <TaskLogHeader {...logHeaderProps} isFullscreen />
+            </Box>
+          ),
+          width: "100%",
+        }}
+        onOpenChange={onOpenChange}
+        open={fullscreen}
+        scrollBehavior="inside"
+        size="full"
+      >
+        <TaskLogContent {...logContentProps} />
+      </Modal>
     </Box>
   );
 };

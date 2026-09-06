@@ -24,15 +24,19 @@ from unittest import mock
 import pandas as pd
 import polars as pl
 import pytest
+from packaging.version import Version
 
-from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
+from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.models import Connection
 from airflow.providers.amazon.aws.transfers.sql_to_s3 import SqlToS3Operator
+from airflow.providers.common.compat.sdk import AirflowException
+
+PANDAS_3_PLUS = Version(pd.__version__).major >= 3
 
 
 class TestSqlToS3Operator:
     @pytest.mark.parametrize(
-        "file_format, dtype_backend, df_kwargs, expected_key_suffix",
+        ("file_format", "dtype_backend", "df_kwargs", "expected_key_suffix"),
         [
             ("csv", "numpy_nullable", {"index": False, "header": False}, ".csv"),
             ("csv", "pyarrow", {"index": False, "header": False}, ".csv"),
@@ -155,7 +159,12 @@ class TestSqlToS3Operator:
         )
         dirty_df = pd.DataFrame({"strings": ["a", "b", None], "ints": [1, 2, None]})
         op._fix_dtypes(df=dirty_df, file_format=op.file_format)
-        assert dirty_df["strings"].values[2] == params["null_string_result"]
+        if PANDAS_3_PLUS:
+            # pandas 3 infers a str column rather than object, and keeps its missing values as NA
+            # instead of the object None (csv) or the "None" it used to be stringified to (parquet)
+            assert pd.isna(dirty_df["strings"].values[2])
+        else:
+            assert dirty_df["strings"].values[2] == params["null_string_result"]
         assert dirty_df["ints"].dtype.kind == "i"
 
     @mock.patch("airflow.providers.amazon.aws.transfers.sql_to_s3.S3Hook")
@@ -366,7 +375,7 @@ class TestSqlToS3Operator:
         assert hook.log_sql == op.sql_hook_params["log_sql"]
 
     @pytest.mark.parametrize(
-        "df_type_param,expected_df_type",
+        ("df_type_param", "expected_df_type"),
         [
             pytest.param("polars", "polars", id="with-polars"),
             pytest.param("pandas", "pandas", id="with-pandas"),
@@ -410,7 +419,7 @@ class TestSqlToS3Operator:
         )
 
     @pytest.mark.parametrize(
-        "df_type,input_df_creator",
+        ("df_type", "input_df_creator"),
         [
             pytest.param(
                 "pandas",
@@ -450,7 +459,7 @@ class TestSqlToS3Operator:
             assert group_name in ["A", "B"]
 
     @pytest.mark.parametrize(
-        "kwargs,expected_warning,expected_error,expected_read_kwargs",
+        ("kwargs", "expected_warning", "expected_error", "expected_read_kwargs"),
         [
             pytest.param(
                 {"read_pd_kwargs": {"dtype_backend": "pyarrow"}},
@@ -517,7 +526,7 @@ class TestSqlToS3Operator:
                 assert op.read_kwargs == expected_read_kwargs
 
     @pytest.mark.parametrize(
-        "df_type,should_call_fix_dtypes",
+        ("df_type", "should_call_fix_dtypes"),
         [
             pytest.param("pandas", True, id="pandas-calls-fix-dtypes"),
             pytest.param("polars", False, id="polars-skips-fix-dtypes"),
@@ -557,7 +566,7 @@ class TestSqlToS3Operator:
             mock_fix_dtypes.assert_not_called()
 
     @pytest.mark.parametrize(
-        "kwargs,expected_warning,expected_read_kwargs,expected_df_kwargs",
+        ("kwargs", "expected_warning", "expected_read_kwargs", "expected_df_kwargs"),
         [
             pytest.param(
                 {
@@ -615,7 +624,7 @@ class TestSqlToS3Operator:
         assert op.df_kwargs == expected_df_kwargs
 
     @pytest.mark.parametrize(
-        "fmt, df_kwargs, expected_key",
+        ("fmt", "df_kwargs", "expected_key"),
         [
             ("csv", {"compression": "gzip", "index": False}, "data.csv.gz"),
             ("csv", {"index": False}, "data.csv"),
@@ -652,7 +661,7 @@ class TestSqlToS3Operator:
         assert uploaded_key == expected_key
 
     @pytest.mark.parametrize(
-        "file_format, df_kwargs, expected_suffix",
+        ("file_format", "df_kwargs", "expected_suffix"),
         [
             ("csv", {"compression": "gzip", "index": False}, ".csv.gz"),
             ("csv", {"index": False}, ".csv"),

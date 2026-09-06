@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from dateutil.relativedelta import relativedelta
 from pendulum import DateTime
 
-from airflow._shared.timezones.timezone import coerce_datetime, utcnow
+from airflow._shared.timezones.timezone import coerce_datetime, parse_timezone, utcnow
 from airflow.timetables._cron import CronMixin
 from airflow.timetables._delta import DeltaMixin
 from airflow.timetables.base import DagRunInfo, DataInterval, Timetable
@@ -110,6 +110,20 @@ class _DataIntervalTimetable(Timetable):
             else:
                 # Data interval starts from the end of the previous interval.
                 start = align_last_data_interval_end
+
+            # CronTriggerTimetable stores its runs as point-in-time intervals
+            # (start == end == logical_date). After a switch to a
+            # CronDataIntervalTimetable the aligned `start` lands back on that
+            # same logical_date, so without this guard we'd propose a run
+            # identical to the existing one — which collides with the
+            # (dag_id, logical_date) unique constraint and leaves the scheduler
+            # looping on "run already exists; skipping dagrun creation" until
+            # the next period elapses. Advance one period to skip past it.
+            if (
+                last_automated_data_interval.start == last_automated_data_interval.end
+                and start == last_automated_data_interval.start
+            ):
+                start = self._get_next(start)
         if restriction.latest is not None and start > restriction.latest:
             return None
         end = self._get_next(start)
@@ -132,12 +146,10 @@ class CronDataIntervalTimetable(CronMixin, _DataIntervalTimetable):
 
     @classmethod
     def deserialize(cls, data: dict[str, Any]) -> Timetable:
-        from airflow.serialization.serialized_objects import decode_timezone
-
-        return cls(data["expression"], decode_timezone(data["timezone"]))
+        return cls(data["expression"], parse_timezone(data["timezone"]))
 
     def serialize(self) -> dict[str, Any]:
-        from airflow.serialization.serialized_objects import encode_timezone
+        from airflow.serialization.encoders import encode_timezone
 
         return {"expression": self._expression, "timezone": encode_timezone(self._timezone)}
 
@@ -184,25 +196,15 @@ class DeltaDataIntervalTimetable(DeltaMixin, _DataIntervalTimetable):
 
     @classmethod
     def deserialize(cls, data: dict[str, Any]) -> Timetable:
-        from airflow.serialization.serialized_objects import decode_relativedelta
+        from airflow.serialization.decoders import decode_relativedelta
 
         delta = data["delta"]
         if isinstance(delta, dict):
             return cls(decode_relativedelta(delta))
         return cls(datetime.timedelta(seconds=delta))
 
-    def __eq__(self, other: object) -> bool:
-        """
-        Return if the offsets match.
-
-        This is only for testing purposes and should not be relied on otherwise.
-        """
-        if not isinstance(other, DeltaDataIntervalTimetable):
-            return NotImplemented
-        return self._delta == other._delta
-
     def serialize(self) -> dict[str, Any]:
-        from airflow.serialization.serialized_objects import encode_relativedelta
+        from airflow.serialization.encoders import encode_relativedelta
 
         delta: Any
         if isinstance(self._delta, datetime.timedelta):
@@ -222,8 +224,26 @@ class DeltaDataIntervalTimetable(DeltaMixin, _DataIntervalTimetable):
             + delta.seconds
         )
 
-    def _round(self, dt: DateTime) -> DateTime:
-        """Round the given time to the nearest interval."""
+    def _round(self, dt: DateTime, anchor: DateTime) -> DateTime:
+        """
+        Floor ``dt`` to the latest schedule boundary at or before it.
+
+        Months/years have no fixed second count, so the epoch-grid rounding
+        used for fixed deltas would drift. For them we anchor on ``anchor``
+        (the start_date) and advance one period at a time, so boundaries match
+        the catchup=True grid -- relativedelta day-clamping is path-dependent
+        (e.g. Jan 31 -> Feb 28 -> Mar 28), so a multiplied jump would land
+        elsewhere. Fixed deltas keep the historical epoch rounding and ignore
+        ``anchor``.
+
+        ``anchor`` must be at or before ``dt``; otherwise the forward stepping
+        cannot reach ``dt`` and the result is meaningless.
+        """
+        if isinstance(self._delta, relativedelta) and (self._delta.months or self._delta.years):
+            boundary = anchor
+            while self._get_next(boundary) <= dt:
+                boundary = self._get_next(boundary)
+            return boundary
         if isinstance(self._delta, datetime.timedelta):
             delta_in_seconds = self._delta.total_seconds()
         else:
@@ -241,8 +261,8 @@ class DeltaDataIntervalTimetable(DeltaMixin, _DataIntervalTimetable):
 
         This is slightly different from the cron version at terminal values.
         """
-        round_current_time = self._round(coerce_datetime(utcnow()))
-        new_start = self._get_prev(round_current_time)
+        now = coerce_datetime(utcnow())
+        new_start = self._get_prev(self._round(now, earliest or now))
         if earliest is None:
             return new_start
         return max(new_start, earliest)

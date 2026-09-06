@@ -49,10 +49,12 @@ except ImportError:
     # Compatibility for Airflow < 3.1
     from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
-from tests_common.test_utils.api_client_helpers import create_airflow_connection, delete_airflow_connection
+from system.google.gcp_api_client_helpers import create_airflow_connection, delete_airflow_connection
 
 DAG_ID = "local_to_drive"
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
+
+IS_COMPOSER = bool(os.environ.get("COMPOSER_ENVIRONMENT", ""))
 
 FILE_NAME_1 = "test1"
 FILE_NAME_2 = "test2"
@@ -84,6 +86,7 @@ with DAG(
         create_airflow_connection(
             connection_id=connection_id,
             connection_conf=connection,
+            is_composer=IS_COMPOSER,
         )
 
     create_connection_task = create_connection(connection_id=CONNECTION_ID)
@@ -118,7 +121,7 @@ with DAG(
         if files := root_path["files"]:
             batch = service.new_batch_http_request()
             for file in files:
-                log.info("Preparing to remove file: {}", file)
+                log.info("Preparing to remove file: %s", file)
                 batch.add(service.files().delete(fileId=file["id"]))
             batch.execute()
             log.info("Selected files removed.")
@@ -127,7 +130,7 @@ with DAG(
 
     @task(task_id="delete_connection")
     def delete_connection(connection_id: str) -> None:
-        delete_airflow_connection(connection_id=connection_id)
+        delete_airflow_connection(connection_id=connection_id, is_composer=IS_COMPOSER)
 
     delete_connection_task = delete_connection(connection_id=CONNECTION_ID)
 
@@ -150,5 +153,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

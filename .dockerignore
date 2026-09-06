@@ -39,6 +39,8 @@
 !task-sdk/
 !airflow-ctl/
 !go-sdk/
+!java-sdk/
+!ts-sdk/
 
 # Add all "test" distributions
 !tests
@@ -46,7 +48,8 @@
 !docker-tests
 !helm-tests
 !kubernetes-tests
-!task-sdk-tests
+!task-sdk-integration-tests
+!airflow-ctl-tests
 !shared/
 !airflow-e2e-tests
 
@@ -84,6 +87,7 @@
 
 # Setup/version configuration
 !pyproject.toml
+!uv.lock
 !manifests
 !generated
 
@@ -139,6 +143,7 @@ airflow/www/node_modules
 
 # But ensure UI dist files are included
 !airflow-core/src/airflow/ui/dist
+!airflow-core/src/airflow/api_fastapi/auth/managers/simple/ui/dist
 !providers/fab/src/airflow/providers/fab/www/dist
 !providers/edge3/src/airflow/providers/edge3/plugins/www/dist
 

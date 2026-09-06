@@ -22,17 +22,13 @@ from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from airflow_breeze.global_constants import (
-    ALL_PYPROJECT_TOML_FILES,
-    FILES_FOR_REBUILD_CHECK,
-    UPDATE_PROVIDER_DEPENDENCIES_SCRIPT,
-)
-from airflow_breeze.utils.console import get_console
+from airflow_breeze.global_constants import ALL_PYPROJECT_TOML_FILES, FILES_FOR_REBUILD_CHECK
+from airflow_breeze.utils.console import console_print
 from airflow_breeze.utils.path_utils import AIRFLOW_ROOT_PATH
+from airflow_breeze.utils.provider_dependencies import regenerate_provider_dependencies_once
 from airflow_breeze.utils.shared_options import get_verbose
 
 if TYPE_CHECKING:
@@ -82,6 +78,19 @@ def check_md5_sum_for_file(file_to_check: str, md5sum_cache_dir: Path, update: b
     return is_modified
 
 
+def calculate_ci_sources_hash() -> str:
+    """
+    Calculates aggregated hash of all the files that trigger CI image rebuild when changed.
+
+    Only relative paths and file contents are hashed, so the result is stable across
+    checkouts/worktrees of the same sources.
+    """
+    hash_md5 = hashlib.md5()
+    for file in FILES_FOR_REBUILD_CHECK:
+        hash_md5.update(f"{file}:{generate_md5(AIRFLOW_ROOT_PATH / file)}\n".encode())
+    return hash_md5.hexdigest()
+
+
 def calculate_md5_checksum_for_files(
     md5sum_cache_dir: Path, update: bool = False, skip_provider_dependencies_check: bool = False
 ) -> tuple[list[str], list[str]]:
@@ -105,15 +114,16 @@ def calculate_md5_checksum_for_files(
             if check_md5_sum_for_file(file, md5sum_cache_dir, True):
                 modified_pyproject_toml_files.append(file)
         if modified_pyproject_toml_files:
-            get_console().print(
+            console_print(
                 "[info]Attempting to generate provider dependencies. "
                 f"{len(modified_pyproject_toml_files)} pyproject.toml file(s) changed since last check."
             )
             if get_verbose():
-                get_console().print(
+                console_print(
                     [os.fspath(file.relative_to(AIRFLOW_ROOT_PATH)) for file in modified_pyproject_toml_files]
                 )
-            subprocess.check_call(["uv", "run", UPDATE_PROVIDER_DEPENDENCIES_SCRIPT.as_posix()])
+            # Delegate to the shared helper that ensures regeneration runs only once
+            regenerate_provider_dependencies_once()
     for file in FILES_FOR_REBUILD_CHECK:
         is_modified = check_md5_sum_for_file(file, md5sum_cache_dir, update)
         if is_modified:
@@ -141,26 +151,26 @@ def md5sum_check_if_build_is_needed(
     if modified_files:
         if build_ci_params.skip_image_upgrade_check:
             if build_ci_params.warn_image_upgrade_needed:
-                get_console().print(
+                console_print(
                     "\n[warning]You are skipping the image upgrade check, but the image needs an upgrade. "
                     "This might lead to out-dated results of the check![/]"
                 )
-                get_console().print(
+                console_print(
                     f"[info]Consider running `breeze ci-image build --python {build_ci_params.python}` "
                     f"at earliest convenience![/]\n"
                 )
             return False
-        get_console().print(
+        console_print(
             f"[warning]The following important files are modified in {AIRFLOW_ROOT_PATH} "
             f"since last time image was built: [/]\n\n"
         )
         for file in modified_files:
-            get_console().print(f" * [info]{file}[/]")
-        get_console().print("\n[warning]Likely CI image needs rebuild[/]\n")
+            console_print(f" * [info]{file}[/]")
+        console_print("\n[warning]Likely CI image needs rebuild[/]\n")
         return True
     if build_ci_params.skip_image_upgrade_check:
         return False
-    get_console().print(
+    console_print(
         "[info]Docker image build is not needed for CI build as no important files are changed! "
         "You can add --force-build to force it[/]"
     )

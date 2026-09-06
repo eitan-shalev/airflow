@@ -30,7 +30,7 @@ from airflow.providers.databricks.operators.databricks import (
 from airflow.providers.databricks.operators.databricks_workflow import DatabricksWorkflowTaskGroup
 from airflow.utils.timezone import datetime
 
-EXECUTION_TIMEOUT = int(os.getenv("EXECUTION_TIMEOUT", 6))
+EXECUTION_TIMEOUT = int(os.getenv("EXECUTION_TIMEOUT", str(6)))
 
 DATABRICKS_CONN_ID = os.getenv("DATABRICKS_CONN_ID", "databricks_default")
 DATABRICKS_NOTIFICATION_EMAIL = os.getenv("DATABRICKS_NOTIFICATION_EMAIL", "your_email@serviceprovider.com")
@@ -151,5 +151,5 @@ with dag:
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

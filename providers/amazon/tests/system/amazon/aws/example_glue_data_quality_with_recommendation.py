@@ -96,12 +96,22 @@ def glue_data_quality_recommendation_workflow():
         },
         role=test_context[ROLE_ARN_KEY],
         rule_set_names=[rule_set_name],
+        # The ruleset is generated dynamically by Glue's recommendation engine and is
+        # non-deterministic, so recommended rules may not always pass against the sample
+        # data. This system test only needs to exercise the operators/sensors end-to-end,
+        # not assert that every recommended rule passes, so do not fail on rule failures.
+        verify_result_status=False,
     )
     start_evaluation_run.wait_for_completion = False
 
     await_evaluation_run_sensor = GlueDataQualityRuleSetEvaluationRunSensor(
         task_id="await_evaluation_run_sensor",
         evaluation_run_id=start_evaluation_run.output,
+        # The ruleset is generated dynamically by Glue's recommendation engine and is
+        # non-deterministic, so recommended rules may not always pass against the sample
+        # data. This system test only needs to exercise the operators/sensors end-to-end,
+        # not assert that every recommended rule passes, so do not fail on rule failures.
+        verify_result_status=False,
     )
 
     chain(
@@ -119,7 +129,6 @@ with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),
-    tags=["example"],
     catchup=False,
 ) as dag:
     test_context = sys_test_context_task()
@@ -217,5 +226,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

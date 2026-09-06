@@ -22,11 +22,13 @@ from collections.abc import Container, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException, AirflowSkipException
+from airflow.providers.common.compat.sdk import AirflowException, AirflowSkipException, BaseOperator, conf
 from airflow.providers.ssh.hooks.ssh import SSHHook
-from airflow.providers.ssh.version_compat import BaseOperator
-from airflow.utils.types import NOTSET, ArgNotSet
+
+try:
+    from airflow.sdk.definitions._internal.types import NOTSET, ArgNotSet
+except ImportError:
+    from airflow.utils.types import NOTSET, ArgNotSet  # type: ignore[attr-defined,no-redef]
 
 if TYPE_CHECKING:
     from paramiko.client import SSHClient
@@ -98,8 +100,6 @@ class SSHOperator(BaseOperator):
         super().__init__(**kwargs)
         if ssh_hook and isinstance(ssh_hook, SSHHook):
             self.ssh_hook = ssh_hook
-            if remote_host is not None:
-                self.ssh_hook.remote_host = remote_host
         self.ssh_conn_id = ssh_conn_id
         self.remote_host = remote_host
         self.command = command
@@ -121,19 +121,19 @@ class SSHOperator(BaseOperator):
         """Create SSHHook to run commands on remote host."""
         if self.ssh_conn_id:
             self.log.info("ssh_hook is not provided or invalid. Trying ssh_conn_id to create SSHHook.")
-            hook = SSHHook(
-                ssh_conn_id=self.ssh_conn_id,
-                conn_timeout=self.conn_timeout,
-                cmd_timeout=self.cmd_timeout,
-                banner_timeout=self.banner_timeout,
-            )
-            if self.remote_host is not None:
+            if self.remote_host:
                 self.log.info(
                     "remote_host is provided explicitly. "
                     "It will replace the remote_host which was defined "
                     "in ssh_hook or predefined in connection of ssh_conn_id."
                 )
-                hook.remote_host = self.remote_host
+            hook = SSHHook(
+                ssh_conn_id=self.ssh_conn_id,
+                remote_host=self.remote_host or "",
+                conn_timeout=self.conn_timeout,
+                cmd_timeout=self.cmd_timeout,
+                banner_timeout=self.banner_timeout,
+            )
             return hook
         raise AirflowException("Cannot operate without ssh_hook or ssh_conn_id.")
 
@@ -165,6 +165,9 @@ class SSHOperator(BaseOperator):
         result: bytes | str
         if self.command is None:
             raise AirflowException("SSH operator error: SSH command not specified. Aborting.")
+
+        if self.remote_host:
+            self.ssh_hook.remote_host = self.remote_host
 
         # Forcing get_pty to True if the command begins with "sudo".
         self.get_pty = self.command.startswith("sudo") or self.get_pty

@@ -21,10 +21,9 @@ import datetime
 import pickle
 from copy import deepcopy
 from unittest import mock
-from unittest.mock import MagicMock
 
 import pytest
-from kubernetes.client import models as k8s
+from kubernetes.client import Configuration, models as k8s
 from sqlalchemy import text
 from sqlalchemy.exc import StatementError
 
@@ -36,14 +35,16 @@ from airflow.serialization.serialized_objects import BaseSerialization
 from airflow.settings import Session
 from airflow.utils.sqlalchemy import (
     ExecutorConfigType,
+    apply_regex_query_timeout,
     ensure_pod_is_valid_after_unpickling,
-    is_sqlalchemy_v1,
+    get_dialect_name,
     prohibit_commit,
     with_row_locks,
 )
 from airflow.utils.state import State
 from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
+from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.dag import sync_dag_to_db
 
 pytestmark = pytest.mark.db_test
@@ -52,13 +53,40 @@ pytestmark = pytest.mark.db_test
 TEST_POD = k8s.V1Pod(spec=k8s.V1PodSpec(containers=[k8s.V1Container(name="base")]))
 
 
+class TestGetDialectName:
+    def test_returns_dialect_name_when_present(self, mocker):
+        mock_session = mocker.Mock()
+        mock_bind = mocker.Mock()
+        mock_bind.dialect.name = "postgresql"
+        mock_session.get_bind.return_value = mock_bind
+
+        assert get_dialect_name(mock_session) == "postgresql"
+
+    def test_raises_when_no_bind(self, mocker):
+        mock_session = mocker.Mock()
+        mock_session.get_bind.return_value = None
+
+        with pytest.raises(ValueError, match="No bind/engine is associated"):
+            get_dialect_name(mock_session)
+
+    def test_returns_none_when_dialect_has_no_name(self, mocker):
+        mock_session = mocker.Mock()
+        mock_bind = mocker.Mock()
+        # simulate dialect object without `name` attribute
+        mock_bind.dialect = mock.Mock()
+        delattr(mock_bind.dialect, "name") if hasattr(mock_bind.dialect, "name") else None
+        mock_session.get_bind.return_value = mock_bind
+
+        assert get_dialect_name(mock_session) is None
+
+
 class TestSqlAlchemyUtils:
     def setup_method(self):
         session = Session()
 
         # make sure NOT to run in UTC. Only postgres supports storing
         # timezone information in the datetime field
-        if session.bind.dialect.name == "postgresql":
+        if get_dialect_name(session) == "postgresql":
             session.execute(text("SET timezone='Europe/Amsterdam'"))
 
         self.session = session
@@ -124,7 +152,7 @@ class TestSqlAlchemyUtils:
         dag.clear()
 
     @pytest.mark.parametrize(
-        "dialect, supports_for_update_of, use_row_level_lock_conf, expected_use_row_level_lock",
+        ("dialect", "supports_for_update_of", "use_row_level_lock_conf", "expected_use_row_level_lock"),
         [
             ("postgresql", True, True, True),
             ("postgresql", True, False, False),
@@ -142,6 +170,7 @@ class TestSqlAlchemyUtils:
         session = mock.Mock()
         session.bind.dialect.name = dialect
         session.bind.dialect.supports_for_update_of = supports_for_update_of
+        session.get_bind.return_value = session.bind
         with mock.patch("airflow.utils.sqlalchemy.USE_ROW_LEVEL_LOCKING", use_row_level_lock_conf):
             returned_value = with_row_locks(query=query, session=session, nowait=True)
 
@@ -192,7 +221,7 @@ class TestSqlAlchemyUtils:
 
 class TestExecutorConfigType:
     @pytest.mark.parametrize(
-        "input, expected",
+        ("input", "expected"),
         [
             ("anything", "anything"),
             (
@@ -206,13 +235,13 @@ class TestExecutorConfigType:
             ),
         ],
     )
-    def test_bind_processor(self, input, expected):
+    def test_bind_processor(self, input, expected, mocker):
         """
         The returned bind processor should pickle the object as is, unless it is a dictionary with
         a pod_override node, in which case it should run it through BaseSerialization.
         """
         config_type = ExecutorConfigType()
-        mock_dialect = MagicMock()
+        mock_dialect = mocker.MagicMock()
         mock_dialect.dbapi = None
         process = config_type.bind_processor(mock_dialect)
         assert pickle.loads(process(input)) == expected
@@ -239,13 +268,13 @@ class TestExecutorConfigType:
             ),
         ],
     )
-    def test_result_processor(self, input):
+    def test_result_processor(self, input, mocker):
         """
         The returned bind processor should pickle the object as is, unless it is a dictionary with
         a pod_override node whose value was serialized with BaseSerialization.
         """
         config_type = ExecutorConfigType()
-        mock_dialect = MagicMock()
+        mock_dialect = mocker.MagicMock()
         mock_dialect.dbapi = None
         process = config_type.result_processor(mock_dialect, None)
         result = process(input)
@@ -264,7 +293,7 @@ class TestExecutorConfigType:
         under older kubernetes library version.
         """
 
-        class MockAttrError:
+        class MockAttrError:  # noqa: PLW1641
             def __eq__(self, other):
                 raise AttributeError("hello")
 
@@ -277,7 +306,7 @@ class TestExecutorConfigType:
         assert instance.compare_values(a, a) is False
         assert instance.compare_values("a", "a") is True
 
-    def test_result_processor_bad_pickled_obj(self):
+    def test_result_processor_bad_pickled_obj(self, mocker):
         """
         If unpickled obj is missing attrs that curr lib expects
         """
@@ -309,7 +338,7 @@ class TestExecutorConfigType:
 
         # get the result processor method
         config_type = ExecutorConfigType()
-        mock_dialect = MagicMock()
+        mock_dialect = mocker.MagicMock()
         mock_dialect.dbapi = None
         process = config_type.result_processor(mock_dialect, None)
 
@@ -320,15 +349,97 @@ class TestExecutorConfigType:
         # before making it bad
         assert result["pod_override"].to_dict() == copy_of_test_pod.to_dict()
 
+    def test_ensure_pod_is_valid_after_unpickling_is_picklable_in_cluster(self, monkeypatch):
+        """The repaired pod must not capture the unpicklable in-cluster Configuration.
 
-@pytest.mark.parametrize(
-    "mock_version, expected_result",
-    [
-        ("1.0.0", True),  # Test 1: v1 identified as v1
-        ("2.3.4", False),  # Test 2: v2 not identified as v1
-    ],
-)
-def test_is_sqlalchemy_v1(mock_version, expected_result):
-    with mock.patch("airflow.utils.sqlalchemy.metadata") as mock_metadata:
-        mock_metadata.version.return_value = mock_version
-        assert is_sqlalchemy_v1() == expected_result
+        In-cluster, the kubernetes client installs a process-global default ``Configuration`` whose
+        ``refresh_api_key_hook`` is an unpicklable local closure. When the repair branch re-deserializes
+        the pod it must round-trip through a fresh ``Configuration`` so it stays picklable onto the
+        KubernetesExecutor queue.
+        """
+
+        def _make_unpicklable_hook():
+            def _refresh_api_key(config):
+                return None
+
+            return _refresh_api_key
+
+        dirty = Configuration()
+        dirty.refresh_api_key_hook = _make_unpicklable_hook()
+        monkeypatch.setattr(Configuration, "_default", dirty, raising=False)
+
+        container = k8s.V1Container(name="base")
+        pod = k8s.V1Pod(spec=k8s.V1PodSpec(containers=[container]))
+        # Force the repair (re-deserialize) branch the way real version-skew does: drop a protected
+        # attr so ``to_dict()`` raises and ``ensure_pod_is_valid_after_unpickling`` reserializes.
+        del container._tty
+        with pytest.raises(AttributeError):
+            pod.to_dict()
+
+        fixed_pod = ensure_pod_is_valid_after_unpickling(pod)
+
+        assert fixed_pod is not None
+        pickle.dumps(fixed_pod)
+        assert fixed_pod.local_vars_configuration.refresh_api_key_hook is None
+        assert fixed_pod.spec.containers[0].local_vars_configuration.refresh_api_key_hook is None
+
+
+class TestApplyRegexQueryTimeout:
+    @staticmethod
+    def _mock_session(dialect_name):
+        session = mock.MagicMock()
+        session.get_bind.return_value.dialect.name = dialect_name
+        return session
+
+    def test_sets_and_restores_statement_timeout_on_postgresql(self):
+        session = self._mock_session("postgresql")
+        # Pre-existing (e.g. global) statement_timeout captured before we override it.
+        session.execute.return_value.scalar.return_value = "10s"
+        with conf_vars({("api", "regexp_query_timeout"): "5"}):
+            with apply_regex_query_timeout(session):
+                # Capture-then-set on enter.
+                assert session.execute.call_count == 2
+                set_stmt = session.execute.call_args_list[1].args[0]
+                # 5 seconds -> 5000 ms, passed as a bound parameter (no SQL injection).
+                assert set_stmt.compile().params == {"timeout": "5000"}
+        # Restored on exit to the previous value (not reset to 0), so a global timeout is preserved.
+        assert session.execute.call_count == 3
+        restore_stmt = session.execute.call_args_list[2].args[0]
+        assert restore_stmt.compile().params == {"timeout": "10s"}
+
+    def test_sets_and_restores_max_execution_time_on_mysql(self):
+        session = self._mock_session("mysql")
+        # Pre-existing (e.g. global) max_execution_time captured before we override it.
+        session.execute.return_value.scalar.return_value = 1000
+        with conf_vars({("api", "regexp_query_timeout"): "5"}):
+            with apply_regex_query_timeout(session):
+                # Capture-then-set on enter (5 seconds -> 5000 ms).
+                assert session.execute.call_count == 2
+                assert "max_execution_time = 5000" in str(session.execute.call_args.args[0])
+        # Restored on exit to the previous value, so a global limit is preserved.
+        assert session.execute.call_count == 3
+        assert "max_execution_time = 1000" in str(session.execute.call_args.args[0])
+
+    def test_fractional_seconds_are_converted_to_milliseconds(self):
+        session = self._mock_session("postgresql")
+        session.execute.return_value.scalar.return_value = "0"
+        with conf_vars({("api", "regexp_query_timeout"): "0.5"}):
+            with apply_regex_query_timeout(session):
+                # Set is the second call (after capturing the previous value).
+                set_stmt = session.execute.call_args_list[1].args[0]
+                # 0.5 seconds -> 500 ms.
+                assert set_stmt.compile().params == {"timeout": "500"}
+
+    def test_noop_on_sqlite(self):
+        session = self._mock_session("sqlite")
+        with conf_vars({("api", "regexp_query_timeout"): "5"}):
+            with apply_regex_query_timeout(session):
+                pass
+        session.execute.assert_not_called()
+
+    def test_noop_when_timeout_disabled(self):
+        session = self._mock_session("postgresql")
+        with conf_vars({("api", "regexp_query_timeout"): "0"}):
+            with apply_regex_query_timeout(session):
+                pass
+        session.execute.assert_not_called()

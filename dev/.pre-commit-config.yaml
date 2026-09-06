@@ -15,14 +15,17 @@
 # specific language governing permissions and limitations
 # under the License.
 ---
-default_stages: [manual]
+default_stages: [pre-commit, pre-push]
+minimum_prek_version: '0.3.4'
 default_language_version:
-  python: python311
-minimum_prek_version: '0.0.26'
+  python: python3
 repos:
-  - repo: https://github.com/eclipse-csi/octopin
-    rev: 21360742e352e87450f99e180fdfc2cf774a72a3
+  - repo: local
     hooks:
-      - id: pin-versions
-        name: Pin versions of dependencies in CI workflows (manual)
-        stages: ['manual']
+      - id: mypy-dev
+        name: Run mypy for dev
+        language: python
+        entry: ../scripts/ci/prek/run_mypy_full_dist_local_venv_or_breeze_in_ci.py dev
+        pass_filenames: false
+        files: ^.*\.py$
+        require_serial: true

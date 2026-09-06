@@ -19,27 +19,22 @@
 import { Box } from "@chakra-ui/react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { MdOutlineTask } from "react-icons/md";
+import { AiOutlineGroup } from "react-icons/ai";
 
 import type { LightGridTaskInstanceSummary } from "openapi/requests/types.gen";
 import { ClearTaskInstanceButton } from "src/components/Clear";
 import { HeaderCard } from "src/components/HeaderCard";
+import { MarkTaskGroupAsButton } from "src/components/MarkAs";
 import Time from "src/components/Time";
 import { getDuration } from "src/utils";
 
-export const Header = ({
-  isRefreshing,
-  taskInstance,
-}: {
-  readonly isRefreshing?: boolean;
-  readonly taskInstance: LightGridTaskInstanceSummary;
-}) => {
+export const Header = ({ taskInstance }: { readonly taskInstance: LightGridTaskInstanceSummary }) => {
   const { t: translate } = useTranslation();
   const entries: Array<{ label: string; value: number | ReactNode | string }> = [];
 
-  Object.entries(taskInstance.child_states ?? {}).forEach(([taskState, count]) => {
+  Object.entries(taskInstance.child_states ?? {}).forEach(([state, count]) => {
     entries.push({
-      label: translate("total", { state: translate(`states.${taskState.toLowerCase()}`) }),
+      label: translate("total", { state: translate(`states.${state.toLowerCase()}`) }),
       value: count,
     });
   });
@@ -60,13 +55,17 @@ export const Header = ({
   return (
     <Box>
       <HeaderCard
-        actions={<ClearTaskInstanceButton groupTaskInstance={taskInstance} isHotkeyEnabled withText={true} />}
-        icon={<MdOutlineTask />}
-        isRefreshing={isRefreshing}
+        actions={
+          <>
+            <ClearTaskInstanceButton groupTaskInstance={taskInstance} isHotkeyEnabled />
+            <MarkTaskGroupAsButton groupTaskInstance={taskInstance} isHotkeyEnabled />
+          </>
+        }
+        icon={<AiOutlineGroup />}
         state={taskInstance.state}
         stats={stats}
         subTitle={<Time datetime={taskInstance.min_start_date} />}
-        title={taskInstance.task_id}
+        title={taskInstance.task_display_name}
       />
     </Box>
   );

@@ -27,16 +27,20 @@ from google.api_core.exceptions import AlreadyExists, GoogleAPICallError
 from google.cloud.spanner_v1.client import Client
 from sqlalchemy import create_engine
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
+from airflow.providers.common.sql.hooks.lineage import send_sql_hook_lineage
 from airflow.providers.common.sql.hooks.sql import DbApiHook
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import GoogleBaseHook, get_field
+from airflow.providers.openlineage.sqlparser import DatabaseInfo
 
 if TYPE_CHECKING:
     from google.cloud.spanner_v1.database import Database
     from google.cloud.spanner_v1.instance import Instance
     from google.cloud.spanner_v1.transaction import Transaction
     from google.longrunning.operations_grpc_pb2 import Operation
+
+    from airflow.providers.common.compat.sdk import Connection
 
 
 class SpannerConnectionParams(NamedTuple):
@@ -82,7 +86,10 @@ class SpannerHook(GoogleBaseHook, DbApiHook):
         """
         if not self._client:
             self._client = Client(
-                project=project_id, credentials=self.get_credentials(), client_info=CLIENT_INFO
+                project=project_id,
+                credentials=self.get_credentials(),
+                client_info=CLIENT_INFO,
+                client_options=self.get_client_options(),
             )
         return self._client
 
@@ -418,6 +425,11 @@ class SpannerHook(GoogleBaseHook, DbApiHook):
                 preview = sql if len(sql) <= 300 else sql[:300] + "…"
                 self.log.info("[DML %d/%d] affected rows=%d | %s", i, len(result), rc, preview)
                 result_rows_count_per_query.append(rc)
+            send_sql_hook_lineage(
+                context=self,
+                sql=sql,
+                row_count=rc,
+            )
         return result_rows_count_per_query
 
     @staticmethod
@@ -427,3 +439,45 @@ class SpannerHook(GoogleBaseHook, DbApiHook):
             rc = transaction.execute_update(sql)
             counts[sql] = rc
         return counts
+
+    def _get_openlineage_authority_part(self, connection: Connection) -> str | None:
+        """Build Spanner-specific authority part for OpenLineage. Returns {project}/{instance}."""
+        extras = connection.extra_dejson
+        project_id = extras.get("project_id")
+        instance_id = extras.get("instance_id")
+
+        if not project_id or not instance_id:
+            return None
+
+        return f"{project_id}/{instance_id}"
+
+    def get_openlineage_database_dialect(self, connection: Connection) -> str:
+        """Return database dialect for OpenLineage."""
+        return "spanner"
+
+    def get_openlineage_database_info(self, connection: Connection) -> DatabaseInfo:
+        """Return Spanner specific information for OpenLineage."""
+        extras = connection.extra_dejson
+        database_id = extras.get("database_id")
+
+        return DatabaseInfo(
+            scheme=self.get_openlineage_database_dialect(connection),
+            authority=self._get_openlineage_authority_part(connection),
+            database=database_id,
+            information_schema_columns=[
+                "table_schema",
+                "table_name",
+                "column_name",
+                "ordinal_position",
+                "spanner_type",
+            ],
+        )
+
+    def get_openlineage_default_schema(self) -> str | None:
+        """
+        Spanner expose 'public' or '' schema depending on dialect(Postgres vs GoogleSQL).
+
+        SQLAlchemy dialect for Spanner does not expose default schema, so we return None
+        to follow the same approach.
+        """
+        return None

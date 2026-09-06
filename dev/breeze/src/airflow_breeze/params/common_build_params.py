@@ -27,11 +27,10 @@ from airflow_breeze.global_constants import (
     ALLOWED_BUILD_PROGRESS,
     ALLOWED_INSTALL_MYSQL_CLIENT_TYPES,
     APACHE_AIRFLOW_GITHUB_REPOSITORY,
-    DEFAULT_UV_HTTP_TIMEOUT,
     DOCKER_DEFAULT_PLATFORM,
     get_airflow_version,
 )
-from airflow_breeze.utils.console import get_console
+from airflow_breeze.utils.console import console_print
 from airflow_breeze.utils.platforms import get_normalized_platform
 
 
@@ -52,6 +51,7 @@ class CommonBuildParams:
     airflow_constraints_location: str | None = None
     builder: str = "autodetect"
     build_progress: str = ALLOWED_BUILD_PROGRESS[0]
+    cache_from_image: str | None = None
     constraints_github_repository: str = APACHE_AIRFLOW_GITHUB_REPOSITORY
     commit_sha: str | None = None
     dev_apt_command: str | None = None
@@ -68,7 +68,6 @@ class CommonBuildParams:
     python_image: str | None = None
     push: bool = False
     python: str = "3.10"
-    uv_http_timeout: int = DEFAULT_UV_HTTP_TIMEOUT
     dry_run: bool = False
     version_suffix: str | None = None
     verbose: bool = False
@@ -109,6 +108,15 @@ class CommonBuildParams:
             extra_flags.append(f"--cache-from={self.get_cache(self.platform)}")
         elif self.docker_cache == "disabled":
             extra_flags.append("--no-cache")
+        if self.cache_from_image:
+            extra_flags.append(f"--cache-from={self.cache_from_image}")
+        if self.docker_cache != "disabled":
+            # Records the layer cache keys in the image config, which is what lets an image
+            # built by an earlier run serve as `--cache-from` for a later one. BuildKit only
+            # honours those records when it can pull the layers from a registry, so an image
+            # that travelled as a saved tarball has to be pushed to one (even a throw-away
+            # local registry) before it can be passed as `--cache-from-image`.
+            extra_flags.append("--build-arg=BUILDKIT_INLINE_CACHE=1")
         return extra_flags
 
     @property
@@ -133,7 +141,7 @@ class CommonBuildParams:
 
     def get_cache(self, single_platform: str) -> str:
         if "," in single_platform:
-            get_console().print(
+            console_print(
                 "[error]Cache can only be retrieved for single platform and you "
                 f"tried for {single_platform}[/]"
             )

@@ -26,8 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook, conf
 from airflow.providers.google.cloud.hooks.cloud_sql import CloudSQLDatabaseHook, CloudSQLHook
 from airflow.providers.google.cloud.links.cloud_sql import CloudSQLInstanceDatabaseLink, CloudSQLInstanceLink
 from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseOperator
@@ -35,12 +34,11 @@ from airflow.providers.google.cloud.triggers.cloud_sql import CloudSQLExportTrig
 from airflow.providers.google.cloud.utils.field_validator import GcpBodyFieldValidator
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID, get_field
 from airflow.providers.google.common.links.storage import FileDetailsLink
-from airflow.providers.google.version_compat import BaseHook
 
 if TYPE_CHECKING:
     from airflow.models import Connection
+    from airflow.providers.common.compat.sdk import Context
     from airflow.providers.openlineage.extractors import OperatorLineage
-    from airflow.utils.context import Context
 
 
 SETTINGS = "settings"
@@ -1025,6 +1023,7 @@ class CloudSQLExportInstanceOperator(CloudSQLBaseOperator):
                 gcp_conn_id=self.gcp_conn_id,
                 impersonation_chain=self.impersonation_chain,
                 poke_interval=self.poke_interval,
+                api_version=self.api_version,
             ),
             method_name="execute_complete",
         )

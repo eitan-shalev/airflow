@@ -16,10 +16,11 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading, VStack } from "@chakra-ui/react";
+import { Heading, VStack } from "@chakra-ui/react";
 import { type ReactElement, useState } from "react";
 
-import { Button, Dialog } from "src/components/ui";
+import { Dialog, IconButton } from "src/components/ui";
+import { MARKDOWN_DIALOG_STORAGE_KEY, ResizableWrapper } from "src/components/ui/ResizableWrapper";
 
 import ReactMarkdown from "./ReactMarkdown";
 
@@ -37,28 +38,29 @@ const DisplayMarkdownButton = ({
   const [isDocsOpen, setIsDocsOpen] = useState(false);
 
   return (
-    <Box>
-      <Button data-testid="markdown-button" onClick={() => setIsDocsOpen(true)} variant="outline">
+    <div>
+      <IconButton data-testid="markdown-button" label={text} onClick={() => setIsDocsOpen(true)}>
         {icon}
-        {text}
-      </Button>
+      </IconButton>
       <Dialog.Root
         data-testid="markdown-modal"
         onOpenChange={() => setIsDocsOpen(false)}
         open={isDocsOpen}
         size="md"
       >
-        <Dialog.Content backdrop>
-          <Dialog.Header bg="info.muted">
-            <Heading size="xl">{header}</Heading>
-            <Dialog.CloseTrigger closeButtonProps={{ size: "xl" }} />
-          </Dialog.Header>
-          <Dialog.Body alignItems="flex-start" as={VStack} gap="0">
-            <ReactMarkdown>{mdContent}</ReactMarkdown>
-          </Dialog.Body>
+        <Dialog.Content backdrop maxHeight="none" maxWidth="none" padding={0} width="auto">
+          <ResizableWrapper storageKey={MARKDOWN_DIALOG_STORAGE_KEY}>
+            <Dialog.Header alignItems="center" flexShrink={0} justifyContent="space-between">
+              <Heading size="xl">{header}</Heading>
+              <Dialog.CloseTrigger closeButtonProps={{ size: "xl" }} />
+            </Dialog.Header>
+            <Dialog.Body alignItems="flex-start" as={VStack} flex="1" gap="0" overflow="auto">
+              <ReactMarkdown>{mdContent}</ReactMarkdown>
+            </Dialog.Body>
+          </ResizableWrapper>
         </Dialog.Content>
       </Dialog.Root>
-    </Box>
+    </div>
   );
 };
 

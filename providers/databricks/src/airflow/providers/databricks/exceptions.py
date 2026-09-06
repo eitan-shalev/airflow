@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 
 
 class DatabricksSqlExecutionError(AirflowException):
@@ -30,3 +30,19 @@ class DatabricksSqlExecutionError(AirflowException):
 
 class DatabricksSqlExecutionTimeout(DatabricksSqlExecutionError):
     """Raised when a sql execution times out."""
+
+
+class DatabricksOperatorPayloadError(AirflowException):
+    """Raised when a Databricks operator payload is invalid."""
+
+
+class DatabricksWarehouseError(AirflowException):
+    """Raised when a SQL warehouse fails to reach or times out waiting for a target state."""
+
+
+class DatabricksApiError(AirflowException):
+    """Raised when a Databricks REST API call returns an error response."""
+
+    def __init__(self, message: str, *, http_status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status_code = http_status_code

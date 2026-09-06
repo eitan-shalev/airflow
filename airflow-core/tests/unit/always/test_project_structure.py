@@ -24,6 +24,7 @@ import pathlib
 
 import pytest
 
+from tests_common.test_utils.file_loading import get_imports_from_file
 from tests_common.test_utils.paths import (
     AIRFLOW_CORE_SOURCES_PATH,
     AIRFLOW_PROVIDERS_ROOT_PATH,
@@ -59,14 +60,12 @@ class TestProjectStructure:
         """
         # The test below had a but for quite a while and we missed a lot of modules to have tess
         # We should make sure that one goes to 0
-        # TODO(potiuk) - check if that test actually tests something
         OVERLOOKED_TESTS = [
             "providers/amazon/tests/unit/amazon/aws/auth_manager/datamodels/test_login.py",
             "providers/amazon/tests/unit/amazon/aws/auth_manager/security_manager/test_aws_security_manager_override.py",
             "providers/amazon/tests/unit/amazon/aws/executors/batch/test_batch_executor_config.py",
             "providers/amazon/tests/unit/amazon/aws/executors/batch/test_boto_schema.py",
             "providers/amazon/tests/unit/amazon/aws/executors/ecs/test_ecs_executor_config.py",
-            "providers/amazon/tests/unit/amazon/aws/executors/ecs/test_utils.py",
             "providers/amazon/tests/unit/amazon/aws/executors/aws_lambda/test_utils.py",
             "providers/amazon/tests/unit/amazon/aws/executors/aws_lambda/docker/test_app.py",
             "providers/amazon/tests/unit/amazon/aws/executors/utils/test_base_config_keys.py",
@@ -98,18 +97,19 @@ class TestProjectStructure:
             "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/triggers/test_kubernetes_pod.py",
             "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/utils/test_delete_from.py",
             "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/utils/test_k8s_hashlib_wrapper.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/utils/test_xcom_sidecar.py",
+            "providers/common/sql/tests/unit/common/sql/datafusion/test_base.py",
+            "providers/common/sql/tests/unit/common/sql/datafusion/test_exceptions.py",
+            "providers/common/ai/tests/unit/common/ai/test_exceptions.py",
             "providers/common/compat/tests/unit/common/compat/lineage/test_entities.py",
             "providers/common/compat/tests/unit/common/compat/standard/test_operators.py",
             "providers/common/compat/tests/unit/common/compat/standard/test_triggers.py",
             "providers/common/compat/tests/unit/common/compat/standard/test_utils.py",
             "providers/common/messaging/tests/unit/common/messaging/providers/test_base_provider.py",
             "providers/common/messaging/tests/unit/common/messaging/providers/test_sqs.py",
+            "providers/edge3/tests/unit/edge3/cli/test_example_extended_sysinfo.py",
             "providers/edge3/tests/unit/edge3/models/test_edge_job.py",
             "providers/edge3/tests/unit/edge3/models/test_edge_logs.py",
             "providers/edge3/tests/unit/edge3/models/test_edge_worker.py",
-            "providers/edge3/tests/unit/edge3/worker_api/routes/test__v2_compat.py",
-            "providers/edge3/tests/unit/edge3/worker_api/routes/test__v2_routes.py",
             "providers/edge3/tests/unit/edge3/worker_api/test_app.py",
             "providers/edge3/tests/unit/edge3/worker_api/test_auth.py",
             "providers/edge3/tests/unit/edge3/worker_api/test_datamodels.py",
@@ -135,21 +135,15 @@ class TestProjectStructure:
             "providers/fab/tests/unit/fab/www/test_security_manager.py",
             "providers/fab/tests/unit/fab/www/test_session.py",
             "providers/fab/tests/unit/fab/www/test_views.py",
-            "providers/google/tests/unit/google/cloud/fs/test_gcs.py",
-            "providers/google/tests/unit/google/cloud/links/test_automl.py",
-            "providers/google/tests/unit/google/cloud/links/test_base.py",
-            "providers/google/tests/unit/google/cloud/links/test_bigquery.py",
             "providers/google/tests/unit/google/cloud/links/test_bigquery_dts.py",
             "providers/google/tests/unit/google/cloud/links/test_bigtable.py",
             "providers/google/tests/unit/google/cloud/links/test_cloud_build.py",
             "providers/google/tests/unit/google/cloud/links/test_cloud_functions.py",
             "providers/google/tests/unit/google/cloud/links/test_cloud_memorystore.py",
             "providers/google/tests/unit/google/cloud/links/test_cloud_sql.py",
-            "providers/google/tests/unit/google/cloud/links/test_cloud_storage_transfer.py",
             "providers/google/tests/unit/google/cloud/links/test_cloud_tasks.py",
             "providers/google/tests/unit/google/cloud/links/test_compute.py",
             "providers/google/tests/unit/google/cloud/links/test_data_loss_prevention.py",
-            "providers/google/tests/unit/google/cloud/links/test_datacatalog.py",
             "providers/google/tests/unit/google/cloud/links/test_dataflow.py",
             "providers/google/tests/unit/google/cloud/links/test_dataform.py",
             "providers/google/tests/unit/google/cloud/links/test_datafusion.py",
@@ -157,11 +151,11 @@ class TestProjectStructure:
             "providers/google/tests/unit/google/cloud/links/test_dataproc.py",
             "providers/google/tests/unit/google/cloud/links/test_datastore.py",
             "providers/google/tests/unit/google/cloud/links/test_kubernetes_engine.py",
-            "providers/google/tests/unit/google/cloud/links/test_mlengine.py",
             "providers/google/tests/unit/google/cloud/links/test_pubsub.py",
             "providers/google/tests/unit/google/cloud/links/test_spanner.py",
             "providers/google/tests/unit/google/cloud/links/test_stackdriver.py",
             "providers/google/tests/unit/google/cloud/links/test_workflows.py",
+            "providers/google/tests/unit/google/cloud/links/test_translate.py",
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_auto_ml.py",
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_batch_prediction_job.py",
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_custom_job.py",
@@ -170,7 +164,6 @@ class TestProjectStructure:
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_hyperparameter_tuning_job.py",
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_model_service.py",
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_pipeline_job.py",
-            "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_ray.py",
             "providers/google/tests/unit/google/cloud/sensors/vertex_ai/test_feature_store.py",
             "providers/google/tests/unit/google/cloud/transfers/test_bigquery_to_sql.py",
             "providers/google/tests/unit/google/cloud/transfers/test_presto_to_gcs.py",
@@ -179,7 +172,6 @@ class TestProjectStructure:
             "providers/google/tests/unit/google/common/hooks/test_operation_helpers.py",
             "providers/google/tests/unit/google/test_go_module_utils.py",
             "providers/http/tests/unit/http/test_exceptions.py",
-            "providers/keycloak/tests/unit/keycloak/auth_manager/datamodels/test_token.py",
             "providers/microsoft/azure/tests/unit/microsoft/azure/operators/test_adls.py",
             "providers/snowflake/tests/unit/snowflake/triggers/test_snowflake_trigger.py",
             "providers/standard/tests/unit/standard/operators/test_branch.py",
@@ -248,21 +240,6 @@ class TestProjectStructure:
             "Detect added tests in providers module - please remove the tests "
             "from OVERLOOKED_TESTS list above"
         )
-
-
-def get_imports_from_file(filepath: str):
-    with open(filepath) as py_file:
-        content = py_file.read()
-    doc_node = ast.parse(content, filepath)
-    import_names: set[str] = set()
-    for current_node in ast.walk(doc_node):
-        if not isinstance(current_node, (ast.Import, ast.ImportFrom)):
-            continue
-        for alias in current_node.names:
-            name = alias.name
-            fullname = f"{current_node.module}.{name}" if isinstance(current_node, ast.ImportFrom) else name
-            import_names.add(fullname)
-    return import_names
 
 
 def filepath_to_module(path: pathlib.Path, src_folder: pathlib.Path):
@@ -428,11 +405,11 @@ class TestGoogleProviderProjectStructure(ExampleCoverageTest, AssetsCoverageTest
         "airflow.providers.google.cloud.operators.automl.AutoMLDeleteModelOperator",
         "airflow.providers.google.cloud.operators.automl.AutoMLListDatasetOperator",
         "airflow.providers.google.cloud.operators.automl.AutoMLDeleteDatasetOperator",
+        "airflow.providers.google.cloud.operators.vertex_ai.auto_ml.CreateAutoMLVideoTrainingJobOperator",
         "airflow.providers.google.cloud.operators.bigquery.BigQueryCreateEmptyTableOperator",
         "airflow.providers.google.cloud.operators.bigquery.BigQueryCreateExternalTableOperator",
         "airflow.providers.google.cloud.operators.datapipeline.CreateDataPipelineOperator",
         "airflow.providers.google.cloud.operators.datapipeline.RunDataPipelineOperator",
-        "airflow.providers.google.cloud.operators.mlengine.MLEngineCreateModelOperator",
         "airflow.providers.google.cloud.operators.vertex_ai.generative_model.TextGenerationModelPredictOperator",
         "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360CreateQueryOperator",
         "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360DeleteReportOperator",
@@ -441,31 +418,6 @@ class TestGoogleProviderProjectStructure(ExampleCoverageTest, AssetsCoverageTest
         "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360UploadLineItemsOperator",
         "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360DownloadLineItemsOperator",
         "airflow.providers.google.marketing_platform.sensors.GoogleDisplayVideo360RunQuerySensor",
-        "airflow.providers.google.cloud.hooks.datacatalog.CloudDataCatalogHook",
-        "airflow.providers.google.cloud.links.datacatalog.DataCatalogEntryGroupLink",
-        "airflow.providers.google.cloud.links.datacatalog.DataCatalogEntryLink",
-        "airflow.providers.google.cloud.links.datacatalog.DataCatalogTagTemplateLink",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogCreateEntryOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogCreateEntryGroupOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogCreateTagOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogCreateTagTemplateOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogCreateTagTemplateFieldOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteEntryGroupOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteTagOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteTagTemplateOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteTagTemplateFieldOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogGetEntryOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogGetEntryGroupOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogGetTagTemplateOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogListTagsOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogLookupEntryOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogRenameTagTemplateFieldOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogSearchCatalogOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogUpdateEntryOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogUpdateTagOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogUpdateTagTemplateOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogCreateEntryOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogUpdateTagTemplateFieldOperator",
     }
 
     BASE_CLASSES = {
@@ -480,6 +432,7 @@ class TestGoogleProviderProjectStructure(ExampleCoverageTest, AssetsCoverageTest
         "airflow.providers.google.cloud.operators.managed_kafka.ManagedKafkaBaseOperator",
         "airflow.providers.google.cloud.operators.vertex_ai.custom_job.CustomTrainingJobBaseOperator",
         "airflow.providers.google.cloud.operators.vertex_ai.ray.RayBaseOperator",
+        "airflow.providers.google.cloud.operators.ray.RayJobBaseOperator",
         "airflow.providers.google.cloud.operators.cloud_base.GoogleCloudBaseOperator",
         "airflow.providers.google.marketing_platform.operators.search_ads._GoogleSearchAdsBaseOperator",
     }
@@ -493,8 +446,6 @@ class TestGoogleProviderProjectStructure(ExampleCoverageTest, AssetsCoverageTest
         "airflow.providers.google.cloud.operators.vertex_ai.auto_ml.AutoMLTrainingJobBaseOperator",
         "airflow.providers.google.cloud.operators.vertex_ai.endpoint_service.UpdateEndpointOperator",
         "airflow.providers.google.cloud.operators.vertex_ai.batch_prediction_job.GetBatchPredictionJobOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteEntryOperator",
-        "airflow.providers.google.cloud.operators.vertex_ai.generative_model.DeleteExperimentRunOperator",
     }
 
     ASSETS_NOT_REQUIRED = {
@@ -526,11 +477,6 @@ class TestGoogleProviderProjectStructure(ExampleCoverageTest, AssetsCoverageTest
         "airflow.providers.google.cloud.operators.cloud_storage_transfer_service."
         "CloudDataTransferServiceResumeOperationOperator",
         "airflow.providers.google.cloud.operators.compute.ComputeEngineBaseOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteEntryGroupOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteEntryOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteTagOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteTagTemplateFieldOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteTagTemplateOperator",
         "airflow.providers.google.cloud.operators.datafusion.CloudDataFusionDeleteInstanceOperator",
         "airflow.providers.google.cloud.operators.datafusion.CloudDataFusionDeletePipelineOperator",
         "airflow.providers.google.cloud.operators.dataproc.DataprocDeleteBatchOperator",
@@ -587,6 +533,7 @@ class TestAmazonProviderProjectStructure(ExampleCoverageTest):
 
     BASE_CLASSES = {
         "airflow.providers.amazon.aws.operators.base_aws.AwsBaseOperator",
+        "airflow.providers.amazon.aws.operators.glue_crawler._GlueCrawlerBaseOperator",
         "airflow.providers.amazon.aws.operators.rds.RdsBaseOperator",
         "airflow.providers.amazon.aws.operators.sagemaker.SageMakerBaseOperator",
         "airflow.providers.amazon.aws.sensors.base_aws.AwsBaseSensor",
@@ -616,6 +563,7 @@ class TestAmazonProviderProjectStructure(ExampleCoverageTest):
     }
 
     DEPRECATED_CLASSES = {
+        "airflow.providers.amazon.aws.operators.glue_crawler.GlueCrawlerOperator",
         "airflow.providers.amazon.aws.operators.lambda_function.AwsLambdaInvokeFunctionOperator",
     }
 

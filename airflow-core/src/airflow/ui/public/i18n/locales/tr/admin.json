@@ -3,13 +3,13 @@
     "description": "Açıklama",
     "key": "Anahtar",
     "name": "Ad",
+    "team": "Takım",
     "value": "Değer"
   },
   "config": {
     "columns": {
       "section": "Bölüm"
-    },
-    "title": "Airflow Yapılandırması"
+    }
   },
   "connections": {
     "add": "Bağlantı Ekle",
@@ -49,6 +49,12 @@
     "searchPlaceholder": "Bağlantıları Ara",
     "test": "Bağlantıyı Test Et",
     "testDisabled": "Bağlantı test özelliği devre dışı. Etkinleştirmek için lütfen bir yönetici ile iletişime geçin.",
+    "testError": {
+      "title": "Bağlantı Testi Başarısız"
+    },
+    "testSuccess": {
+      "title": "Bağlantı Testi Başarılı"
+    },
     "typeMeta": {
       "error": "Bağlantı Tipi Meta verileri alınamadı",
       "standardFields": {
@@ -74,6 +80,23 @@
   "formActions": {
     "save": "Kaydet"
   },
+  "jobs": {
+    "columns": {
+      "executorClass": "Yürütücü Sınıfı",
+      "hostname": "Sunucu Adı",
+      "id": "Kimlik",
+      "jobType": "İş Tipi",
+      "latestHeartbeat": "Son Kalp Atışı",
+      "unixname": "Unix Adı"
+    },
+    "filters": {
+      "allStates": "Bütün Durumlar",
+      "allTypes": "Bütün Tipler",
+      "dagProcessorJob": "Dag İşlemcisi İşi",
+      "schedulerJob": "Zamanlayıcı İşi",
+      "triggererJob": "Tetikleyici İşi"
+    }
+  },
   "plugins": {
     "columns": {
       "source": "Kaynak"
@@ -96,7 +119,8 @@
       "includeDeferred": "Ertelenmişleri Dahil Et",
       "nameMaxLength": "Ad en fazla 256 karakter içerebilir",
       "nameRequired": "Ad gerekli",
-      "slots": "İşlem yuvaları"
+      "slots": "İşlem yuvaları",
+      "slotsHelperText": "Sınırsız işlem yuvaları için -1 kullanın."
     },
     "noPoolsFound": "Havuz bulunamadı",
     "pool_one": "Havuz",
@@ -128,8 +152,6 @@
       "tooltip": "Seçili değişkenleri sil"
     },
     "edit": "Değişkeni Düzenle",
-    "export": "Dışa Aktar",
-    "exportTooltip": "Seçili değişkenleri dışa aktar",
     "form": {
       "invalidJson": "Geçersiz JSON",
       "keyMaxLength": "Anahtar en fazla 250 karakter içerebilir",

@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import logging
 import warnings
-from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
+from airflow._shared.logging.factory import DEFAULT_LOGGING_CONFIG_PATH, resolve_remote_task_log
+from airflow._shared.module_loading import import_string
 from airflow.configuration import conf
 from airflow.exceptions import AirflowConfigException
-from airflow.utils.module_loading import import_string
 
 if TYPE_CHECKING:
     from airflow.logging.remote import RemoteLogIO
@@ -32,27 +32,43 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-REMOTE_TASK_LOG: RemoteLogIO | None
-DEFAULT_REMOTE_CONN_ID: str | None = None
+class _ActiveLoggingConfig:
+    """Private class to hold active logging config variables."""
+
+    logging_config_loaded: bool = False
+    remote_task_log: RemoteLogIO | None = None
+    default_remote_conn_id: str | None = None
+
+    @classmethod
+    def set(cls, remote_task_log: RemoteLogIO | None, default_remote_conn_id: str | None) -> None:
+        """Set remote logging configuration atomically."""
+        cls.remote_task_log = remote_task_log
+        cls.default_remote_conn_id = default_remote_conn_id
+        cls.logging_config_loaded = True
 
 
-def __getattr__(name: str):
-    if name == "REMOTE_TASK_LOG":
-        global REMOTE_TASK_LOG
-        load_logging_config()
-        return REMOTE_TASK_LOG
+def get_remote_task_log() -> RemoteLogIO | None:
+    if not _ActiveLoggingConfig.logging_config_loaded:
+        _load_logging_config()
+    return _ActiveLoggingConfig.remote_task_log
 
 
-def load_logging_config() -> tuple[dict[str, Any], str]:
-    """Configure & Validate Airflow Logging."""
-    global REMOTE_TASK_LOG, DEFAULT_REMOTE_CONN_ID
-    fallback = "airflow.config_templates.airflow_local_settings.DEFAULT_LOGGING_CONFIG"
-    logging_class_path = conf.get("logging", "logging_config_class", fallback=fallback)
+def get_default_remote_conn_id() -> str | None:
+    if conn_id := conf.get("logging", "remote_log_conn_id", fallback=None):
+        return conn_id
 
-    # Sometimes we end up with `""` as the value!
-    logging_class_path = logging_class_path or fallback
+    if not _ActiveLoggingConfig.logging_config_loaded:
+        _load_logging_config()
+    return _ActiveLoggingConfig.default_remote_conn_id
 
-    user_defined = logging_class_path != fallback
+
+def _get_logging_config() -> dict[str, Any]:
+    """Import and validate the ``[logging] logging_config_class`` dict."""
+    logging_class_path = (
+        conf.get("logging", "logging_config_class", fallback=DEFAULT_LOGGING_CONFIG_PATH)
+        or DEFAULT_LOGGING_CONFIG_PATH
+    )
+    user_defined = logging_class_path != DEFAULT_LOGGING_CONFIG_PATH
 
     try:
         logging_config = import_string(logging_class_path)
@@ -63,31 +79,89 @@ def load_logging_config() -> tuple[dict[str, Any], str]:
 
         if user_defined:
             log.info("Successfully imported user-defined logging config from %s", logging_class_path)
-
     except Exception as err:
-        # Import default logging configurations.
         raise ImportError(
             f"Unable to load {'custom ' if user_defined else ''}logging config from {logging_class_path} due "
             f"to: {type(err).__name__}:{err}"
         )
-    else:
-        modpath = logging_class_path.rsplit(".", 1)[0]
-        try:
-            mod = import_module(modpath)
 
-            # Load remote logging configuration from the custom module
-            REMOTE_TASK_LOG = getattr(mod, "REMOTE_TASK_LOG")
-            DEFAULT_REMOTE_CONN_ID = getattr(mod, "DEFAULT_REMOTE_CONN_ID", None)
-        except Exception as err:
-            log.info("Remote task logs will not be available due to an error:  %s", err)
+    return logging_config
 
-    return logging_config, logging_class_path
+
+def _load_logging_config() -> None:
+    """Load and cache the remote logging configuration from core config."""
+    from airflow.providers_manager import ProvidersManager
+
+    remote_task_log, default_remote_conn_id = resolve_remote_task_log(
+        conf=conf,
+        providers_manager=ProvidersManager(),
+        import_string=import_string,
+    )
+    _ActiveLoggingConfig.set(remote_task_log, default_remote_conn_id)
+
+
+def load_logging_config() -> tuple[dict[str, Any], str]:
+    """
+    Import the logging config dict and load the remote logging handler.
+
+    .. deprecated::
+        Use :func:`_get_logging_config` for the logging dict and
+        :func:`_load_logging_config` for remote handler setup.
+    """
+    warnings.warn(
+        "load_logging_config is deprecated; use _get_logging_config() for the logging dict "
+        "and _load_logging_config() for remote handler setup.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    _load_logging_config()
+    return _get_logging_config(), conf.get(
+        "logging", "logging_config_class", fallback=DEFAULT_LOGGING_CONFIG_PATH
+    ) or DEFAULT_LOGGING_CONFIG_PATH
+
+
+def _warn_if_missing_remote_task_log(logging_class_path: str) -> None:
+    """
+    Warn if ``[logging] remote_logging`` is on but the user module exposes no remote IO.
+
+    Runs *after* ``dictConfig`` has constructed handlers, so deprecated
+    self-registration in provider task handlers (Elasticsearch, OpenSearch) has
+    already had its chance to populate ``_ActiveLoggingConfig.remote_task_log``.
+    Only fires for user-defined ``logging_config_class`` values; the stock
+    fallback is exempt.
+
+    :param logging_class_path: the resolved ``[logging] logging_config_class``
+        dotted path (already defaulted to :data:`DEFAULT_LOGGING_CONFIG_PATH`).
+    """
+    # An empty path is not a meaningful override -- ``_get_logging_config()`` treats it the
+    # same as unset and falls back to ``DEFAULT_LOGGING_CONFIG_PATH``, so it must not be
+    # treated as a user-defined logging config class here either.
+    has_user_defined_logging_config_class = (
+        bool(logging_class_path) and logging_class_path != DEFAULT_LOGGING_CONFIG_PATH
+    )
+    remote_logging_enabled = conf.getboolean("logging", "remote_logging", fallback=False)
+    if not (has_user_defined_logging_config_class and remote_logging_enabled):
+        return
+    if get_remote_task_log() is not None:
+        return
+    # Strip the trailing ``.<config_attr>`` to leave the enclosing module path.
+    # ``logging_class_path`` should always be dotted since ``import_string``
+    # would have raised otherwise, but guard the access defensively.
+    parts = logging_class_path.rsplit(".", 1)
+    modpath = parts[0] if len(parts) == 2 else logging_class_path
+    log.warning(
+        "[logging] remote_logging is enabled but the user-defined logging module %r "
+        "does not expose a REMOTE_TASK_LOG attribute, so remote task-log read-back is "
+        "disabled. Define REMOTE_TASK_LOG (a RemoteLogIO instance) at module scope "
+        "to enable it.",
+        modpath,
+    )
 
 
 def configure_logging():
     from airflow._shared.logging import configure_logging, init_log_folder, translate_config_values
 
-    logging_config, logging_class_path = load_logging_config()
+    logging_config = _get_logging_config()
     try:
         level: str = getattr(
             logging_config, "LOG_LEVEL", conf.get("logging", "logging_level", fallback="INFO")
@@ -104,19 +178,46 @@ def configure_logging():
             log_format=getattr(logging_config, "LOG_FORMAT", conf.get("logging", "log_format", fallback="")),
             callsite_params=conf.getlist("logging", "callsite_parameters", fallback=[]),
         )
+        json_output = conf.getboolean("logging", "json_logs", fallback=False)
+
+        stdlib_config = dict(logging_config)
+        # Route uvicorn/gunicorn error loggers explicitly through our handler so their output
+        # is formatted correctly regardless of what propagation state those loggers end up in.
+        # Suppress the built-in access loggers; HttpAccessLogMiddleware and
+        # AirflowUvicornWorker.CONFIG_KWARGS take over access logging instead.
+        extra_loggers = {
+            "uvicorn.access": {"handlers": [], "propagate": False},
+            "gunicorn.access": {"handlers": [], "propagate": False},
+            "uvicorn.error": {"handlers": ["default"], "propagate": False},
+            "gunicorn.error": {"handlers": ["default"], "propagate": False},
+        }
+        stdlib_config = {**stdlib_config, "loggers": {**stdlib_config.get("loggers", {}), **extra_loggers}}
+
         configure_logging(
             log_level=level,
             namespace_log_levels=conf.get("logging", "namespace_levels", fallback=None),
-            stdlib_config=logging_config,
+            stdlib_config=stdlib_config,
             log_format=log_fmt,
+            log_timestamp_format=conf.get("logging", "log_timestamp_format", fallback="iso"),
             callsite_parameters=callsite_params,
             colors=colors,
+            json_output=json_output,
         )
     except (ValueError, KeyError) as e:
         log.error("Unable to load the config, contains a configuration error.")
         # When there is an error in the config, escalate the exception
         # otherwise Airflow would silently fall back on the default config
         raise e
+
+    # Runs after dictConfig so deprecated handler self-registration (ES/OS) has
+    # had its chance to populate _ActiveLoggingConfig.remote_task_log.
+    # The trailing `or DEFAULT_LOGGING_CONFIG_PATH` also covers an explicit
+    # `logging_config_class = ""`, which conf.get() would otherwise return as-is.
+    logging_class_path = (
+        conf.get("logging", "logging_config_class", fallback=DEFAULT_LOGGING_CONFIG_PATH)
+        or DEFAULT_LOGGING_CONFIG_PATH
+    )
+    _warn_if_missing_remote_task_log(logging_class_path)
 
     validate_logging_config()
 
@@ -131,8 +232,6 @@ def configure_logging():
         base_log_folder,
         new_folder_permissions=new_folder_permissions,
     )
-
-    return logging_class_path
 
 
 def validate_logging_config():

@@ -46,12 +46,14 @@ except ImportError:
     from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
-from tests_common.test_utils.api_client_helpers import create_airflow_connection, delete_airflow_connection
+from system.google.gcp_api_client_helpers import create_airflow_connection, delete_airflow_connection
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
 DAG_ID = "gdrive_to_gcs_with_gdrive_sensor"
+
+IS_COMPOSER = bool(os.environ.get("COMPOSER_ENVIRONMENT", ""))
 
 RESOURCES_BUCKET_NAME = "airflow-system-tests-resources"
 BUCKET_NAME = f"bucket_{DAG_ID}_{ENV_ID}"
@@ -82,6 +84,7 @@ with DAG(
         create_airflow_connection(
             connection_id=connection_id,
             connection_conf=connection,
+            is_composer=IS_COMPOSER,
         )
 
     create_connection_task = create_connection(connection_id=CONNECTION_ID)
@@ -133,7 +136,7 @@ with DAG(
         response = service.files().list(q=f"name = '{DRIVE_FILE_NAME}'").execute()
         if files := response["files"]:
             file = files[0]
-            log.info("Deleting file {}...", file)
+            log.info("Deleting file %s...", file)
             service.files().delete(fileId=file["id"])
             log.info("Done.")
 
@@ -145,7 +148,7 @@ with DAG(
 
     @task(task_id="delete_connection")
     def delete_connection(connection_id: str) -> None:
-        delete_airflow_connection(connection_id=connection_id)
+        delete_airflow_connection(connection_id=connection_id, is_composer=IS_COMPOSER)
 
     delete_connection_task = delete_connection(connection_id=CONNECTION_ID)
 
@@ -168,5 +171,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

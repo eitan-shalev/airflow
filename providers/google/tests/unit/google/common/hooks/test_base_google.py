@@ -29,12 +29,13 @@ import google.auth
 import google.auth.compute_engine
 import pytest
 import tenacity
+from google.api_core.client_options import ClientOptions
 from google.auth.environment_vars import CREDENTIALS
 from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.cloud.exceptions import Forbidden
 
 from airflow import version
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.utils.credentials_provider import _DEFAULT_SCOPES
 from airflow.providers.google.common.hooks import base_google as hook
 from airflow.providers.google.common.hooks.base_google import GoogleBaseHook, is_refresh_credentials_exception
@@ -101,7 +102,7 @@ class TestQuotaRetry:
 
 class TestRefreshCredentialsRetry:
     @pytest.mark.parametrize(
-        "exc, retryable",
+        ("exc", "retryable"),
         [
             (RefreshError("Other error", "test body"), False),
             (RefreshError("Unable to acquire impersonated credentials", "test body"), True),
@@ -541,6 +542,59 @@ class TestGoogleBaseHook:
         )
         assert result == ("CREDENTIALS", "SECOND_PROJECT_ID")
 
+    def test_quota_project_id_init(self):
+        """Test that quota project ID is properly initialized."""
+        hook = GoogleBaseHook(gcp_conn_id="google_cloud_default", quota_project_id="test-quota-project")
+        assert hook.quota_project_id == "test-quota-project"
+
+    @mock.patch(MODULE_NAME + ".get_credentials_and_project_id")
+    def test_quota_project_id_from_connection(self, mock_get_creds_and_proj_id):
+        """Test that quota project ID from connection is applied to credentials."""
+        mock_creds = mock.MagicMock()
+        mock_creds.with_quota_project.return_value = mock_creds
+        mock_get_creds_and_proj_id.return_value = (mock_creds, "test-project")
+
+        # Mock connection with quota_project_id in extras
+        uri = "google-cloud-platform://?quota_project_id=test-quota-project"
+        with mock.patch.dict("os.environ", {"AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT": uri}):
+            hook = GoogleBaseHook(gcp_conn_id="google_cloud_default")
+            creds, _ = hook.get_credentials_and_project_id()
+            mock_creds.with_quota_project.assert_called_once_with("test-quota-project")
+
+    @mock.patch(MODULE_NAME + ".get_credentials_and_project_id")
+    def test_quota_project_id_param_overrides_connection(self, mock_get_creds_and_proj_id):
+        """Test that quota project ID from param overrides connection value."""
+        mock_creds = mock.MagicMock()
+        mock_creds.with_quota_project.return_value = mock_creds
+        mock_get_creds_and_proj_id.return_value = (mock_creds, "test-project")
+
+        # Connection with quota_project_id in extras
+        conn_quota = "connection-quota-project"
+        uri = f"google-cloud-platform://?quota_project_id={conn_quota}"
+
+        with mock.patch.dict("os.environ", {"AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT": uri}):
+            hook = GoogleBaseHook(gcp_conn_id="google_cloud_default", quota_project_id="test-quota-project")
+            creds, _ = hook.get_credentials_and_project_id()
+
+            # Should use param quota project, not connection quota project
+            mock_creds.with_quota_project.assert_called_once_with("test-quota-project")
+
+    @pytest.mark.parametrize(
+        "invalid_id",
+        [
+            "UPPERCASE",  # Must be lowercase
+            "special@chars",  # Invalid characters
+            "ab-cd",  # Too short
+            "a" + "b" * 30,  # Too long
+            "1starts-with-number",  # Must start with letter
+            "",  # Empty string
+        ],
+    )
+    def test_quota_project_invalid_format(self, invalid_id):
+        """Test validation of quota project ID format."""
+        with pytest.raises((TypeError, ValueError)):
+            GoogleBaseHook(quota_project_id=invalid_id)
+
     def test_get_credentials_and_project_id_with_mutually_exclusive_configuration(self):
         self.instance.extras = {
             "project": "PROJECT_ID",
@@ -713,7 +767,7 @@ class TestGoogleBaseHook:
         assert http_authorized.timeout is not None
 
     @pytest.mark.parametrize(
-        "impersonation_chain, impersonation_chain_from_conn, target_principal, delegates",
+        ("impersonation_chain", "impersonation_chain_from_conn", "target_principal", "delegates"),
         [
             pytest.param("ACCOUNT_1", None, "ACCOUNT_1", None, id="string"),
             pytest.param(None, "ACCOUNT_1", "ACCOUNT_1", None, id="string_in_conn"),
@@ -790,6 +844,66 @@ class TestGoogleBaseHook:
             idp_extra_params_dict=None,
         )
         assert (mock_credentials, PROJECT_ID) == result
+
+    @pytest.mark.parametrize(
+        ("universe_domain_value", "expected_result"),
+        [
+            pytest.param("googleapis.com", True, id="default_value"),
+            pytest.param("", True, id="empty_value"),
+            pytest.param("test_universe_domain", False, id="non_default_value"),
+        ],
+    )
+    def test_is_default_universe(self, universe_domain_value, expected_result):
+        with patch.dict(os.environ, {"GOOGLE_CLOUD_UNIVERSE_DOMAIN": universe_domain_value}):
+            is_default_universe = self.instance.is_default_universe()
+
+            assert is_default_universe == expected_result
+
+    def test_is_default_universe_none(self):
+        with patch.dict(os.environ, {}, clear=True):
+            is_default_universe = self.instance.is_default_universe()
+
+            assert is_default_universe
+
+    def test_get_client_options_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            client_options = self.instance.get_client_options()
+
+            assert isinstance(client_options, ClientOptions)
+            assert client_options.universe_domain is None
+            assert client_options.api_endpoint is None
+
+    def test_get_client_options_with_global_universe_domain(self):
+        env_value = "test_universe_domain"
+        with patch.dict(os.environ, {"GOOGLE_CLOUD_UNIVERSE_DOMAIN": env_value}):
+            client_options = self.instance.get_client_options(api_endpoint_override="ignore_api_endpoint")
+
+            assert isinstance(client_options, ClientOptions)
+            assert client_options.universe_domain == env_value
+            assert client_options.api_endpoint is None
+
+    def test_get_client_options_with_api_endpoint_override(self):
+        api_endpoint_override = "test_api_endpoint"
+        with patch.dict(os.environ, {}, clear=True):
+            client_options = self.instance.get_client_options(api_endpoint_override=api_endpoint_override)
+
+            assert isinstance(client_options, ClientOptions)
+            assert client_options.api_endpoint == api_endpoint_override
+            assert client_options.universe_domain is None
+
+    def test_get_client_options_with_api_endpoint_override_and_with_global_universe_domain(self, caplog):
+        api_endpoint_override = "test_api_endpoint"
+        env_value = "test_universe_domain"
+        with patch.dict(os.environ, {"GOOGLE_CLOUD_UNIVERSE_DOMAIN": env_value}):
+            client_options = self.instance.get_client_options(api_endpoint_override=api_endpoint_override)
+
+            assert (
+                "Ignoring api_endpoint_override because the universe domain is not Google default universe."
+                in caplog.text
+            )
+            assert isinstance(client_options, ClientOptions)
+            assert client_options.universe_domain == env_value
+            assert client_options.api_endpoint is None
 
 
 class TestProvideAuthorizedGcloud:
@@ -1037,3 +1151,30 @@ class TestGoogleBaseAsyncHook:
         token = await instance.get_token()
         assert await token.get_project() == "CONN_PROJECT_ID"
         assert await token.get() == "IMPERSONATED_ACCESS_TOKEN"
+
+
+class TestGetFieldWithFalseValues:
+    """Test get_field function and _get_field method handle False and other falsy values correctly."""
+
+    def test_get_field_returns_false_not_none(self):
+        """Test that get_field correctly returns False instead of None."""
+        extras = {"use_legacy_sql": False}
+        result = hook.get_field(extras, "use_legacy_sql")
+        assert result is False
+
+    def test_get_field_returns_false_with_prefixed_name(self):
+        """Test that get_field correctly returns False with prefixed field name."""
+        extras = {"extra__google_cloud_platform__use_legacy_sql": False}
+        result = hook.get_field(extras, "use_legacy_sql")
+        assert result is False
+
+    @mock.patch("airflow.providers.common.compat.sdk.BaseHook.get_connection")
+    def test_hook_get_field_returns_false_not_default(self, mock_get_connection):
+        """Test that _get_field correctly returns False instead of default value."""
+        mock_connection = mock.MagicMock()
+        mock_connection.extra_dejson = {"use_legacy_sql": False}
+        mock_get_connection.return_value = mock_connection
+
+        hook_instance = hook.GoogleBaseHook(gcp_conn_id="test_conn")
+        result = hook_instance._get_field("use_legacy_sql", default=True)
+        assert result is False

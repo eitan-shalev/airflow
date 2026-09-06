@@ -84,7 +84,7 @@ apache-airflow-providers-apache-impala package
 `Apache Impala <https://impala.apache.org/>`__.
 
 
-Release: 1.7.2
+Release: 1.9.3
 
 Provider package
 ----------------
@@ -102,34 +102,34 @@ For the minimum Airflow version supported, see ``Requirements`` below.
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.10.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-=======================================  ==================
-PIP package                              Version required
-=======================================  ==================
-``impyla``                               ``>=0.18.0,<1.0``
-``apache-airflow-providers-common-sql``  ``>=1.26.0``
-``apache-airflow``                       ``>=2.10.0``
-=======================================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``impyla``                                  ``>=0.22.0,<1.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``apache-airflow``                          ``>=2.11.0``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional dependencies
+---------------------
 
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified provider distributions in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
 
 .. code-block:: bash
 
-    pip install apache-airflow-providers-apache-impala[common.sql]
+    pip install apache-airflow-providers-apache-impala[kerberos]
 
 
-============================================================================================================  ==============
-Dependent package                                                                                             Extra
-============================================================================================================  ==============
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_  ``common.sql``
-============================================================================================================  ==============
+==============  ======================
+Extra           Dependencies
+==============  ======================
+``kerberos``    ``kerberos>=1.3.0``
+``sqlalchemy``  ``sqlalchemy>=1.4.54``
+==============  ======================
 
 Downloading official packages
 -----------------------------
@@ -137,5 +137,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-apache-impala 1.7.2 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.7.2.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.7.2.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.7.2.tar.gz.sha512>`__)
-* `The apache-airflow-providers-apache-impala 1.7.2 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.7.2-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.7.2-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.7.2-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-apache-impala 1.9.3 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.9.3.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.9.3.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.9.3.tar.gz.sha512>`__)
+* `The apache-airflow-providers-apache-impala 1.9.3 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.9.3-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.9.3-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_impala-1.9.3-py3-none-any.whl.sha512>`__)

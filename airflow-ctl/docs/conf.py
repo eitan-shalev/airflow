@@ -33,11 +33,9 @@ from docs.utils.conf_constants import (
     AUTOAPI_OPTIONS,
     BASIC_AUTOAPI_IGNORE_PATTERNS,
     BASIC_SPHINX_EXTENSIONS,
-    REDOC_SCRIPT_URL,
     SMARTQUOTES_EXCLUDES,
     SPELLING_WORDLIST_PATH,
     SPHINX_DESIGN_STATIC_PATH,
-    SPHINX_REDOC_EXTENSIONS,
     SUPPRESS_WARNINGS,
     filter_autoapi_ignore_entries,
     get_autodoc_mock_imports,
@@ -88,11 +86,6 @@ smartquotes_excludes = SMARTQUOTES_EXCLUDES
 # ones.
 extensions = BASIC_SPHINX_EXTENSIONS
 
-# -- Options for sphinxcontrib.redoc -------------------------------------------
-# See: https://sphinxcontrib-redoc.readthedocs.io/en/stable/
-
-extensions.extend(SPHINX_REDOC_EXTENSIONS)
-redoc_script_url = REDOC_SCRIPT_URL
 
 extensions.extend(
     [
@@ -207,10 +200,16 @@ jinja_contexts = {
     "config_ctx": {"configs": configs, "deprecated_options": deprecated_options},
     "quick_start_ctx": {"doc_root_url": f"https://airflow.apache.org/docs/apache-airflow/{PACKAGE_VERSION}/"},
     "official_download_page": {
-        "base_url": f"https://downloads.apache.org/airflow/{PACKAGE_VERSION}",
-        "closer_lua_url": f"https://www.apache.org/dyn/closer.lua/airflow/{PACKAGE_VERSION}",
-        "airflow_version": PACKAGE_VERSION,
+        "base_url": f"https://downloads.apache.org/airflow/airflow-ctl/{PACKAGE_VERSION}",
+        "closer_lua_url": f"https://www.apache.org/dyn/closer.lua/airflow/airflow-ctl/{PACKAGE_VERSION}",
+        "airflowctl_version": PACKAGE_VERSION,
     },
+}
+
+# Use for generate rst_epilog and other post-generation substitutions
+global_substitutions = {
+    "version": PACKAGE_VERSION,
+    "experimental": "This is an :ref:`experimental feature <experimental>`.",
 }
 
 # -- Options for sphinx.ext.autodoc --------------------------------------------
@@ -284,7 +283,10 @@ exampleinclude_sourceroot = os.path.abspath("..")
 redirects_file = "redirects.txt"
 
 # -- Options for sphinxcontrib-spelling ----------------------------------------
-spelling_word_list_filename = [SPELLING_WORDLIST_PATH.as_posix()]
+spelling_word_list_filename = [
+    SPELLING_WORDLIST_PATH.as_posix(),
+    (pathlib.Path(__file__).parent / "spelling_wordlist.txt").as_posix(),
+]
 spelling_exclude_patterns = ["project.rst", "changelog.rst"]
 
 spelling_ignore_contributor_names = False

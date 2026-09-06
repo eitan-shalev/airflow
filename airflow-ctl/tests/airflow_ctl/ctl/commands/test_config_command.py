@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import pytest
+
 from airflowctl.api.client import ClientKind
 from airflowctl.api.datamodels.generated import Config, ConfigOption, ConfigSection
 from airflowctl.ctl import cli_parser
@@ -26,7 +28,7 @@ from airflowctl.ctl.commands import config_command
 from airflowctl.ctl.commands.config_command import ConfigChange, ConfigParameter
 
 
-class TestCliConfigLint:
+class TestCliConfigCommands:
     parser = cli_parser.get_parser()
 
     @patch("rich.print")
@@ -157,6 +159,71 @@ class TestCliConfigLint:
             "- [yellow]Removed deprecated `test_option` configuration parameter from `test_section` section.[/yellow]"
             in calls[1]
         )
+
+    @pytest.mark.parametrize(
+        ("remove_if_equals", "config_value", "expected_has_issue"),
+        [
+            pytest.param("matching_value", "matching_value", True, id="non-empty-match"),
+            pytest.param("", "", True, id="empty-string-match"),
+            pytest.param("", "non_matching_value", False, id="empty-string-no-match"),
+        ],
+    )
+    def test_lint_handles_remove_if_equals_rules(
+        self, api_client_maker, remove_if_equals, config_value, expected_has_issue
+    ):
+        with (
+            patch("airflowctl.api.client.Credentials.load"),
+            patch.dict(os.environ, {"AIRFLOW_CLI_TOKEN": "TEST_TOKEN"}),
+            patch.dict(os.environ, {"AIRFLOW_CLI_ENVIRONMENT": "TEST_CONFIG"}),
+            patch("rich.print") as mock_rich_print,
+            patch(
+                "airflowctl.ctl.commands.config_command.CONFIGS_CHANGES",
+                [
+                    ConfigChange(
+                        config=ConfigParameter("test_section", "test_option"),
+                        was_removed=True,
+                        remove_if_equals=remove_if_equals,
+                    ),
+                ],
+            ),
+        ):
+            response_config = Config(
+                sections=[
+                    ConfigSection(
+                        name="test_section",
+                        options=[
+                            ConfigOption(
+                                key="test_option",
+                                value=config_value,
+                            )
+                        ],
+                    )
+                ]
+            )
+
+            api_client = api_client_maker(
+                path="/api/v2/config",
+                response_json=response_config.model_dump(),
+                expected_http_status_code=200,
+                kind=ClientKind.CLI,
+            )
+
+            config_command.lint(
+                self.parser.parse_args(["config", "lint"]),
+                api_client=api_client,
+            )
+
+        calls = [call[0][0] for call in mock_rich_print.call_args_list]
+        if expected_has_issue:
+            assert "[red]Found issues in your airflow.cfg:[/red]" in calls[0]
+            assert (
+                "- [yellow]Removed deprecated `test_option` configuration parameter from `test_section` section.[/yellow]"
+                in calls[1]
+            )
+        else:
+            assert (
+                "[green]No issues found in your airflow.cfg. It is ready for Airflow 3![/green]" in calls[0]
+            )
 
     @patch("airflowctl.api.client.Credentials.load")
     @patch.dict(os.environ, {"AIRFLOW_CLI_TOKEN": "TEST_TOKEN"})
@@ -361,3 +428,53 @@ class TestCliConfigLint:
         calls = [call[0][0] for call in mock_rich_print.call_args_list]
         assert "[red]Found issues in your airflow.cfg:[/red]" in calls[0]
         assert "This is a test suggestion." in calls[1]
+
+    @patch("airflowctl.api.client.Credentials.load")
+    @patch.dict(os.environ, {"AIRFLOW_CLI_TOKEN": "TEST_TOKEN"})
+    @patch.dict(os.environ, {"AIRFLOW_CLI_ENVIRONMENT": "TEST_CONFIG"})
+    @patch("rich.print")
+    def test_config_list_masking_preservation(
+        self, mock_rich_print, _mock_credentials, api_client_maker, capsys
+    ):
+        """
+        Verify that sensitive values masked by the API (like '< hidden >') are preserved
+        and displayed correctly by the CLI list command.
+        """
+        response_config = Config(
+            sections=[
+                ConfigSection(
+                    name="core",
+                    options=[
+                        ConfigOption(key="parallelism", value="32"),
+                        ConfigOption(key="fernet_key", value="< hidden >"),
+                    ],
+                ),
+                ConfigSection(
+                    name="database",
+                    options=[
+                        ConfigOption(key="sql_alchemy_conn", value="< hidden >"),
+                    ],
+                ),
+            ]
+        )
+
+        api_client = api_client_maker(
+            path="/api/v2/config",
+            response_json=response_config.model_dump(),
+            expected_http_status_code=200,
+            kind=ClientKind.CLI,
+        )
+        args = self.parser.parse_args(["config", "list"])
+        args.func(
+            args,
+            api_client=api_client,
+        )
+
+        # Output is printed to stdout by AirflowConsole (using rich)
+        captured = capsys.readouterr()
+        output_str = captured.out
+
+        # Check output contains masked vales
+        assert "fernet_key" in output_str
+        assert "< hidden >" in output_str
+        assert "sql_alchemy_conn" in output_str

@@ -27,6 +27,305 @@
 Changelog
 ---------
 
+7.0.2
+.....
+
+Misc
+~~~~
+
+* ``Add type annotations to sql hooks (#70815)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+
+
+7.0.1
+.....
+
+Misc
+~~~~
+
+* ``Use built-in exceptions for Postgres hook input validation (#70537)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document psycopg3 driver switch for PostgresHook connections (#70360)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Limit pandas to < 3 for DataFrame XComs (#70791)``
+   * ``Revert "Limit pandas to < 3 for DataFrame XComs (#70791)" (#71100)``
+
+7.0.0
+.....
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+.. note::
+    On Airflow 3.4.0 and later, the default async metadata-database driver becomes
+    ``psycopg`` (psycopg3): the derived async connection URL changes from
+    ``postgresql+asyncpg://`` to ``postgresql+psycopg_async://``, which is safe behind
+    transaction-mode PgBouncer with no extra configuration. ``psycopg[binary]`` is now
+    installed by default to serve it.
+
+    ``asyncpg`` remains installed by default as well. This provider still supports Airflow
+    cores older than 3.4.0, which derive the async URL as ``postgresql+asyncpg://``
+    unconditionally and have no psycopg fallback — so asyncpg must stay present for them to
+    work. It will become opt-in-only (via the existing ``[asyncpg]`` extra) in a future
+    release once the minimum supported Airflow is 3.4.0.
+
+    To keep using asyncpg on Airflow 3.4.0+, set
+    ``[database] sql_alchemy_conn_async = postgresql+asyncpg://...`` explicitly.
+
+.. note::
+    On Airflow 3.4.0 and later, ``psycopg`` (psycopg3) becomes the default synchronous Postgres
+    driver, mirroring the async default above. ``psycopg[binary]`` is installed by default to serve it.
+
+    ``psycopg2-binary`` remains installed by default as well. This provider still supports Airflow
+    cores older than 3.4.0, which normalize the synchronous metadata-database connection to
+    ``postgresql+psycopg2://`` and have no psycopg fallback; Airflow 2.11 additionally ships
+    SQLAlchemy 1.4, which has no native ``psycopg`` (v3) dialect at all — so psycopg2 must stay
+    present for those cores to work. It will become opt-in-only (via the existing ``[psycopg2]``
+    extra) in a future release once the minimum supported Airflow is 3.4.0.
+
+    To keep using psycopg2 on Airflow 3.4.0+, set
+    ``[database] sql_alchemy_conn = postgresql+psycopg2://...`` explicitly.
+
+.. note::
+    The two notes above describe the **metadata database** only. Independently of them,
+    ``PostgresHook`` selects ``psycopg`` (psycopg3) for the connections it opens whenever
+    SQLAlchemy 2.x is installed — the default on Airflow 3.2 and later, and also the case on
+    Airflow 3.1 if SQLAlchemy has been upgraded to 2.x. Airflow 2.11 and 3.0 pin SQLAlchemy below
+    2.0 and are unaffected.
+
+    The ``google``, ``pgvector`` and ``amazon`` (Redshift SQLAlchemy/OpenLineage engine)
+    integrations follow the same selection, as does a Celery ``result_backend`` derived from the
+    metadata-database URL — unless ``[celery] result_backend`` is set explicitly.
+
+    There is no connection or configuration option to keep hooks on psycopg2; the
+    ``sql_alchemy_conn`` workarounds above cover the metadata database only. If your Dags rely on
+    psycopg2-specific behaviour, test before upgrading or pin the provider below 7.0.0.
+
+* ``Make psycopg (v3) the default synchronous Postgres driver (#69526)``
+* ``Switch the default async Postgres driver from asyncpg to psycopg3 (#69089)``
+
+Misc
+~~~~
+
+* ``Keep asyncpg installed by default in the Postgres provider (#69690)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare providers release 2026-07-06 (#69486)``
+   * ``Document each provider's optional extras in its docs index (#69478)``
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+6.8.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add configurable UPSERT update fields to PostgresHook (#67045)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Use execute_values instead of execute_batch for better bulk insert performance with PostgresHook (#68207)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.7.1
+.....
+
+Misc
+~~~~
+
+* ``Refactor PostgresHook and associated runtime tests (#66893)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+6.7.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add uri sanitizers and asset factories for new schemes (#66426)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Fix stale system test documentation links (#65071)``
+
+6.6.3
+.....
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.6.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add validation for missing host and cluster/workgroup identifier in aws iam token retrieval (#61965)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+
+6.6.1
+.....
+
+Misc
+~~~~
+
+* ``Migrate postgres connection UI metadata to YAML (#62445)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.6.0
+.....
+
+Features
+~~~~~~~~
+
+* ``feat: Add Hook Level Lineage to SQL hooks (#61535)``
+* ``Added validation for missing redshift connection host in postgres hook openlineage (#60918)``
+
+Misc
+~~~~
+
+* ``Bump min sqlalchemy version to 1.4.54 (#62299)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+
+6.5.4
+.....
+
+Misc
+~~~~
+
+* ``Guard type aliases and remove redundant imports in the postgres hook (#61554)``
+* ``Cleanup some dependencies (#60992)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Cleanup SQLA1.4 related code (#61408)``
+
+6.5.3
+.....
+
+Misc
+~~~~
+
+* ``Add SQLAlchemy to the dev‑dependency group in providers (#60472)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.5.2
+.....
+
+Misc
+~~~~
+
+* ``Consume ''AirflowOptionalProviderFeatureException'' from compat sdk in providers (#60335)``
+* ``New year means updated Copyright notices (#60344)``
+* ``Make SQLAlchemy optional for Postgres provider (#60257)``
+* ``Migrate postgres provider to use airflow.sdk.configuration.conf (#59984)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.5.1
+.....
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.5.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+   * ``Remove SDK reference for NOTSET in Airflow Core (#58258)``
+
+6.4.1
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+* ``better error handling in SnowflakeHook and PostgresHook when old version of AzureBaseHook (#57184)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable ruff PLW2101,PLW2901,PLW3301 rule (#57700)``
+   * ``Enable PT006 rule to postgres Provider test (#57934)``
+   * ``Fix code formatting via ruff preview (#57641)``
+
+6.4.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add Azure IAM/Entra ID support for PostgresHook (#55729)``
+
+Misc
+~~~~
+
+* ``fix mypy type errors in common/sql provider for sqlalchemy 2 upgrade (#56824)``
+* ``Migrate postgres provider to ''common.compat'' (#57022)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT011 rule to prvoider tests (#55980)``
+
 6.3.0
 .....
 
@@ -56,8 +355,6 @@ Doc-only
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Switch pre-commit to prek (#54258)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Fix Airflow 2 reference in README/index of providers (#55240)``
 
 6.2.3
@@ -233,8 +530,6 @@ Misc
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Use Python 3.9 as target version for Ruff & Black rules (#44298)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
    * ``Allow configuration of sqlalchemy query parameter for JdbcHook and PostgresHook through extras (#44910)``
 
@@ -605,7 +900,8 @@ Misc
 
 * ``Add common-sql lower bound for common-sql (#25789)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Rename schema to database in 'PostgresHook' (#26436)``
    * ``Revert "Rename schema to database in 'PostgresHook' (#26436)" (#26734)``
    * ``Apply PEP-563 (Postponed Evaluation of Annotations) to non-core airflow (#26289)``

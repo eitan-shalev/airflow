@@ -17,7 +17,7 @@
 # under the License.
 from __future__ import annotations
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 
 # Note: Any AirflowException raised is expected to cause the TaskInstance
 #       to be marked in an ERROR state
@@ -50,3 +50,59 @@ class EcsOperatorError(Exception):
 
 class S3HookUriParseFailure(AirflowException):
     """When parse_s3_url fails to parse URL, this error is thrown."""
+
+
+class S3HookPathTraversalError(AirflowException):
+    """Raise when an S3 object key resolves outside the target local directory."""
+
+
+class NeptuneGraphCreationFailedError(AirflowException):
+    """Raised when a Neptune Analytics graph fails to reach the available state."""
+
+
+class NeptunePrivateEndpointCreationFailedError(AirflowException):
+    """Raised when a Neptune Analytics private graph endpoint fails to be created."""
+
+
+class NeptunePrivateEndpointDeletionFailedError(AirflowException):
+    """Raised when a Neptune Analytics private graph endpoint fails to be deleted."""
+
+
+class NeptuneGraphDeletionFailedError(AirflowException):
+    """Raised when a Neptune Analytics graph deletion encounters an unexpected AWS error."""
+
+
+class NeptuneImportTaskCancellationFailedError(AirflowException):
+    """Raised when a Neptune Analytics import task cancellation fails or returns an unexpected status."""
+
+
+class NeptuneImportTaskFailedError(AirflowException):
+    """Raised when a Neptune Analytics import task fails to complete successfully."""
+
+
+class GlueJobRunStoppedError(AirflowException):
+    """Raised when a Glue job run finishes in a state that is not a real success."""
+
+
+class DataSyncTaskNotFoundError(AirflowException):
+    """Raised when a DataSync task could not be identified or created for the requested locations."""
+
+
+class DataSyncMultipleTasksError(AirflowException):
+    """Raised when multiple DataSync tasks match and random task choice is not allowed."""
+
+
+class DataSyncMultipleLocationsError(AirflowException):
+    """Raised when multiple DataSync locations match and random location choice is not allowed."""
+
+
+class DataSyncLocationNotFoundError(AirflowException):
+    """Raised when a DataSync location could not be determined or created."""
+
+
+class DataSyncTaskCreationError(AirflowException):
+    """Raised when DataSync task creation did not return a task ARN."""
+
+
+class DataSyncTaskExecutionFailedError(AirflowException):
+    """Raised when a DataSync task execution could not be started or did not complete successfully."""

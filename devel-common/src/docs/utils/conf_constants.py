@@ -86,22 +86,26 @@ BASIC_SPHINX_EXTENSIONS = [
     "removemarktransform",
     "sphinx_copybutton",
     "airflow_intersphinx",
+    "common_compat_alias",
+    "sphinxcontrib.mermaid",
     "sphinxcontrib.spelling",
     "sphinx_airflow_theme",
     "redirects",
     "substitution_extensions",
     "sphinx_design",
+    "pagefind_search",
+    "metrics_tables_from_registry",
+    "suggest_change_button",
 ]
 
-SPHINX_REDOC_EXTENSIONS = [
-    "autoapi.extension",
-    # First, generate redoc
-    "sphinxcontrib.redoc",
-    # Second, update redoc script
-    "sphinx_script_update",
-]
+# Properties for Swagger OpenAPI generation:
+# See https://github.com/SAP/swagger-plugin-for-sphinx
+SPHINX_SWAGGER_EXTENSION = "swagger_plugin_for_sphinx"
 
-REDOC_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/redoc@2.0.0-rc.48/bundles/redoc.standalone.js"
+_SWAGGER_VERSION = "5.32.6"
+SWAGGER_PRESENT_URI = f"https://unpkg.com/swagger-ui-dist@{_SWAGGER_VERSION}/swagger-ui-standalone-preset.js"
+SWAGGER_BUNDLE_URI = f"https://unpkg.com/swagger-ui-dist@{_SWAGGER_VERSION}/swagger-ui-bundle.js"
+SWAGGER_CSS_URI = f"https://unpkg.com/swagger-ui-dist@{_SWAGGER_VERSION}/swagger-ui.css"
 
 
 def get_rst_filepath_from_path(filepath: pathlib.Path, root: pathlib.Path):
@@ -145,6 +149,7 @@ def get_html_theme_options():
             {"href": "/community/", "text": "Community"},
             {"href": "/meetups/", "text": "Meetups"},
             {"href": "/docs/", "text": "Documentation"},
+            {"href": "/registry/", "text": "Registry"},
             {"href": "/use-cases/", "text": "Use Cases"},
             {"href": "/announcements/", "text": "Announcements"},
             {"href": "/blog/", "text": "Blog"},
@@ -263,7 +268,6 @@ def get_autodoc_mock_imports() -> list[str]:
         "smbclient",
         "snowflake",
         "sqlalchemy-drill",
-        "sshtunnel",
         "telegram",
         "tenacity",
         "vertica_python",
@@ -272,10 +276,23 @@ def get_autodoc_mock_imports() -> list[str]:
     ]
 
 
+def _get_third_party_mapping(pkg_names: list[str]) -> dict[str, tuple[str, tuple[str]]]:
+    """Build intersphinx mapping for third-party packages, skipping those without cached inventories."""
+    mapping: dict[str, tuple[str, tuple[str]]] = {}
+    for pkg_name in pkg_names:
+        inv_path = INVENTORY_CACHE_DIR / pkg_name / "objects.inv"
+        if not inv_path.exists():
+            continue
+        mapping[pkg_name] = (
+            f"{THIRD_PARTY_INDEXES[pkg_name]}/",
+            (str(inv_path),),
+        )
+    return mapping
+
+
 def get_intersphinx_mapping() -> dict[str, tuple[str, tuple[str]]]:
-    return {
-        pkg_name: (f"{THIRD_PARTY_INDEXES[pkg_name]}/", (f"{INVENTORY_CACHE_DIR}/{pkg_name}/objects.inv",))
-        for pkg_name in [
+    return _get_third_party_mapping(
+        [
             "boto3",
             "celery",
             "docker",
@@ -287,16 +304,12 @@ def get_intersphinx_mapping() -> dict[str, tuple[str, tuple[str]]]:
             "requests",
             "sqlalchemy",
         ]
-    }
+    )
 
 
 def get_google_intersphinx_mapping() -> dict[str, tuple[str, tuple[str]]]:
-    return {
-        pkg_name: (
-            f"{THIRD_PARTY_INDEXES[pkg_name]}/",
-            (f"{INVENTORY_CACHE_DIR}/{pkg_name}/objects.inv",),
-        )
-        for pkg_name in [
+    return _get_third_party_mapping(
+        [
             "google-api-core",
             "google-cloud-automl",
             "google-cloud-bigquery",
@@ -322,7 +335,7 @@ def get_google_intersphinx_mapping() -> dict[str, tuple[str, tuple[str]]]:
             "google-cloud-videointelligence",
             "google-cloud-vision",
         ]
-    }
+    )
 
 
 BASIC_AUTOAPI_IGNORE_PATTERNS = [
@@ -330,6 +343,7 @@ BASIC_AUTOAPI_IGNORE_PATTERNS = [
     "*/airflow/executors/*",
     "*/_internal*",
     "*/node_modules/*",
+    "*/.pnpm-store/*",
     "*/migrations/*",
     "*/contrib/*",
     "*/example_taskflow_api_docker_virtualenv.py",
@@ -339,7 +353,6 @@ BASIC_AUTOAPI_IGNORE_PATTERNS = [
     "*/tests/system/__init__.py",
     "*/tests/system/*/tests/*",
     "*/tests/system/example_empty.py",
-    "*/check_translations_completeness.py",
 ]
 
 IGNORE_PATTERNS_RECOGNITION = re.compile(r"\[AutoAPI\] .* Ignoring \s (?P<path>/[\w/.]*)", re.VERBOSE)

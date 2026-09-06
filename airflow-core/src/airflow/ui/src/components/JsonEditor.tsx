@@ -16,36 +16,92 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { json } from "@codemirror/lang-json";
-import { githubLight, githubDark } from "@uiw/codemirror-themes-all";
-import CodeMirror, { type ReactCodeMirrorProps, type ReactCodeMirrorRef } from "@uiw/react-codemirror";
-import { forwardRef } from "react";
+import { useRef } from "react";
 
-import { useColorMode } from "src/context/colorMode";
+import Editor, { type EditorProps } from "src/components/MonacoEditor";
+import { useMonacoTheme } from "src/context/colorMode";
 
-export const JsonEditor = forwardRef<ReactCodeMirrorRef, ReactCodeMirrorProps>((props, ref) => {
-  const { colorMode } = useColorMode();
+type JsonEditorProps = {
+  readonly editable?: boolean;
+  readonly height?: string;
+  readonly id?: string;
+  readonly name?: string;
+  readonly onBlur?: () => void;
+  readonly onChange?: (value: string) => void;
+  readonly onError?: (error: string | undefined) => void;
+  readonly prettify?: boolean;
+  readonly value?: string;
+};
+
+export const JsonEditor = ({
+  editable = true,
+  height = "200px",
+  onBlur,
+  onChange,
+  onError,
+  prettify = false,
+  value,
+  ...rest
+}: JsonEditorProps) => {
+  const { beforeMount, theme } = useMonacoTheme();
+  const onBlurRef = useRef(onBlur);
+
+  onBlurRef.current = onBlur;
+
+  const options: EditorProps["options"] = {
+    automaticLayout: true,
+    folding: true,
+    fontSize: 14,
+    lineNumbers: "on",
+    minimap: { enabled: false },
+    readOnly: !editable,
+    renderLineHighlight: "none",
+    scrollBeyondLastLine: false,
+  };
+
+  const handleChange = (val: string | undefined = "") => {
+    if (!prettify) {
+      onChange?.(val);
+
+      return;
+    }
+
+    try {
+      const formattedJson = JSON.stringify(JSON.parse(val) as unknown, undefined, 2);
+
+      onError?.(undefined);
+      if (formattedJson !== value) {
+        onChange?.(formattedJson);
+      }
+    } catch (error) {
+      onError?.(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   return (
-    <CodeMirror
-      basicSetup={{
-        autocompletion: true,
-        bracketMatching: true,
-        foldGutter: true,
-        lineNumbers: true,
-      }}
-      extensions={[json()]}
-      height="200px"
-      ref={ref}
+    <div
       style={{
         border: "1px solid var(--chakra-colors-border-emphasized)",
         borderRadius: "8px",
-        outline: "none",
-        padding: "2px",
+        overflow: "hidden",
         width: "100%",
       }}
-      theme={colorMode === "dark" ? githubDark : githubLight}
-      {...props}
-    />
+      {...rest}
+    >
+      <Editor
+        beforeMount={beforeMount}
+        height={height}
+        language="json"
+        onChange={handleChange}
+        onMount={(editor) => {
+          editor.onDidBlurEditorText(() => {
+            onBlurRef.current?.();
+          });
+        }}
+        options={options}
+        theme={theme}
+        value={value}
+      />
+    </div>
   );
-});
+};

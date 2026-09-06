@@ -71,7 +71,7 @@ apache-airflow-providers-pinecone package
 `Pinecone <https://docs.pinecone.io/docs/overview>`__
 
 
-Release: 2.3.4
+Release: 2.4.5
 
 Provider package
 ----------------
@@ -89,11 +89,21 @@ For the minimum Airflow version supported, see ``Requirements`` below.
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.10.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.10.0``
-``pinecone``        ``>=7.0.0``
-==================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``pinecone``                                ``>=7.0.0``
+==========================================  ==================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-pinecone 2.4.5 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pinecone-2.4.5.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pinecone-2.4.5.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pinecone-2.4.5.tar.gz.sha512>`__)
+* `The apache-airflow-providers-pinecone 2.4.5 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pinecone-2.4.5-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pinecone-2.4.5-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pinecone-2.4.5-py3-none-any.whl.sha512>`__)

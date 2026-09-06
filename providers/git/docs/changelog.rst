@@ -19,6 +19,251 @@
 Changelog
 ---------
 
+0.4.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix malformed GitDagBundle error message for missing repository path (#70622)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document commit SHA support for GitDagBundle tracking_ref (#69735)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+
+
+0.4.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Use private key when pulling submodules (#62938)``
+
+Misc
+~~~~
+
+* ``Use ValueError for conflicting Git connection key arguments (#70538)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+0.4.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Verify SSH host keys by default in the Git provider hook (#69103)``
+
+Misc
+~~~~
+
+* ``Correct README.rst common compat version reference inconsistency (#67554)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+   * ``Prepare provider documentation 2026-06-16 (#68642)``
+   * ``Prepare provider documentation 2026-06-02 (#67920)``
+
+0.4.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add Git Sparse Checkout to Git Dag Bundle (#67047)``
+* ``Add BundleVersion dataclass and version_data persistence to DagVersion (#66491)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+0.3.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add skip on git clone when local version matches bundle version (#63814)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Add tests for git bundle force-push resilience, error recovery, etc. (#65750)``
+
+0.3.1
+.....
+
+Misc
+~~~~
+
+* ``Harden GitHook SSH command building and URL construction (#64756)``
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+0.3.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add SSH auth parameters to GitHook for bastion hosts, custom ports, and passphrases (#63942)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix shell injection in GitHook SSH passphrase askpass script (#64126)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+Doc-only
+~~~~~~~~
+
+* ``Docs: Fix Git connection docs to match actual GitHook parameters (#63265)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Prepare providers release 2026-03-09 (#63198)``
+   * ``Add Apache Airflow Provider Registry (#62261)``
+
+0.2.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix GitDagBundle re-cloning on every task when prune_dotgit_folder is True (#61847)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``[Part 2] Migrate connection UI metadata to YAML for more providers (#62109)``
+
+0.2.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix public repository access in GitDagBundle (#61343)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+0.2.2
+.....
+
+Misc
+~~~~
+
+* ``Git provider should require common-compat >=1.12.0 (#60985)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+0.2.1
+.....
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+0.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add submodules to GitDagBundle (#59911)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+0.1.1
+.....
+
+Misc
+~~~~
+
+* ``Fix misleading error message when GitHook creation fails (#59084)``
+* ``Add backcompat for exceptions in providers (#58727)``
+
+Doc-only
+~~~~~~~~
+
+* ``Updates to release process of providers (#58316)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+0.1.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add HTTP URL authentication support to GitHook (#58194)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Remove '.git' folder from versions in GitDagBundle (#57069)``
+* ``Fix Git corruption recovery by moving fetch into retry context (#56913)``
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fixing some typos and spelling errors (#57186)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Fix the '__init__.py' for tests (#58211)``
+   * ``Enable PT006 rule to 6 files in providers (edge3,git) (#58018)``
+   * ``Fix documentation/provider.yaml consistencies (#57283)``
+
+0.0.9
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix corrupted bare Git repository recovery in DAG bundles (#56206)``
+
+Misc
+~~~~
+
+* ``Migrate git provider to ''common.compat'' (#57008)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
 0.0.8
 .....
 
@@ -51,8 +296,6 @@ Doc-only
    * ``Fix git connection test by adding required conn_type field (#54681)``
    * ``Replace API server's direct Connection access workaround in BaseHook (#54083)``
    * ``Switch pre-commit to prek (#54258)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Fix Airflow 2 reference in README/index of providers (#55240)``
 
 0.0.6
@@ -61,7 +304,7 @@ Doc-only
 Misc
 ~~~~
 
-* ``Refactor bundle view_url to not instaniate bundle on server components (#52876)``
+* ``Refactor bundle view_url to not instantiate bundle on server components (#52876)``
 
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):

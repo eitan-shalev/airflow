@@ -1,5 +1,7 @@
 {
   "filters": {
+    "body": "Nachricht",
+    "createdAt": "Erstellt um",
     "response": {
       "all": "Alle",
       "pending": "Ausstehend",
@@ -12,13 +14,29 @@
   "requiredActionCount_other": "{{count}} offene Interaktionen",
   "requiredActionState": "Status der Interaktion",
   "response": {
+    "created": "Antwort erstellt um ",
     "error": "Senden der Antwort fehlgeschlagen",
     "optionsDescription": "Wählen Sie Ihre Optionen für diesen Task",
     "optionsLabel": "Optionen",
     "received": "Antwort empfangen um ",
     "respond": "Antworten",
+    "responded_by_user_name": "Beantwortet von (Benutzername)",
     "success": "{{taskId}} Interaktion erfolgreich",
     "title": "Erforderliche Interaktion - {{taskId}}"
+  },
+  "review": {
+    "detail": {
+      "selectRequiredAction": "Wählen Sie eine erforderliche Interaktion aus, um Details anzuzeigen"
+    },
+    "list": {
+      "completedRequiredActions": "Abgeschlossene erforderliche Interaktionen ({{count}})",
+      "loadError": "Erforderliche Interaktionen konnten nicht geladen werden",
+      "loadingActions": "Erforderliche Interaktionen werden geladen ...",
+      "pendingRequiredActions": "Ausstehende erforderliche Interaktionen ({{count}})"
+    },
+    "openReviewDrawer": "Prüfbereich öffnen",
+    "pageLimitHint": "Hier werden nur die ersten Interaktionen angezeigt. Verwenden Sie \"$t(review.viewAll)\", um alle anzuzeigen.",
+    "viewAll": "Alle erforderlichen Interaktionen anzeigen"
   },
   "state": {
     "approvalReceived": "Genehmigung erhalten",

@@ -30,12 +30,15 @@ import yandex.cloud.lockbox.v1.secret_service_pb2_grpc as secret_service_pb_grpc
 import yandexcloud
 
 from airflow.models import Connection
+from airflow.providers.common.compat.sdk import conf
 from airflow.providers.yandex.utils.credentials import get_credentials
 from airflow.providers.yandex.utils.defaults import default_conn_name
 from airflow.providers.yandex.utils.fields import get_field_from_extras
 from airflow.providers.yandex.utils.user_agent import provider_user_agent
 from airflow.secrets import BaseSecretsBackend
 from airflow.utils.log.logging_mixin import LoggingMixin
+
+TEAM_SEP_MULTIPLIER = 2
 
 
 class LockboxSecretBackend(BaseSecretsBackend, LoggingMixin):
@@ -145,11 +148,12 @@ class LockboxSecretBackend(BaseSecretsBackend, LoggingMixin):
         self.sep = sep
         self.endpoint = endpoint
 
-    def get_conn_value(self, conn_id: str) -> str | None:
+    def get_conn_value(self, conn_id: str, team_name: str | None = None) -> str | None:
         """
         Retrieve from Secrets Backend a string value representing the Connection object.
 
         :param conn_id: Connection ID
+        :param team_name: Team name associated to the task trying to access the connection (if any)
         :return: Connection Value
         """
         if self.connections_prefix is None:
@@ -158,19 +162,28 @@ class LockboxSecretBackend(BaseSecretsBackend, LoggingMixin):
         if conn_id == self.yc_connection_id:
             return None
 
-        return self._get_secret_value(self.connections_prefix, conn_id)
+        if self._names_a_team_namespace(conn_id):
+            self._log_refusal("connection", conn_id)
+            return None
 
-    def get_variable(self, key: str) -> str | None:
+        return self._get_secret_value(self.connections_prefix, conn_id, team_name=team_name)
+
+    def get_variable(self, key: str, team_name: str | None = None) -> str | None:
         """
         Return value for Airflow Variable.
 
         :param key: Variable Key
+        :param team_name: Team name associated to the task trying to access the variable (if any)
         :return: Variable Value
         """
         if self.variables_prefix is None:
             return None
 
-        return self._get_secret_value(self.variables_prefix, key)
+        if self._names_a_team_namespace(key):
+            self._log_refusal("variable", key)
+            return None
+
+        return self._get_secret_value(self.variables_prefix, key, team_name=team_name)
 
     def get_config(self, key: str) -> str | None:
         """
@@ -241,12 +254,53 @@ class LockboxSecretBackend(BaseSecretsBackend, LoggingMixin):
             return key
         return f"{prefix}{self.sep}{key}"
 
-    def _get_secret_value(self, prefix: str, key: str) -> str | None:
+    def _build_team_secret_name(self, prefix: str, team_name: str, key: str) -> str:
+        team_prefix = self._build_secret_name(prefix, team_name)
+        return f"{team_prefix}{self.sep * TEAM_SEP_MULTIPLIER}{key}"
+
+    def _names_a_team_namespace(self, secret_id: str) -> bool:
+        """
+        Whether ``secret_id`` spells out a team scoped secret name.
+
+        A team scoped secret is named ``<team><team sep><key>``, so an id that itself contains
+        the team separator makes the built name ambiguous: team ``a`` with key ``b//c`` and team
+        ``a//b`` with key ``c`` produce the same string. Such an id is refused for *every*
+        lookup -- team scoped as well as team agnostic -- because the ambiguity exists in both
+        directions and the caller's own namespace is not a safe harbour for it.
+
+        The id is never parsed to work out *which* team it names, because it cannot be: nothing
+        in the string distinguishes the two readings above. Comparing the id against the prefix
+        the caller's own team builds looks equivalent and is not -- a caller in team ``a`` would
+        match ``a//b``'s namespace on the prefix and read its secrets. Only the caller's own
+        namespace is ever constructed, never parsed.
+
+        Only checked in multi-team mode: ``team_name`` is never non-``None`` otherwise, so no
+        team scoped secret can exist to collide with.
+        """
+        if not conf.getboolean("core", "multi_team", fallback=False):
+            return False
+        return self.sep * TEAM_SEP_MULTIPLIER in secret_id
+
+    def _log_refusal(self, kind: str, secret_id: str) -> None:
+        self.log.warning(
+            "%s id %r contains %r, which separates the team name from the key in a team scoped "
+            "secret name. Such an id is ambiguous and is not looked up. Returning None.",
+            kind.capitalize(),
+            secret_id,
+            self.sep * TEAM_SEP_MULTIPLIER,
+        )
+
+    def _get_secret_value(self, prefix: str, key: str, team_name: str | None = None) -> str | None:
+        secrets = self._get_secrets()
         secret: secret_pb.Secret | None = None
-        for s in self._get_secrets():
-            if s.name == self._build_secret_name(prefix=prefix, key=key):
-                secret = s
-                break
+        # The team scoped name is tried first. Keys that would make it name a namespace other
+        # than the caller's own are refused by the callers before reaching here.
+        if team_name:
+            secret = self._find_secret(secrets, prefix, self._build_team_secret_name("", team_name, key))
+
+        if not secret:
+            secret = self._find_secret(secrets, prefix, key)
+
         if not secret:
             return None
 
@@ -256,6 +310,12 @@ class LockboxSecretBackend(BaseSecretsBackend, LoggingMixin):
         if len(entries) == 0:
             return None
         return sorted(entries.values())[0]
+
+    def _find_secret(self, secrets: list[secret_pb.Secret], prefix: str, key: str) -> secret_pb.Secret | None:
+        for s in secrets:
+            if s.name == self._build_secret_name(prefix=prefix, key=key):
+                return s
+        return None
 
     def _get_secrets(self) -> list[secret_pb.Secret]:
         # generate client if not exists, to load folder_id from connections

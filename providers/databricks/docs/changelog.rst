@@ -26,6 +26,453 @@
 Changelog
 ---------
 
+7.19.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add Databricks SQL warehouse lifecycle operators (#70088)``
+* ``Add performance_target parameter to DatabricksSubmitRunOperator (#71374)``
+* ``Add Databricks-native retry settings to task operators (#69182)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Make 'durable' reach 'default_args' and warn when set below Airflow 3.3 (#71531)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document how clearing tasks works with task state store on durable operators (#71358)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+   * ``Update changelog with better wording (#71161)``
+
+
+7.18.1
+......
+
+Misc
+~~~~
+
+* ``Review and update constraint dependencies (#70652)``
+* ``Validate DatabricksSQLStatementsSensor statement fields after rendering (#70340)``
+* ``Validate DatabricksCopyIntoOperator template fields after rendering (#70339)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document effect of state-store cleanup for operators with durable execution (#70721)``
+* ``Clarify Databricks retry_delay uses exponential backoff (#68622)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Restore Dag-parse-time validation for Databricks Repos operator arguments (#70551)``
+   * ``Validate Databricks Repos operators' template fields after rendering (#70341)``
+   * ``Limit pandas to < 3 for DataFrame XComs (#70791)``
+   * ``Revert "Limit pandas to < 3 for DataFrame XComs (#70791)" (#71100)``
+
+7.18.0
+......
+
+Features
+~~~~~~~~
+
+* ``Databricks OIDC token federation for AWS IAM (#69509)``
+* ``Add supplied-token OIDC federation to the Databricks provider (#69272)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix DatabricksSqlHook sqlalchemy_url missing http_path from connection extra (#69747)``
+
+Doc-only
+~~~~~~~~
+
+* ``Link task state store docs in durable execution across providers (#69851)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+7.17.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add durable execution to 'DatabricksRunNowOperator' (#69174)``
+* ``Accept BLOCKED and WAITING_FOR_RETRY Databricks run states (#69193)``
+* ``Add durable execution to DatabricksSubmitRunOperator (#68974)``
+* ``Add proxy support to Databricks connections (#68527)``
+* ``Surface databricks API errors as a separate exception (#69019)``
+* ``Add query tags to 'DatabricksSqlSensor' and 'DatabricksPartitionSensor' (#68704)``
+* ``Add OpenLineage Spark conf injection to DatabricksSubmitRunOperator (#67894)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Include last error cause in Databricks API when retry is exhausted (#69238)``
+* ``Align hook run() annotations with None-able handler results (#69230)``
+* ``Reconnect to blocked Databricks runs in SubmitRunOperator durable retries (#69195)``
+* ``Fix DatabricksWorkflowTaskGroup ignoring upstream/downstream set before with block (#68924)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Document each provider's optional extras in its docs index (#69478)``
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+7.16.1
+......
+
+.. note::
+   ``DatabricksCreateJobsOperator``, ``DatabricksSubmitRunOperator`` and ``DatabricksRunNowOperator``
+   now assemble and validate their Databricks request payload at task **execution** time instead of
+   at operator construction time. This is required so that templated ``json`` payloads and templated
+   named parameters (including values pulled from XCom) are rendered before the payload is built.
+   As a result, payload-validation errors that previously surfaced while the Dag was parsed — e.g.
+   ``git_source is required for dbt_task``, ``'pipeline_name' is not allowed in conjunction with
+   'pipeline_id'``, ``Argument 'job_name' is not allowed with argument 'job_id'`` and invalid
+   payload types — now surface when the task runs. A templated ``json`` payload may now also resolve
+   to a Python-dict-literal string (what classic Jinja produces when rendering a dict pulled from
+   XCom), in addition to a mapping or a JSON string.
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix Databricks operators with templated json payloads (#68519)``
+
+Misc
+~~~~
+
+* ``Bump aiohttp>=3.14.0 (#67978)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add comment hint about pandas 3.0.0 (#67961)``
+
+7.16.0
+......
+
+Features
+~~~~~~~~
+
+* ``Fail fast for non-serializable retry_args in deferrable operators and triggers (#64960)``
+* ``Forward Airflow Dag params to Databricks job parameters in CreateJobs/SubmitRun/RunNow (#66613)``
+* ``Add session-level query tags to Databricks SQL operators (#66895)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Lock in Databricks workflow depends_on parent-key behavior (#66681)``
+
+Misc
+~~~~
+
+* ``Remove further findings from positional session check (#67712)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+7.15.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add uri sanitizers and asset factories for new schemes (#66426)``
+* ``Support user-assigned managed identity for Azure VM auth (#66072)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Repair action missing job parameters in 'DatabricksRunNowOperator' (#67055)``
+* ``Preserve Databricks deferrable trigger caller across triggerer restarts (#66965)``
+* ``Fix 'DatabricksWorkflowTaskGroup' leaking TaskGroupContext on internal exception (#66582)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix flaky databricks token-expiry test by freezing time_machine (#66660)``
+   * ``Enable plugin tests in test_databricks_workflow.py for Airflow 3.0+ (#66442)``
+
+7.14.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add 'access_control_list' to 'DatabricksWorkflowTaskGroup' (#64538)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add 'task_config' to 'template_fields' for 'DatabricksTaskOperator' (#65858)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Providers wave 2026-04-21 (#65614)``
+   * ``Providers wave 2026-04-21``
+
+7.13.0
+......
+
+.. note:: **Security fix — TLS verification for Kubernetes TokenRequest API (affects Kubernetes OIDC token federation)**
+
+   The Kubernetes TokenRequest API call made during ``federated_k8s`` authentication now verifies the
+   Kubernetes API server's TLS certificate using the in-cluster CA bundle at
+   ``/var/run/secrets/kubernetes.io/serviceaccount/ca.crt``. Previously, TLS verification was disabled
+   (``verify=False``), which exposed the token exchange to potential man-in-the-middle attacks within the
+   cluster.
+
+   **This is a security fix that enforces what should always have been the behaviour.**
+
+   For all standard Kubernetes deployments (EKS, AKS, GKE, vanilla Kubernetes), the CA bundle is
+   automatically mounted at the standard path by the Kubernetes API server as part of service account
+   token projection — no action is required.
+
+   **Potentially impacted:** Non-compliant or highly customized Kubernetes distributions that do not
+   mount ``ca.crt`` at ``/var/run/secrets/kubernetes.io/serviceaccount/ca.crt``. If you are affected,
+   please open an issue so support for a configurable CA path can be added.
+
+Features
+~~~~~~~~
+
+* ``Implement on_kill() trigger hook for Databricks triggers (#65672)``
+
+Doc-only
+~~~~~~~~
+
+* ``Cleanup databricks docs for 'DatabricksWorkflowTaskGroup' (#65135)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix stale system test documentation links (#65071)``
+
+7.12.1
+......
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+7.12.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add new hook method (#62822)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix typo in 'monitor_databricks_job' (#63651)``
+* ``Enable TLS certificate verification for K8s token exchange in 'DatabricksHook' (#63704)``
+* ``Map Airflow trigger_rule to Databricks run_if in 'DatabricksWorkflowTaskGroup' (#63420)``
+* ``Fix broken import of 'aiofiles' in 'BaseDatabricksHook' (#63518)``
+* ``Fail deferrable runs that terminate before defer (#62917)``
+* ``Fix sql_warehouse_name resolution: handle 'warehouses' API response key (#63286)``
+* ``Handle concurrent create race in DatabricksReposCreateOperator when ignore_existing_repo=True. If create_repo() fails, the operator now re-checks repository existence and proceeds if the repository was created concurrently; otherwise, the original exception is re-raised. Add unit tests covering recovery and failure propagation under concurrent create scenarios. (#62422)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+* ``Fix AIR004* in multiple example DAGs (#62529)``
+* ``Refactor timeout handling in DatabricksSqlHook to use explicit signaling (#62623)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+
+7.11.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add validation for table_name and expression_list in DatabricksCopyIntoOperator (#62499)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Raise ValueError instead of KeyError when cancel_previous_runs=True and no job identifier is provided (#62393)``
+
+Misc
+~~~~
+
+* ``Remove dependency limitations related to FAB's py3.13 incompatibility (#62924)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+7.10.0
+......
+
+Features
+~~~~~~~~
+
+* ``feat: Add OpenLineage methods to DatabricksHook (#62179)``
+* ``Databricks OIDC token federation for Kubernetes deployment (#61458)``
+* ``feat: Add Hook Level Lineage to SQL hooks (#61535)``
+* ``Add missing template fields to 'DatabricksWorkflowTaskGroup' (#61865)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``cleanup test_databricks_workflow (#61907)``
+
+7.9.1
+.....
+
+Misc
+~~~~
+
+* ``Cleanup some dependencies (#60992)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+7.9.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add direct GCS export to DatabricksSqlOperator with Parquet/Avro support #55128 (#60543)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix missing fastavro after PR #60732 (#60797)``
+* ``Pin fastavro to minimum 1.10.0 for Python 3.13 compatibility (#60732)``
+* ``Updating Databricks API endpoints to appropriate versions (#60647)``
+
+Misc
+~~~~
+
+* ``Define 'TaskInstanceKey' in task-sdk to support client server separation (#60776)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert exclusion of deltalake 1.3.1 as aarch64 binaries are available now (#60611)``
+
+7.8.3
+.....
+
+Misc
+~~~~
+
+* ``Consume ''AirflowOptionalProviderFeatureException'' from compat sdk in providers (#60335)``
+* ``Limit deltalake again to 1.3.1 due to missing ARM .whl files (#60376)``
+* ``New year means updated Copyright notices (#60344)``
+* ``Made sqlalchemy dependency optional for Databricks provider (#60110)``
+* ``Move over plugins_manager to a shared library (#59956)``
+* ``Limit deltalake again to 1.3.0 due to missing ARM .whl files (#60098)``
+* ``Source databricks provider to use airflow.sdk.configuration.conf (#60021)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "Limit deltalake to not include 1.3.0 version (#59977)" (#60005)``
+   * ``Limit deltalake to not include 1.3.0 version (#59977)``
+
+7.8.2
+.....
+
+Misc
+~~~~
+
+* ``'issue-59189:' Updating Databricks provider to point to '2.2/jobs/...' endpoint (#59217)``
+* ``Remove top-level SDK reference in Core (#59817)``
+* ``Refactor/sqla2 providers(celery, kubernetes, databricks, mysql) to remove SQLA query usage (#59537)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``TaskInstance unused method cleanup (#59835)``
+
+7.8.1
+.....
+
+Misc
+~~~~
+
+* ``chore: use OL macros instead of building OL ids from scratch (#59197)``
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+7.8.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+7.7.5
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fix documentation/provider.yaml consistencies (#57283)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable ruff PLW2101,PLW2901,PLW3301 rule (#57700)``
+   * ``Enable PT006 rule to 14 files in providers (databricks,dbt,docker) (#57994)``
+   * ``Fix mypy static errors in databricks provider (#57768)``
+   * ``Enable ruff PLW1641 rule (#57679)``
+   * ``Enable ruff PLW1508 rule (#57653)``
+   * ``Fix code formatting via ruff preview (#57641)``
+
+7.7.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix Databricks provider import error without fab provider (#56702)``
+
+Misc
+~~~~
+
+* ``Migrate databricks provider to ''common.compat'' (#56993)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Remove 'pytest.importorskip("flask_appbuilder")' from tests (#56679)``
+   * ``Enable PT011 rule to prvoider tests (#56320)``
+
 7.7.3
 .....
 
@@ -69,8 +516,6 @@ Doc-only
    appropriate section above if needed. Do not delete the lines(!):
    * ``Switch pre-commit to prek (#54258)``
    * ``Add CI support for SQLAlchemy 2.0 (#52233)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Fix Airflow 2 reference in README/index of providers (#55240)``
 
 7.7.1
@@ -287,7 +732,7 @@ Misc
 .....
 
 .. note::
-  This version has no code changes. It's released due to yank of previous version due to packaging issues.
+  This version contains no code changes. It was released to replace a previous version that was yanked due to a packaging issue.
 
 7.1.0
 .....
@@ -356,8 +801,6 @@ Misc
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Use Python 3.9 as target version for Ruff & Black rules (#44298)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
    * ``Revert "Added job_clusters as a templated parameter to CreateDatabricksWorkfl…" (#45035)``
 
@@ -658,11 +1101,10 @@ Misc
 * ``fix typos in DatabricksSubmitRunOperator (#36248)``
 * ``Add code snippet formatting in docstrings via Ruff (#36262)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Prepare docs 1st wave of Providers December 2023 (#36112)``
    * ``Prepare docs 1st wave of Providers December 2023 RC2 (#36190)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Re-apply updated version numbers to 2nd wave of providers in December (#36380)``
    * ``Prepare 2nd wave of providers in December (#36373)``
 

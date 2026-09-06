@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-apache-hive``
 
-Release: ``9.1.2``
+Release: ``9.6.1``
 
 
 `Apache Hive <https://hive.apache.org/>`__
@@ -36,7 +36,7 @@ This is a provider package for ``apache.hive`` provider. All classes for this pr
 are in ``airflow.providers.apache.hive`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-apache-hive/9.1.2/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-apache-hive/9.6.1/>`_.
 
 Installation
 ------------
@@ -45,26 +45,27 @@ You can install this package on top of an existing Airflow installation (see ``R
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-apache-hive``
 
-The package supports the following python versions: 3.10,3.11,3.12,3.13
+The package supports the following python versions: 3.10,3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-=======================================  =====================================
-PIP package                              Version required
-=======================================  =====================================
-``apache-airflow``                       ``>=2.10.0``
-``apache-airflow-providers-common-sql``  ``>=1.26.0``
-``hmsclient``                            ``>=0.1.0``
-``pandas``                               ``>=2.1.2; python_version < "3.13"``
-``pandas``                               ``>=2.2.3; python_version >= "3.13"``
-``pyhive[hive_pure_sasl]``               ``>=0.7.0``
-``thrift``                               ``>=0.11.0``
-``jmespath``                             ``>=0.7.0``
-=======================================  =====================================
+==========================================  =================================================================
+PIP package                                 Version required
+==========================================  =================================================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``hmsclient``                               ``>=0.1.0``
+``pandas``                                  ``>=2.1.2; python_version < "3.13"``
+``pandas``                                  ``>=2.2.3; python_version >= "3.13" and python_version < "3.14"``
+``pandas``                                  ``>=2.3.3; python_version >= "3.14"``
+``pyhive[hive_pure_sasl]``                  ``>=0.7.0``
+``jmespath``                                ``>=0.7.0``
+==========================================  =================================================================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified providers in order to use them.
@@ -80,7 +81,6 @@ You can install such cross-provider dependencies when installing from PyPI. For 
 Dependent package                                                                                                       Extra
 ======================================================================================================================  ===================
 `apache-airflow-providers-amazon <https://airflow.apache.org/docs/apache-airflow-providers-amazon>`_                    ``amazon``
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_            ``common.sql``
 `apache-airflow-providers-microsoft-mssql <https://airflow.apache.org/docs/apache-airflow-providers-microsoft-mssql>`_  ``microsoft.mssql``
 `apache-airflow-providers-mysql <https://airflow.apache.org/docs/apache-airflow-providers-mysql>`_                      ``mysql``
 `apache-airflow-providers-presto <https://airflow.apache.org/docs/apache-airflow-providers-presto>`_                    ``presto``
@@ -88,5 +88,21 @@ Dependent package                                                               
 `apache-airflow-providers-vertica <https://airflow.apache.org/docs/apache-airflow-providers-vertica>`_                  ``vertica``
 ======================================================================================================================  ===================
 
+Optional dependencies
+----------------------
+
+===================  =============================================================================================
+Extra                Dependencies
+===================  =============================================================================================
+``amazon``           ``apache-airflow-providers-amazon``
+``microsoft.mssql``  ``apache-airflow-providers-microsoft-mssql``
+``mysql``            ``apache-airflow-providers-mysql``
+``presto``           ``apache-airflow-providers-presto``
+``samba``            ``apache-airflow-providers-samba``
+``sqlalchemy``       ``sqlalchemy>=1.4.54``
+``vertica``          ``apache-airflow-providers-vertica``
+``GSSAPI``           ``winkerberos>=0.7.0; sys_platform == "win32"``, ``kerberos>=1.3.0; sys_platform != "win32"``
+===================  =============================================================================================
+
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-apache-hive/9.1.2/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-apache-hive/9.6.1/changelog.html>`_.

@@ -18,12 +18,11 @@ from __future__ import annotations
 
 import os
 import stat
-import unittest
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.teradata.utils.bteq_util import (
     identify_os,
     is_valid_encoding,
@@ -348,7 +347,3 @@ class TestBteqUtils:
         ssh_client = MagicMock()
         result = is_valid_remote_bteq_script_file(ssh_client, None)
         assert result is False
-
-
-if __name__ == "__main__":
-    unittest.main()

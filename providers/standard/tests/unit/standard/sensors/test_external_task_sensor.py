@@ -24,13 +24,20 @@ from datetime import time, timedelta
 from unittest import mock
 
 import pytest
+from sqlalchemy import select
 
 from airflow import settings
-from airflow.exceptions import AirflowException, AirflowSensorTimeout, AirflowSkipException, TaskDeferred
+from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.models import DagRun, TaskInstance
 from airflow.models.dag import DAG
 from airflow.models.serialized_dag import SerializedDagModel
 from airflow.models.xcom_arg import XComArg
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowSensorTimeout,
+    AirflowSkipException,
+    TaskDeferred,
+)
 from airflow.providers.standard.exceptions import (
     DuplicateStateError,
     ExternalDagDeletedError,
@@ -47,16 +54,34 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.sensors.external_task import ExternalTaskMarker, ExternalTaskSensor
 from airflow.providers.standard.sensors.time import TimeSensor
 from airflow.providers.standard.triggers.external_task import WorkflowTrigger
-from airflow.serialization.serialized_objects import SerializedBaseOperator
 from airflow.timetables.base import DataInterval
-from airflow.utils.session import NEW_SESSION, provide_session
+from airflow.utils.session import NEW_SESSION, create_session, provide_session
 from airflow.utils.state import DagRunState, State
 from airflow.utils.types import DagRunType
 
+from tests_common.test_utils.compat import OperatorSerialization
 from tests_common.test_utils.dag import create_scheduler_dag, sync_dag_to_db, sync_dags_to_db
 from tests_common.test_utils.db import clear_db_runs
 from tests_common.test_utils.mock_operators import MockOperator
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_1_PLUS, AIRFLOW_V_3_2_PLUS
+from tests_common.test_utils.version_compat import (
+    AIRFLOW_V_3_0_PLUS,
+    AIRFLOW_V_3_1_PLUS,
+    AIRFLOW_V_3_2_PLUS,
+    AIRFLOW_V_3_3_PLUS,
+)
+
+
+def _make_dagbag(dag_folder):
+    """DagBag with examples disabled on Airflow <3.3.
+
+    In 3.3+, ``include_examples`` was removed and example DAGs come from
+    provider example bundles instead. On older versions the default is True,
+    which loads example DAGs that can fail tests with their required Params.
+    """
+    if AIRFLOW_V_3_3_PLUS:
+        return DagBag(dag_folder=dag_folder)
+    return DagBag(dag_folder=dag_folder, include_examples=False)  # type: ignore[call-arg]
+
 
 if AIRFLOW_V_3_0_PLUS:
     from airflow.models.dag_version import DagVersion
@@ -359,7 +384,7 @@ class TestExternalTaskSensorV2:
 
         # then
         session = settings.Session()
-        task_instances: list[TI] = session.query(TI).filter(TI.task_id == op.task_id).all()
+        task_instances: list[TI] = session.scalars(select(TI).where(TI.task_id == op.task_id)).all()
         assert len(task_instances) == 1, "Unexpected number of task instances"
         assert task_instances[0].state == State.SKIPPED, "Unexpected external task state"
 
@@ -378,7 +403,7 @@ class TestExternalTaskSensorV2:
         op.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
 
         # then
-        task_instances: list[TI] = session.query(TI).filter(TI.task_id == op.task_id).all()
+        task_instances: list[TI] = session.scalars(select(TI).where(TI.task_id == op.task_id)).all()
         assert len(task_instances) == 1, "Unexpected number of task instances"
         assert task_instances[0].state == State.SKIPPED, "Unexpected external task state"
 
@@ -485,7 +510,7 @@ class TestExternalTaskSensorV2:
         op.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
 
         # then
-        task_instances: list[TI] = session.query(TI).filter(TI.task_id == op.task_id).all()
+        task_instances: list[TI] = session.scalars(select(TI).where(TI.task_id == op.task_id)).all()
         assert len(task_instances) == 1, "Unexpected number of task instances"
         assert task_instances[0].state == State.SKIPPED, "Unexpected external task state"
 
@@ -521,15 +546,13 @@ exit 0
             # once per minute (the run on the first second of
             # each minute).
         except Exception as e:
-            failed_tis = (
-                session.query(TI)
-                .filter(
+            failed_tis = session.scalars(
+                select(TI).where(
                     TI.dag_id == dag_external_id,
                     TI.state == State.FAILED,
                     TI.execution_date == DEFAULT_DATE + timedelta(seconds=1),
                 )
-                .all()
-            )
+            ).all()
             if len(failed_tis) == 1 and failed_tis[0].task_id == "task_external_with_failure":
                 pass
             else:
@@ -859,7 +882,7 @@ exit 0
             )
 
     @pytest.mark.parametrize(
-        "kwargs, expected_message",
+        ("kwargs", "expected_message"),
         (
             (
                 {
@@ -884,7 +907,7 @@ exit 0
         ),
     )
     @pytest.mark.parametrize(
-        "soft_fail, expected_exception",
+        ("soft_fail", "expected_exception"),
         (
             (
                 False,
@@ -901,7 +924,7 @@ exit 0
     def test_fail_poke(
         self, _get_dttm_filter, get_count, soft_fail, expected_exception, kwargs, expected_message
     ):
-        _get_dttm_filter.return_value = []
+        _get_dttm_filter.return_value = [DEFAULT_DATE]
         get_count.return_value = 1
         op = ExternalTaskSensor(
             task_id="test_external_task_duplicate_task_ids",
@@ -912,6 +935,7 @@ exit 0
             deferrable=False,
             **kwargs,
         )
+        assert op.external_dates_filter is None
 
         # We need to handle the specific exception types based on kwargs
         if not soft_fail:
@@ -931,8 +955,10 @@ exit 0
             with pytest.raises(expected_exception, match=expected_message):
                 op.execute(context={})
 
+        assert op.external_dates_filter == DEFAULT_DATE.isoformat()
+
     @pytest.mark.parametrize(
-        "response_get_current, response_exists, kwargs, expected_message",
+        ("response_get_current", "response_exists", "kwargs", "expected_message"),
         (
             (None, None, {}, f"The external DAG {TEST_DAG_ID} does not exist."),
             (
@@ -957,7 +983,7 @@ exit 0
         ),
     )
     @pytest.mark.parametrize(
-        "soft_fail, expected_exception",
+        ("soft_fail", "expected_exception"),
         (
             (
                 False,
@@ -1042,6 +1068,99 @@ exit 0
         assert exc.value.trigger.external_task_ids == ["test_task"]
         assert exc.value.trigger.execution_dates == [DEFAULT_DATE]
 
+    @pytest.mark.execution_timeout(10)
+    def test_external_task_sensor_deferrable_timeout_only(self, dag_maker):
+        """Test that deferrable mode uses timeout parameter when only timeout is set."""
+        context = {"execution_date": DEFAULT_DATE}
+        with dag_maker() as dag:
+            op = ExternalTaskSensor(
+                task_id="test_external_task_sensor_check",
+                external_dag_id="test_dag_parent",
+                external_task_id="test_task",
+                deferrable=True,
+                timeout=60,
+            )
+            dr = dag.create_dagrun(
+                run_id="test_run",
+                run_type=DagRunType.MANUAL,
+                state=None,
+            )
+            context.update(dag_run=dr, logical_date=DEFAULT_DATE)
+
+        with pytest.raises(TaskDeferred) as exc:
+            op.execute(context=context)
+        assert exc.value.timeout == timedelta(seconds=60)
+
+    @pytest.mark.execution_timeout(10)
+    def test_external_task_sensor_deferrable_execution_timeout_only(self, dag_maker):
+        """Test that deferrable mode falls back to execution_timeout when timeout is not set."""
+        context = {"execution_date": DEFAULT_DATE}
+        with dag_maker() as dag:
+            op = ExternalTaskSensor(
+                task_id="test_external_task_sensor_check",
+                external_dag_id="test_dag_parent",
+                external_task_id="test_task",
+                deferrable=True,
+                timeout=0,  # Explicitly set to 0 to indicate not using timeout
+                execution_timeout=timedelta(seconds=120),
+            )
+            dr = dag.create_dagrun(
+                run_id="test_run",
+                run_type=DagRunType.MANUAL,
+                state=None,
+            )
+            context.update(dag_run=dr, logical_date=DEFAULT_DATE)
+
+        with pytest.raises(TaskDeferred) as exc:
+            op.execute(context=context)
+        assert exc.value.timeout == timedelta(seconds=120)
+
+    @pytest.mark.execution_timeout(10)
+    def test_external_task_sensor_deferrable_timeout_priority(self, dag_maker):
+        """Test that deferrable mode prioritizes timeout over execution_timeout when both are set."""
+        context = {"execution_date": DEFAULT_DATE}
+        with dag_maker() as dag:
+            op = ExternalTaskSensor(
+                task_id="test_external_task_sensor_check",
+                external_dag_id="test_dag_parent",
+                external_task_id="test_task",
+                deferrable=True,
+                timeout=90,
+                execution_timeout=timedelta(seconds=120),
+            )
+            dr = dag.create_dagrun(
+                run_id="test_run",
+                run_type=DagRunType.MANUAL,
+                state=None,
+            )
+            context.update(dag_run=dr, logical_date=DEFAULT_DATE)
+
+        with pytest.raises(TaskDeferred) as exc:
+            op.execute(context=context)
+        assert exc.value.timeout == timedelta(seconds=90)
+
+    @pytest.mark.execution_timeout(10)
+    def test_external_task_sensor_deferrable_check_existence_dag_not_found(self, dag_maker):
+        """Test that deferrable sensor raises ExternalDagNotFoundError when Dag doesn't exist."""
+        context = {"execution_date": DEFAULT_DATE}
+        with dag_maker() as dag:
+            op = ExternalTaskSensor(
+                task_id="test_external_task_sensor_check",
+                external_dag_id="non_existing_dag",
+                external_task_id=None,
+                deferrable=True,
+                check_existence=True,
+            )
+            dag.create_dagrun(
+                run_id="test_run",
+                run_type=DagRunType.MANUAL,
+                state=None,
+            )
+            context.update(logical_date=DEFAULT_DATE)
+
+        with pytest.raises(ExternalDagNotFoundError):
+            op.execute(context=context)
+
     def test_get_logical_date(self):
         """For AF 2, we check for execution_date in context."""
         context = {"execution_date": DEFAULT_DATE}
@@ -1105,6 +1224,7 @@ class TestExternalTaskSensorV3:
             states=["success"],
             task_ids=["test_external_task_sensor_success"],
         )
+        assert op.external_dates_filter == DEFAULT_DATE.isoformat()
 
     @pytest.mark.execution_timeout(10)
     def test_external_task_sensor_failure(self, dag_maker):
@@ -1128,6 +1248,7 @@ class TestExternalTaskSensorV3:
             states=[State.FAILED],
             task_ids=["test_external_task_sensor_failure"],
         )
+        assert op.external_dates_filter == DEFAULT_DATE.isoformat()
 
     @pytest.mark.execution_timeout(10)
     def test_external_task_sensor_soft_fail(self, dag_maker):
@@ -1152,6 +1273,7 @@ class TestExternalTaskSensorV3:
             states=[State.FAILED],
             task_ids=["test_external_task_sensor_soft_fail"],
         )
+        assert op.external_dates_filter == DEFAULT_DATE.isoformat()
 
     @pytest.mark.execution_timeout(10)
     def test_external_task_sensor_multiple_task_ids(self, dag_maker):
@@ -1172,6 +1294,7 @@ class TestExternalTaskSensorV3:
             states=["success"],
             task_ids=["task1", "task2"],
         )
+        assert op.external_dates_filter == DEFAULT_DATE.isoformat()
 
     @pytest.mark.execution_timeout(10)
     def test_external_task_sensor_skipped_states(self, dag_maker):
@@ -1193,6 +1316,7 @@ class TestExternalTaskSensorV3:
             states=[State.SKIPPED],
             task_ids=["test_external_task_sensor_skipped_states"],
         )
+        assert op.external_dates_filter == DEFAULT_DATE.isoformat()
 
     def test_external_task_sensor_invalid_combination(self, dag_maker):
         """Test that the sensor raises an error with invalid parameter combinations."""
@@ -1239,6 +1363,7 @@ class TestExternalTaskSensorV3:
             logical_dates=[DEFAULT_DATE],
             task_group_id="test_group",
         )
+        assert op.external_dates_filter == DEFAULT_DATE.isoformat()
 
     @pytest.mark.execution_timeout(10)
     def test_external_task_sensor_execution_date_fn(self, dag_maker):
@@ -1264,6 +1389,7 @@ class TestExternalTaskSensorV3:
             states=["success"],
             task_ids=["test_task"],
         )
+        assert op.external_dates_filter == expected_date.isoformat()
 
     @pytest.mark.execution_timeout(10)
     def test_external_task_sensor_execution_delta(self, dag_maker):
@@ -1286,6 +1412,7 @@ class TestExternalTaskSensorV3:
             states=["success"],
             task_ids=["test_task"],
         )
+        assert op.external_dates_filter == expected_date.isoformat()
 
     @pytest.mark.execution_timeout(10)
     def test_external_task_sensor_duplicate_task_ids(self, dag_maker):
@@ -1319,6 +1446,121 @@ class TestExternalTaskSensorV3:
         assert exc.value.trigger.external_task_ids == ["test_task"]
         assert exc.value.trigger.logical_dates == [DEFAULT_DATE]
 
+    def test_poke_interval_set_on_init(self):
+        """Test that poke_interval is set on init and the deprecated poll_interval attribute mirrors it."""
+        sensor = ExternalTaskSensor(
+            task_id=TASK_ID,
+            external_task_id=EXTERNAL_TASK_ID,
+            external_dag_id=EXTERNAL_DAG_ID,
+            poke_interval=30,
+        )
+
+        assert sensor.poke_interval == 30
+        with pytest.warns(AirflowProviderDeprecationWarning, match="poll_interval"):
+            assert sensor.poll_interval == 30
+
+    def test_poll_interval_attribute_get_set_deprecated(self):
+        """Reading or writing the poll_interval attribute is deprecated but still mirrors poke_interval."""
+        sensor = ExternalTaskSensor(
+            task_id=TASK_ID,
+            external_task_id=EXTERNAL_TASK_ID,
+            external_dag_id=EXTERNAL_DAG_ID,
+            poke_interval=30,
+        )
+
+        with pytest.warns(AirflowProviderDeprecationWarning, match="poll_interval"):
+            sensor.poll_interval = 15
+
+        assert sensor.poke_interval == 15
+
+    def test_poke_interval_default_when_unset(self):
+        """The BaseSensor default of 60.0 must be preserved."""
+        sensor = ExternalTaskSensor(
+            task_id=TASK_ID,
+            external_task_id=EXTERNAL_TASK_ID,
+            external_dag_id=EXTERNAL_DAG_ID,
+        )
+
+        assert sensor.poke_interval == 60.0
+
+    def test_poke_interval_accepts_timedelta(self):
+        """poke_interval should accept a timedelta, coerced to seconds, same as the base sensor."""
+        sensor = ExternalTaskSensor(
+            task_id=TASK_ID,
+            external_task_id=EXTERNAL_TASK_ID,
+            external_dag_id=EXTERNAL_DAG_ID,
+            poke_interval=timedelta(seconds=5),
+        )
+
+        assert sensor.poke_interval == 5.0
+
+    def test_poke_interval_no_warning_when_poll_interval_unset(self, recwarn):
+        """Passing only poke_interval must not emit the poll_interval deprecation warning."""
+        sensor = ExternalTaskSensor(
+            task_id=TASK_ID,
+            external_task_id=EXTERNAL_TASK_ID,
+            external_dag_id=EXTERNAL_DAG_ID,
+            poke_interval=15,
+        )
+
+        assert sensor.poke_interval == 15
+        assert not any(issubclass(w.category, AirflowProviderDeprecationWarning) for w in recwarn.list)
+
+    def test_poll_interval_deprecated_and_sets_poke_interval(self):
+        """poll_interval is deprecated, but its value is still respected as poke_interval."""
+        with pytest.warns(AirflowProviderDeprecationWarning, match="poll_interval"):
+            sensor = ExternalTaskSensor(
+                task_id=TASK_ID,
+                external_task_id=EXTERNAL_TASK_ID,
+                external_dag_id=EXTERNAL_DAG_ID,
+                poll_interval=45,
+            )
+
+        assert sensor.poke_interval == 45
+
+    def test_poll_interval_zero_still_deprecated(self):
+        """Regression test: a falsy poll_interval (0) must still take the deprecation path."""
+        with pytest.warns(AirflowProviderDeprecationWarning, match="poll_interval"):
+            sensor = ExternalTaskSensor(
+                task_id=TASK_ID,
+                external_task_id=EXTERNAL_TASK_ID,
+                external_dag_id=EXTERNAL_DAG_ID,
+                poll_interval=0,
+            )
+
+        assert sensor.poke_interval == 0
+
+    def test_poke_interval_overrides_poll_interval_when_both_set(self):
+        """When both are provided, poke_interval takes precedence over the deprecated poll_interval."""
+        with pytest.warns(AirflowProviderDeprecationWarning, match="poll_interval"):
+            sensor = ExternalTaskSensor(
+                task_id=TASK_ID,
+                external_task_id=EXTERNAL_TASK_ID,
+                external_dag_id=EXTERNAL_DAG_ID,
+                poke_interval=10,
+                poll_interval=99,
+            )
+
+        assert sensor.poke_interval == 10
+
+    @pytest.mark.execution_timeout(10)
+    def test_deferrable_poke_interval_passed_to_trigger(self, dag_maker):
+        """Test that poke_interval is correctly forwarded to WorkflowTrigger when deferrable=True."""
+        with dag_maker("test_dag_child"):
+            op = ExternalTaskSensor(
+                task_id="test_external_task_sensor_check",
+                external_dag_id="test_dag_parent",
+                external_task_id="test_task",
+                deferrable=True,
+                poke_interval=30,
+            )
+
+        with pytest.raises(TaskDeferred) as exc:
+            op.execute(context=self.context)
+
+        assert isinstance(exc.value.trigger, WorkflowTrigger)
+        assert exc.value.trigger.poke_interval == 30
+
     @pytest.mark.execution_timeout(10)
     def test_external_task_sensor_only_dag_id(self, dag_maker):
         """Test that the sensor works correctly when only external_dag_id is provided."""
@@ -1338,6 +1580,7 @@ class TestExternalTaskSensorV3:
             logical_dates=[DEFAULT_DATE],
             states=["success"],
         )
+        assert op.external_dates_filter == DEFAULT_DATE.isoformat()
 
     @pytest.mark.execution_timeout(10)
     def test_external_task_sensor_task_group_failed_states(self, dag_maker):
@@ -1359,6 +1602,7 @@ class TestExternalTaskSensorV3:
             logical_dates=[DEFAULT_DATE],
             task_group_id="test_group",
         )
+        assert op.external_dates_filter == DEFAULT_DATE.isoformat()
 
     def test_get_logical_date(self):
         """For AF 3, we check for logical date or dag_run.run_after  in context."""
@@ -1416,10 +1660,27 @@ class TestExternalTaskAsyncSensor:
             deferrable=True,
         )
 
+        context = {"execution_date": DEFAULT_DATE, "logical_date": DEFAULT_DATE}
         with pytest.raises(TaskDeferred) as exc:
-            sensor.execute(context=mock.MagicMock())
+            sensor.execute(context=context)
 
         assert isinstance(exc.value.trigger, WorkflowTrigger), "Trigger is not a WorkflowTrigger"
+
+    def test_deferrable_poke_interval_passed_to_trigger(self):
+        """Test that poke_interval flows through to WorkflowTrigger on both AF2 and AF3 paths."""
+        sensor = ExternalTaskSensor(
+            task_id=TASK_ID,
+            external_task_id=EXTERNAL_TASK_ID,
+            external_dag_id=EXTERNAL_DAG_ID,
+            deferrable=True,
+            poke_interval=30,
+        )
+
+        with pytest.raises(TaskDeferred) as exc:
+            sensor.execute(context={"execution_date": DEFAULT_DATE, "logical_date": DEFAULT_DATE})
+
+        assert isinstance(exc.value.trigger, WorkflowTrigger)
+        assert exc.value.trigger.poke_interval == 30
 
     def test_defer_and_fire_failed_state_trigger(self):
         """Tests that an ExternalTaskNotFoundError is raised in case of error event"""
@@ -1430,9 +1691,10 @@ class TestExternalTaskAsyncSensor:
             deferrable=True,
         )
 
+        context = {"execution_date": DEFAULT_DATE, "logical_date": DEFAULT_DATE}
         with pytest.raises(ExternalTaskNotFoundError):
             sensor.execute_complete(
-                context=mock.MagicMock(), event={"status": "error", "message": "test failure message"}
+                context=context, event={"status": "error", "message": "test failure message"}
             )
 
     def test_defer_and_fire_timeout_state_trigger(self):
@@ -1444,9 +1706,10 @@ class TestExternalTaskAsyncSensor:
             deferrable=True,
         )
 
+        context = {"execution_date": DEFAULT_DATE, "logical_date": DEFAULT_DATE}
         with pytest.raises(ExternalTaskNotFoundError):
             sensor.execute_complete(
-                context=mock.MagicMock(),
+                context=context,
                 event={"status": "timeout", "message": "Dag was not started within 1 minute, assuming fail."},
             )
 
@@ -1459,9 +1722,10 @@ class TestExternalTaskAsyncSensor:
             deferrable=True,
         )
 
+        context = {"execution_date": DEFAULT_DATE, "logical_date": DEFAULT_DATE}
         with mock.patch.object(sensor.log, "info") as mock_log_info:
             sensor.execute_complete(
-                context=mock.MagicMock(),
+                context=context,
                 event={"status": "success"},
             )
         mock_log_info.assert_called_with("External tasks %s has executed successfully.", [EXTERNAL_TASK_ID])
@@ -1475,9 +1739,10 @@ class TestExternalTaskAsyncSensor:
             deferrable=True,
         )
 
+        context = {"execution_date": DEFAULT_DATE, "logical_date": DEFAULT_DATE}
         with pytest.raises(ExternalDagFailedError, match="External job has failed."):
             sensor.execute_complete(
-                context=mock.MagicMock(),
+                context=context,
                 event={"status": "failed"},
             )
 
@@ -1491,9 +1756,10 @@ class TestExternalTaskAsyncSensor:
             soft_fail=True,
         )
 
+        context = {"execution_date": DEFAULT_DATE, "logical_date": DEFAULT_DATE}
         with pytest.raises(AirflowSkipException, match="External job has failed skipping."):
             sensor.execute_complete(
-                context=mock.MagicMock(),
+                context=context,
                 event={"status": "failed"},
             )
 
@@ -1508,17 +1774,45 @@ class TestExternalTaskAsyncSensor:
             failed_states=failed_states,
         )
 
+        context = {"execution_date": datetime(2025, 1, 1), "logical_date": datetime(2025, 1, 1)}
         with pytest.raises(TaskDeferred) as exc:
-            sensor.execute(context=mock.MagicMock())
+            sensor.execute(context=context)
 
         trigger = exc.value.trigger
         assert isinstance(trigger, WorkflowTrigger), "Trigger is not a WorkflowTrigger"
         assert trigger.failed_states == failed_states, "failed_states not properly passed to WorkflowTrigger"
 
+    def test_defer_execute_complete_re_sets_external_dates_filter_attr(self):
+        sensor = ExternalTaskSensor(
+            task_id=TASK_ID,
+            external_task_id=EXTERNAL_TASK_ID,
+            external_dag_id=EXTERNAL_DAG_ID,
+            deferrable=True,
+        )
+        assert sensor.external_dates_filter is None
+
+        context = {"execution_date": DEFAULT_DATE, "logical_date": DEFAULT_DATE}
+        sensor.execute_complete(context=context, event={"status": "success"})
+
+        assert sensor.external_dates_filter == DEFAULT_DATE.isoformat()
+
+    def test_poke_interval_set_on_init(self):
+        """Test that poke_interval is set on init and the deprecated poll_interval attribute mirrors it."""
+        sensor = ExternalTaskSensor(
+            task_id=TASK_ID,
+            external_task_id=EXTERNAL_TASK_ID,
+            external_dag_id=EXTERNAL_DAG_ID,
+            poke_interval=30,
+        )
+
+        assert sensor.poke_interval == 30
+        with pytest.warns(AirflowProviderDeprecationWarning, match="poll_interval"):
+            assert sensor.poll_interval == 30
+
 
 @pytest.mark.skipif(not AIRFLOW_V_3_0_PLUS, reason="Needs Flask app context fixture for AF 2")
 @pytest.mark.parametrize(
-    argnames=["external_dag_id", "external_task_id", "expected_external_dag_id", "expected_external_task_id"],
+    argnames=("external_dag_id", "external_task_id", "expected_external_dag_id", "expected_external_task_id"),
     argvalues=[
         ("dag_test", "task_test", "dag_test", "task_test"),
         ("dag_{{ ds }}", "task_{{ ds }}", f"dag_{DEFAULT_DATE.date()}", f"task_{DEFAULT_DATE.date()}"),
@@ -1540,13 +1834,13 @@ def test_external_task_sensor_extra_link(
         external_dag_id=external_dag_id,
         external_task_id=external_task_id,
     )
-    ti.render_templates()
+    task = ti.render_templates()
 
-    assert ti.task.external_dag_id == expected_external_dag_id
-    assert ti.task.external_task_id == expected_external_task_id
-    assert ti.task.external_task_ids == [expected_external_task_id]
+    assert task.external_dag_id == expected_external_dag_id
+    assert task.external_task_id == expected_external_task_id
+    assert task.external_task_ids == [expected_external_task_id]
 
-    url = ti.task.operator_extra_links[0].get_link(operator=ti.task, ti_key=ti.key)
+    url = task.operator_extra_links[0].get_link(operator=task, ti_key=ti.key)
 
     assert f"/dags/{expected_external_dag_id}/runs" in url
 
@@ -1564,8 +1858,8 @@ class TestExternalTaskMarker:
             dag=dag,
         )
 
-        serialized_op = SerializedBaseOperator.serialize_operator(task)
-        deserialized_op = SerializedBaseOperator.deserialize_operator(serialized_op)
+        serialized_op = OperatorSerialization.serialize_operator(task)
+        deserialized_op = OperatorSerialization.deserialize_operator(serialized_op)
         assert deserialized_op.task_type == "ExternalTaskMarker"
         assert getattr(deserialized_op, "external_dag_id") == "external_task_marker_child"
         assert getattr(deserialized_op, "external_task_id") == "child_task1"
@@ -1590,7 +1884,7 @@ def dag_bag_ext():
     """
     clear_db_runs()
 
-    dag_bag = DagBag(dag_folder=DEV_NULL, include_examples=False)
+    dag_bag = _make_dagbag(DEV_NULL)
 
     dag_0 = DAG("dag_0", start_date=DEFAULT_DATE, schedule=None)
     task_a_0 = EmptyOperator(task_id="task_a_0", dag=dag_0)
@@ -1654,7 +1948,7 @@ def dag_bag_parent_child():
     """
     clear_db_runs()
 
-    dag_bag = DagBag(dag_folder=DEV_NULL, include_examples=False)
+    dag_bag = _make_dagbag(DEV_NULL)
 
     day_1 = DEFAULT_DATE
 
@@ -1690,6 +1984,7 @@ def dag_bag_parent_child():
 @provide_session
 def run_tasks(
     dag_bag: DagBag,
+    *,
     logical_date=DEFAULT_DATE,
     session=NEW_SESSION,
 ) -> tuple[dict[str, DagRun], dict[str, TaskInstance]]:
@@ -1703,8 +1998,9 @@ def run_tasks(
     for dag in dag_bag.dags.values():
         data_interval = DataInterval(coerce_datetime(logical_date), coerce_datetime(logical_date))
         if AIRFLOW_V_3_0_PLUS:
-            runs[dag.dag_id] = dagrun = create_scheduler_dag(dag).create_dagrun(
-                run_id=dag.timetable.generate_run_id(
+            scheduler_dag = create_scheduler_dag(dag)
+            runs[dag.dag_id] = dagrun = scheduler_dag.create_dagrun(
+                run_id=scheduler_dag.timetable.generate_run_id(
                     run_type=DagRunType.MANUAL,
                     run_after=logical_date,
                     data_interval=data_interval,
@@ -1720,7 +2016,7 @@ def run_tasks(
             )
         else:
             runs[dag.dag_id] = dagrun = dag.create_dagrun(  # type: ignore[attr-defined,call-arg]
-                run_id=dag.timetable.generate_run_id(  # type: ignore[call-arg]
+                run_id=dag.timetable.generate_run_id(  # type: ignore[attr-defined,call-arg,union-attr]
                     run_type=DagRunType.MANUAL,
                     logical_date=logical_date,
                     data_interval=data_interval,
@@ -1761,10 +2057,11 @@ def clear_tasks(
     dag_bag,
     dag,
     task,
-    session,
+    *,
     start_date=DEFAULT_DATE,
     end_date=DEFAULT_DATE,
     dry_run=False,
+    session=NEW_SESSION,
 ):
     """
     Clear the task and its downstream tasks recursively for the dag in the given dagbag.
@@ -1795,8 +2092,7 @@ def test_external_task_marker_transitive(dag_bag_ext):
 
 
 @pytest.mark.skipif(AIRFLOW_V_3_0_PLUS, reason="Different test for 3.0+")
-@provide_session
-def test_external_task_marker_clear_activate(dag_bag_parent_child, session):
+def test_external_task_marker_clear_activate(dag_bag_parent_child):
     """
     Test clearing tasks across DAGs and make sure the right DagRuns are activated.
     """
@@ -1807,22 +2103,23 @@ def test_external_task_marker_clear_activate(dag_bag_parent_child, session):
     run_tasks(dag_bag, logical_date=day_1)
     run_tasks(dag_bag, logical_date=day_2)
 
-    # Assert that dagruns of all the affected dags are set to SUCCESS before tasks are cleared.
-    for dag, execution_date in itertools.product(dag_bag.dags.values(), [day_1, day_2]):
-        dagrun = dag.get_dagrun(execution_date=execution_date, session=session)
-        dagrun.set_state(State.SUCCESS)
-    session.flush()
+    with create_session() as session:
+        # Assert that dagruns of all the affected dags are set to SUCCESS before tasks are cleared.
+        for dag, execution_date in itertools.product(dag_bag.dags.values(), [day_1, day_2]):
+            dagrun = dag.get_dagrun(execution_date=execution_date, session=session)
+            dagrun.set_state(State.SUCCESS)
+        session.flush()
 
-    dag_0 = dag_bag.get_dag("parent_dag_0")
-    task_0 = dag_0.get_task("task_0")
-    clear_tasks(dag_bag, dag_0, task_0, start_date=day_1, end_date=day_2, session=session)
+        dag_0 = dag_bag.get_dag("parent_dag_0")
+        task_0 = dag_0.get_task("task_0")
+        clear_tasks(dag_bag, dag_0, task_0, start_date=day_1, end_date=day_2, session=session)
 
-    # Assert that dagruns of all the affected dags are set to QUEUED after tasks are cleared.
-    # Unaffected dagruns should be left as SUCCESS.
-    dagrun_0_1 = dag_bag.get_dag("parent_dag_0").get_dagrun(execution_date=day_1, session=session)
-    dagrun_0_2 = dag_bag.get_dag("parent_dag_0").get_dagrun(execution_date=day_2, session=session)
-    dagrun_1_1 = dag_bag.get_dag("child_dag_1").get_dagrun(execution_date=day_1, session=session)
-    dagrun_1_2 = dag_bag.get_dag("child_dag_1").get_dagrun(execution_date=day_2, session=session)
+        # Assert that dagruns of all the affected dags are set to QUEUED after tasks are cleared.
+        # Unaffected dagruns should be left as SUCCESS.
+        dagrun_0_1 = dag_bag.get_dag("parent_dag_0").get_dagrun(execution_date=day_1, session=session)
+        dagrun_0_2 = dag_bag.get_dag("parent_dag_0").get_dagrun(execution_date=day_2, session=session)
+        dagrun_1_1 = dag_bag.get_dag("child_dag_1").get_dagrun(execution_date=day_1, session=session)
+        dagrun_1_2 = dag_bag.get_dag("child_dag_1").get_dagrun(execution_date=day_2, session=session)
 
     assert dagrun_0_1.state == State.QUEUED
     assert dagrun_0_2.state == State.QUEUED
@@ -1888,7 +2185,7 @@ def dag_bag_cyclic():
     """
 
     def _factory(depth: int) -> DagBag:
-        dag_bag = DagBag(dag_folder=DEV_NULL, include_examples=False)
+        dag_bag = _make_dagbag(DEV_NULL)
 
         dags = []
 
@@ -1986,7 +2283,7 @@ def dag_bag_multiple(session):
     """
     Create a DagBag containing two DAGs, linked by multiple ExternalTaskMarker.
     """
-    dag_bag = DagBag(dag_folder=DEV_NULL, include_examples=False)
+    dag_bag = _make_dagbag(DEV_NULL)
     daily_dag = DAG("daily_dag", start_date=DEFAULT_DATE, schedule="@daily")
     agg_dag = DAG("agg_dag", start_date=DEFAULT_DATE, schedule="@daily")
     if AIRFLOW_V_3_0_PLUS:
@@ -2032,7 +2329,7 @@ def dag_bag_head_tail(session):
     | tail/|     | tail/|          /      | tail |
     +------+     +------+                 +------+
     """
-    dag_bag = DagBag(dag_folder=DEV_NULL, include_examples=False)
+    dag_bag = _make_dagbag(DEV_NULL)
 
     with DAG("head_tail", start_date=DEFAULT_DATE, schedule="@daily") as dag:
         head = ExternalTaskSensor(
@@ -2077,7 +2374,7 @@ def dag_bag_head_tail_mapped_tasks(session):
     | tail/|     | tail/|          /      | tail |
     +------+     +------+                 +------+
     """
-    dag_bag = DagBag(dag_folder=DEV_NULL, include_examples=False)
+    dag_bag = _make_dagbag(DEV_NULL)
 
     with DAG("head_tail", start_date=DEFAULT_DATE, schedule="@daily") as dag:
 

@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.10,<3.11"
 # dependencies = [
 #   "jinja2>=3.1.2",
 #   "pyyaml>=6.0.3",
@@ -29,16 +29,13 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from rich.console import Console
-
-sys.path.insert(0, str(Path(__file__).parent.resolve()))  # make sure common utils are importable
-
 from common_prek_utils import (
     AIRFLOW_CORE_SOURCES_PATH,
     AIRFLOW_PROVIDERS_ROOT_PATH,
     AIRFLOW_ROOT_PATH,
     get_all_provider_info_dicts,
 )
+from rich.console import Console
 
 sys.path.insert(0, str(AIRFLOW_CORE_SOURCES_PATH))  # make sure setup is imported from Airflow
 
@@ -78,7 +75,7 @@ SECURITY_CONTENT_RST = """
 """
 
 INSTALLING_PROVIDERS_FROM_SOURCES_CONTENT_RST = """
-.. include:: .. include:: /../../../devel-common/src/sphinx_exts/includes/installing-providers-from-sources.rst
+.. include:: /../../../devel-common/src/sphinx_exts/includes/installing-providers-from-sources.rst
 """
 
 

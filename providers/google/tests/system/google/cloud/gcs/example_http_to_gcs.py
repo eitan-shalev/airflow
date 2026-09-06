@@ -41,13 +41,15 @@ except ImportError:
     # Compatibility for Airflow < 3.1
     from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
-from tests_common.test_utils.api_client_helpers import create_airflow_connection, delete_airflow_connection
+from system.google.gcp_api_client_helpers import create_airflow_connection, delete_airflow_connection
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "default")
 
 DAG_ID = "example_http_to_gcs"
 BUCKET_NAME = f"bucket-{DAG_ID}-{ENV_ID}"
+
+IS_COMPOSER = bool(os.environ.get("COMPOSER_ENVIRONMENT", ""))
 
 
 with DAG(
@@ -67,6 +69,7 @@ with DAG(
         create_airflow_connection(
             connection_id=conn_id_name,
             connection_conf=connection,
+            is_composer=IS_COMPOSER,
         )
 
     set_up_connection = create_connection(conn_id_name)
@@ -87,7 +90,7 @@ with DAG(
 
     @task(task_id="delete_connection", trigger_rule=TriggerRule.ALL_DONE)
     def delete_connection(connection_id: str) -> None:
-        delete_airflow_connection(connection_id=connection_id)
+        delete_airflow_connection(connection_id=connection_id, is_composer=IS_COMPOSER)
 
     delete_connection_task = delete_connection(connection_id=conn_id_name)
 
@@ -108,5 +111,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

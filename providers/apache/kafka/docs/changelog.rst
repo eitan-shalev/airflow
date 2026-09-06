@@ -27,6 +27,231 @@
 Changelog
 ---------
 
+1.16.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add 'return_apply_function_results' to ConsumeFromTopicOperator to return apply_function results (#69740)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+
+
+1.15.1
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix Kafka consumer not being closed on error in ConsumeFromTopicOperator (#69641)``
+* ``Fix AwaitMessageTrigger crash on tombstone messages when apply_function is unset (#69665)``
+* ``Fix KafkaBaseHook.test_connection missing oauth_cb for managed Kafka (#69507)``
+* ``Fix AwaitMessageTriggerFunctionSensor not honoring timeout (#69639)``
+* ``Validate ProduceToTopicOperator topic after rendering (#70333)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.15.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add Kafka Event Producer publishing DagRun and TaskInstance state-change events (#68082, #70014)``
+* ``Add Amazon MSK IAM (OAUTHBEARER) support to Apache Kafka provider (#69427)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document 'apply_function' dot notation requirement for Kafka message queues (#68414)``
+* ``Document each provider's optional extras in its docs index (#69478)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix flaky KubernetesPodOperator log-timestamp test (#69563)``
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+
+1.14.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add uri sanitizers and asset factories for new schemes (#66426)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix KafkaError.name() called as property instead of method in create_topic (#65734)``
+* ``Fix AwaitMessageTrigger missing _task_instance attribute (#66302)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT007 rule to apache.kafka Provider test (#66147)``
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Providers wave 2026-04-21 (#65614)``
+   * ``Providers wave 2026-04-21``
+
+1.13.3
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add cleanup to Kafka AwaitMessageTrigger for consumer management (#64612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix stale system test documentation links (#65071)``
+
+1.13.2
+......
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.13.1
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix AwaitMessageSensor not honoring timeout (#62104)``
+* ``Fix docstring for AwaitMessageSensor and AwaitMessageTrigger in apache-kafka-provider (#63333)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+* ``Migrate apache/kafka connection UI metadata to YAML (#63171)``
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Standardize connection docs labels across providers (#63455)``
+
+1.13.0
+......
+
+Features
+~~~~~~~~
+
+* ``Add commit_offset option to AwaitMessageSensor and AwaitMessageTrigger (#62916)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+
+1.12.0
+......
+
+Features
+~~~~~~~~
+
+* ``Support Python 3.13 in apache.kafka provider (#61434)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.11.3
+......
+
+Misc
+~~~~
+
+* ``Consume ''AirflowOptionalProviderFeatureException'' from compat sdk in providers (#60335)``
+* ``New year means updated Copyright notices (#60344)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.11.2
+......
+
+Misc
+~~~~
+
+* ``Extract shared "module_loading" distribution (#59139)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.11.1
+......
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.11.0
+......
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix AwaitMessageSensor to accept timeout and soft_fail parameters (#57863) (#58070)``
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+1.10.6
+......
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to 13 files in providers (apache) (#57998)``
+   * ``Fix documentation/provider.yaml consistencies (#57283)``
+
+1.10.5
+......
+
+Misc
+~~~~
+
+* ``Make 'AwaitMessageTrigger' inherit 'BaseEventTrigger' (#56741)``
+* ``Migrate Apache providers & Elasticsearch to ''common.compat'' (#57016)``
+
+Doc-only
+~~~~~~~~
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix pytest collection failure for classes decorated with context managers (#55915)``
+   * ``Remove placeholder Release Date in changelog and index files (#56056)``
+
 1.10.4
 ......
 
@@ -56,8 +281,6 @@ Doc-only
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Switch pre-commit to prek (#54258)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Fix Airflow 2 reference in README/index of providers (#55240)``
 
 1.10.2
@@ -220,8 +443,6 @@ Misc
    * ``Use Python 3.9 as target version for Ruff & Black rules (#44298)``
    * ``Prepare docs for Nov 1st wave of providers (#44011)``
    * ``Split providers out of the main "airflow/" tree into a UV workspace project (#42505)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
 
 1.6.1

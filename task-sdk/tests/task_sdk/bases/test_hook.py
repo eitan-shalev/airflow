@@ -17,10 +17,13 @@
 # under the License.
 from __future__ import annotations
 
+import json
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from airflow.exceptions import AirflowNotFoundException
 from airflow.sdk import BaseHook
+from airflow.sdk.exceptions import AirflowNotFoundException
 from airflow.sdk.execution_time.comms import ConnectionResult, GetConnection
 
 from tests_common.test_utils.config import conf_vars
@@ -77,14 +80,13 @@ class TestBaseHook:
 
         hook = BaseHook(logger_name="")
         await hook.aget_connection(conn_id="test_conn")
-        mock_supervisor_comms.asend.assert_called_once_with(
+        mock_supervisor_comms.asend.assert_any_call(
             msg=GetConnection(conn_id="test_conn"),
         )
 
     def test_get_connection_not_found(self, sdk_connection_not_found):
         conn_id = "test_conn"
         hook = BaseHook()
-        sdk_connection_not_found
 
         with pytest.raises(AirflowNotFoundException, match="The conn_id `test_conn` isn't defined"):
             hook.get_connection(conn_id=conn_id)
@@ -94,10 +96,39 @@ class TestBaseHook:
         """Test async connection not found error."""
         conn_id = "test_conn"
         hook = BaseHook()
-        sdk_connection_not_found
 
         with pytest.raises(AirflowNotFoundException, match="The conn_id `test_conn` isn't defined"):
             await hook.aget_connection(conn_id=conn_id)
+
+    @pytest.mark.asyncio
+    async def test_aget_hook(self, mock_supervisor_comms):
+        """aget_hook() must use the async connection path and return the hook for the connection."""
+        conn = ConnectionResult(
+            conn_id="test_conn",
+            conn_type="http",
+            host="https://example.com",
+            login="user",
+            password="password",
+            port=443,
+            schema=None,
+            extra=None,
+        )
+
+        mock_supervisor_comms.asend.return_value = conn
+
+        result = await BaseHook.aget_hook(conn_id="test_conn")
+
+        # asend() must have been called for GetConnection — never the blocking send()
+        mock_supervisor_comms.asend.assert_any_call(
+            msg=GetConnection(conn_id="test_conn"),
+        )
+        # send() must not have been used for GetConnection (other messages like MaskSecret are allowed)
+        for call_args in mock_supervisor_comms.send.call_args_list:
+            msg = call_args.kwargs.get("msg") or (call_args.args[0] if call_args.args else None)
+            assert not isinstance(msg, GetConnection), (
+                "send() must not be used for GetConnection; use asend() instead"
+            )
+        assert result is not None
 
     def test_get_connection_secrets_backend_configured(self, mock_supervisor_comms, tmp_path):
         path = tmp_path / "conn.env"
@@ -115,3 +146,47 @@ class TestBaseHook:
             assert retrieved_conn.conn_id == "CONN_A"
 
             mock_supervisor_comms.send.assert_not_called()
+
+    def test_get_connection_aws_auth_manager(self, mock_supervisor_comms):
+        """
+        Test that hooks can retrieve connections without conn_type from backends
+        like AWS Secrets Manager (AF2 compatibility).
+        """
+        secret_value = json.dumps(
+            {
+                "host": "mydb.us-east-1.rds.amazonaws.com",
+                "port": 5432,
+                "login": "admin",
+                "password": "secret123",
+                "schema": "production",
+            }
+        )
+
+        mock_client = MagicMock()
+        mock_client.get_secret_value.return_value = {"SecretString": secret_value}
+
+        with patch(
+            "airflow.providers.amazon.aws.secrets.secrets_manager.SecretsManagerBackend.client",
+            new_callable=lambda: mock_client,
+        ):
+            with conf_vars(
+                {
+                    (
+                        "secrets",
+                        "backend",
+                    ): "airflow.providers.amazon.aws.secrets.secrets_manager.SecretsManagerBackend",
+                    ("secrets", "backend_kwargs"): '{"connections_prefix": "airflow/connections"}',
+                }
+            ):
+                hook = BaseHook(logger_name="")
+                retrieved_conn = hook.get_connection(conn_id="my_db_conn")
+
+                assert retrieved_conn.conn_id == "my_db_conn"
+                assert retrieved_conn.conn_type is None
+                assert retrieved_conn.host == "mydb.us-east-1.rds.amazonaws.com"
+                assert retrieved_conn.port == 5432
+                assert retrieved_conn.login == "admin"
+                assert retrieved_conn.password == "secret123"
+                assert retrieved_conn.schema == "production"
+
+                mock_client.get_secret_value.assert_called_once()

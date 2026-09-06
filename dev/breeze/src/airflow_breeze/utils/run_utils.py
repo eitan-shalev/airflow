@@ -25,21 +25,34 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from subprocess import CalledProcessError, CompletedProcess
 from typing import Any
 
 from rich.markup import escape
 
+from airflow_breeze.global_constants import SIMPLE_AUTH_MANAGER_VITE_DEV_PORT, VITE_DEV_PORT
 from airflow_breeze.utils.ci_group import ci_group
-from airflow_breeze.utils.console import Output, get_console
+from airflow_breeze.utils.console import Output, console_print, get_console
 from airflow_breeze.utils.functools_cache import clearable_cache
 from airflow_breeze.utils.path_utils import (
     AIRFLOW_ROOT_PATH,
+    COMMON_AI_PLUGIN_PREK_HOOK,
+    COMMON_AI_UI_PLUGIN_DIST_PATH,
+    COMMON_AI_UI_PLUGIN_NODE_MODULES_PATH,
+    EDGE_PLUGIN_PREK_HOOK,
+    EDGE_PLUGIN_UI_DIST_PATH,
+    EDGE_PLUGIN_UI_NODE_MODULES_PATH,
+    FAB_AUTH_MANAGER_WWW_DIST_PATH,
+    FAB_AUTH_MANAGER_WWW_NODE_MODULES_PATH,
+    FAB_AUTH_MANAGER_WWW_PREK_HOOK,
+    FAST_API_SIMPLE_AUTH_MANAGER_DIST_PATH,
+    FAST_API_SIMPLE_AUTH_MANAGER_NODE_MODULES_PATH,
     UI_ASSET_COMPILE_LOCK,
     UI_ASSET_HASH_PATH,
     UI_ASSET_OUT_DEV_MODE_FILE,
@@ -140,7 +153,11 @@ def run_command(
             kwargs["stderr"] = subprocess.STDOUT
     command_to_print = " ".join(shlex.quote(c) for c in cmd) if isinstance(cmd, list) else cmd
     env_to_print = get_environments_to_print(env)
-    if not get_verbose(verbose_override) and not get_dry_run(dry_run_override) or quiet:
+    verbose = get_verbose(verbose_override)
+    dry_run = get_dry_run(dry_run_override)
+    if dry_run and quiet:
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+    if not dry_run and (not verbose or quiet):
         if quiet and not kwargs.get("capture_output"):
             kwargs["stdout"] = subprocess.DEVNULL
             kwargs["stderr"] = subprocess.DEVNULL
@@ -155,11 +172,11 @@ def run_command(
         get_console(output=output).print(
             f"\n[info]{env_to_print}{escape(command_to_print)}[/]\n", soft_wrap=True
         )
-        if get_dry_run(dry_run_override):
+        if dry_run:
             return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
         try:
             if output_outside_the_group and os.environ.get("GITHUB_ACTIONS") == "true":
-                get_console().print("::endgroup::")
+                console_print("::endgroup::")
             return subprocess.run(cmd, input=input, check=check, env=cmd_env, cwd=workdir, **kwargs)
         except subprocess.CalledProcessError as ex:
             if no_output_dump_on_exception:
@@ -217,12 +234,11 @@ def assert_prek_installed():
     prek_config = yaml.safe_load((AIRFLOW_ROOT_PATH / ".pre-commit-config.yaml").read_text())
     min_prek_version = prek_config["minimum_prek_version"]
 
-    python_executable = sys.executable
-    get_console().print(f"[info]Checking prek installed for {python_executable}[/]")
+    console_print(f"[info]Checking prek installed for {sys.executable}[/]")
     need_to_reinstall_prek = False
     try:
         command_result = run_command(
-            ["prek", "--version"],
+            [sys.executable, "-m", "prek", "--version"],
             capture_output=True,
             text=True,
             check=False,
@@ -231,32 +247,71 @@ def assert_prek_installed():
             if command_result.stdout:
                 prek_version = command_result.stdout.split(" ")[1].strip()
                 if Version(prek_version) >= Version(min_prek_version):
-                    get_console().print(
+                    console_print(
                         f"\n[success]Package prek is installed. "
                         f"Good version {prek_version} (>= {min_prek_version})[/]\n"
                     )
                 else:
-                    get_console().print(
+                    console_print(
                         f"\n[error]Package name prek version is wrong. It should be "
                         f"at least {min_prek_version} and is {prek_version}.[/]\n\n"
                     )
                     sys.exit(1)
             else:
-                get_console().print(
+                console_print(
                     "\n[warning]Could not determine version of prek. You might need to update it![/]\n"
                 )
         else:
             need_to_reinstall_prek = True
-            get_console().print("\n[error]Error checking for prek-installation:[/]\n")
-            get_console().print(command_result.stderr)
+            console_print("\n[error]Error checking for prek-installation:[/]\n")
+            console_print(command_result.stderr)
     except FileNotFoundError as e:
         need_to_reinstall_prek = True
-        get_console().print(f"\n[error]Error checking for prek installation: [/]\n{e}\n")
+        console_print(f"\n[error]Error checking for prek installation: [/]\n{e}\n")
     if need_to_reinstall_prek:
-        get_console().print("[info]Make sure to install prek. For example by running:\n")
-        get_console().print("   uv tool install prek\n")
-        get_console().print("Or if you prefer pipx:\n")
-        get_console().print("   pipx install prek")
+        console_print(
+            "[info]Reinstall breeze:[/]\n"
+            "  - For the recommended uvx-based setup, clear the cached env:\n"
+            "        uv cache clean apache-airflow-breeze\n"
+            "  - For a legacy global install:\n"
+            "        uv tool install -e ./dev/breeze --force"
+        )
+        sys.exit(1)
+
+
+def check_pnpm_installed():
+    """
+    Check if pnpm is installed and install it if npm is available.
+    """
+    if shutil.which("pnpm"):
+        return
+
+    console_print("[warning]pnpm is not installed. Installing pnpm...[/]")
+
+    # Check if npm is available (required to install pnpm)
+    if not shutil.which("npm"):
+        console_print("[error]npm is not installed. Please install Node.js and npm first.[/]")
+        console_print("[warning]Visit: https://nodejs.org/[/]")
+        sys.exit(1)
+
+    try:
+        console_print("[info]Installing pnpm using npm...[/]")
+        result = run_command(
+            ["npm", "install", "-g", "pnpm"],
+            no_output_dump_on_exception=True,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            console_print("[success]pnpm has been installed successfully![/]")
+        else:
+            console_print(f"[error]Failed to install pnpm: {result.stderr}[/]")
+            console_print("[warning]Please install pnpm manually: https://pnpm.io/installation[/]")
+            sys.exit(1)
+    except Exception as e:
+        console_print(f"[error]Failed to install pnpm: {e}[/]")
+        console_print("[warning]Please install pnpm manually: https://pnpm.io/installation[/]")
         sys.exit(1)
 
 
@@ -284,8 +339,8 @@ def get_filesystem_type(filepath: str):
 
 def instruct_build_image(python: str):
     """Print instructions to the user that they should build the image"""
-    get_console().print(f"[warning]\nThe CI image for Python version {python} may be outdated[/]\n")
-    get_console().print(
+    console_print(f"[warning]\nThe CI image for Python version {python} may be outdated[/]\n")
+    console_print(
         f"\n[info]Please run at the earliest convenience:[/]\n\nbreeze ci-image build --python {python}\n\n"
     )
 
@@ -323,7 +378,7 @@ def change_directory_permission(directory_to_fix: Path):
 def fix_group_permissions():
     """Fixes permissions of all the files and directories that have group-write access."""
     if get_verbose():
-        get_console().print("[info]Fixing group permissions[/]")
+        console_print("[info]Fixing group permissions[/]")
     files_to_fix_result = run_command(["git", "ls-files", "./"], capture_output=True, check=False, text=True)
     if files_to_fix_result.returncode == 0:
         files_to_fix = files_to_fix_result.stdout.strip().splitlines()
@@ -368,7 +423,18 @@ def check_if_buildx_plugin_installed() -> bool:
         text=True,
         check=False,
     )
-    if docker_buildx_version_result.returncode == 0:
+    if "buildah" in docker_buildx_version_result.stdout.lower():
+        console_print(
+            "[warning]Detected buildah installation.[/]\n"
+            "[warning]The Dockerfiles are only compatible with BuildKit.[/]\n"
+            "[warning]Please see the syntax declaration at the top of the Dockerfiles for BuildKit version\n"
+        )
+        return False
+    if (
+        docker_buildx_version_result.returncode == 0
+        and "buildx" in docker_buildx_version_result.stdout.lower()
+    ):
+        console_print("[success]Docker BuildKit is installed and will be used for the image build.[/]\n")
         return True
     return False
 
@@ -399,13 +465,19 @@ def _run_compile_internally(
 
     env = os.environ.copy()
     if dev:
-        return run_command(
-            command_to_execute,
-            check=False,
-            no_output_dump_on_exception=True,
-            text=True,
-            env=env,
-        )
+        # Clean up stale lock file
+        compile_lock.unlink(missing_ok=True)
+        UI_ASSET_OUT_DEV_MODE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(UI_ASSET_OUT_DEV_MODE_FILE, "w") as output_file:
+            return run_command(
+                command_to_execute,
+                check=False,
+                no_output_dump_on_exception=True,
+                text=True,
+                env=env,
+                stderr=subprocess.STDOUT,
+                stdout=output_file,
+            )
     compile_lock.parent.mkdir(parents=True, exist_ok=True)
     compile_lock.unlink(missing_ok=True)
     try:
@@ -424,11 +496,11 @@ def _run_compile_internally(
                 asset_out.unlink(missing_ok=True)
             return result
     except Timeout:
-        get_console().print("[error]Another asset compilation is running. Exiting[/]\n")
-        get_console().print("[warning]If you are sure there is no other compilation,[/]")
-        get_console().print("[warning]Remove the lock file and re-run compilation:[/]")
-        get_console().print(compile_lock)
-        get_console().print()
+        console_print("[error]Another asset compilation is running. Exiting[/]\n")
+        console_print("[warning]If you are sure there is no other compilation,[/]")
+        console_print("[warning]Remove the lock file and re-run compilation:[/]")
+        console_print(compile_lock)
+        console_print()
         sys.exit(1)
 
 
@@ -442,38 +514,72 @@ def kill_process_group(gid: int):
         os.killpg(gid, signal.SIGTERM)
 
 
-def clean_ui_assets():
-    get_console().print("[info]Cleaning ui assets[/]")
+def _clean_ui_assets(additional_ui_hooks: list[str]):
+    console_print("[info]Cleaning ui assets[/]")
     UI_ASSET_HASH_PATH.unlink(missing_ok=True)
     shutil.rmtree(UI_NODE_MODULES_PATH, ignore_errors=True)
     shutil.rmtree(UI_DIST_PATH, ignore_errors=True)
-    get_console().print("[success]Cleaned ui assets[/]")
+    shutil.rmtree(FAST_API_SIMPLE_AUTH_MANAGER_NODE_MODULES_PATH, ignore_errors=True)
+    shutil.rmtree(FAST_API_SIMPLE_AUTH_MANAGER_DIST_PATH, ignore_errors=True)
+    if EDGE_PLUGIN_PREK_HOOK in additional_ui_hooks:
+        shutil.rmtree(EDGE_PLUGIN_UI_NODE_MODULES_PATH, ignore_errors=True)
+        shutil.rmtree(EDGE_PLUGIN_UI_DIST_PATH, ignore_errors=True)
+    if FAB_AUTH_MANAGER_WWW_PREK_HOOK in additional_ui_hooks:
+        shutil.rmtree(FAB_AUTH_MANAGER_WWW_NODE_MODULES_PATH, ignore_errors=True)
+        shutil.rmtree(FAB_AUTH_MANAGER_WWW_DIST_PATH, ignore_errors=True)
+    if COMMON_AI_PLUGIN_PREK_HOOK in additional_ui_hooks:
+        shutil.rmtree(COMMON_AI_UI_PLUGIN_NODE_MODULES_PATH, ignore_errors=True)
+        shutil.rmtree(COMMON_AI_UI_PLUGIN_DIST_PATH, ignore_errors=True)
+
+    console_print("[success]Cleaned ui assets[/]")
+
+
+def _find_occupied_local_ports(ports: Iterable[str]) -> list[str]:
+    occupied_ports = []
+    for port in ports:
+        with contextlib.suppress(OSError):
+            with socket.create_connection(("localhost", int(port)), timeout=0.1):
+                occupied_ports.append(port)
+    return occupied_ports
 
 
 def run_compile_ui_assets(
     dev: bool,
     run_in_background: bool,
     force_clean: bool,
+    additional_ui_hooks: list[str],
 ):
-    if force_clean:
-        clean_ui_assets()
     if dev:
-        get_console().print("\n[warning] The command below will run forever until you press Ctrl-C[/]\n")
-        get_console().print(
+        occupied_ports = _find_occupied_local_ports((VITE_DEV_PORT, SIMPLE_AUTH_MANAGER_VITE_DEV_PORT))
+        if occupied_ports:
+            console_print(
+                "[error]Cannot start UI development servers because the following local port(s) "
+                f"are already in use: {', '.join(occupied_ports)}.[/]\n"
+                "[info]Stop the processes using these ports and try again.[/]"
+            )
+            sys.exit(1)
+    if force_clean:
+        _clean_ui_assets(additional_ui_hooks)
+    if dev:
+        console_print("\n[warning] The command below will run forever until you press Ctrl-C[/]\n")
+        console_print(
             "\n[info]If you want to see output of the compilation command,\n"
             "[info]cancel it, go to airflow/ui folder and run 'pnpm dev'.\n"
             "[info]However, it requires you to have local pnpm installation.\n"
         )
     command_to_execute = [
+        sys.executable,
+        "-m",
         "prek",
         "run",
-        "--hook-stage",
+        "--stage",
         "manual",
         "compile-ui-assets-dev" if dev else "compile-ui-assets",
+        *additional_ui_hooks,
         "--all-files",
         "--verbose",
     ]
-    get_console().print(
+    console_print(
         "[info]The output of the asset compilation is stored in: [/]"
         f"{UI_ASSET_OUT_DEV_MODE_FILE if dev else UI_ASSET_OUT_FILE}\n"
     )

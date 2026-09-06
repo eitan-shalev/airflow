@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 /**
  * @import { FlatConfig } from "@typescript-eslint/utils/ts-eslint";
  */
@@ -279,7 +278,7 @@ export const coreRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
      *
      * @see [max-lines](https://eslint.org/docs/latest/rules/max-lines)
      */
-    "max-lines": [ERROR, { max: 250, skipBlankLines: true, skipComments: true }],
+    "max-lines": [ERROR, { max: 500, skipBlankLines: true, skipComments: true }],
 
     /**
      * Enforce a maximum depth that callbacks can be nested to 3.
@@ -426,6 +425,24 @@ export const coreRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
      * @see [no-duplicate-case](https://eslint.org/docs/latest/rules/no-duplicate-case)
      */
     "no-duplicate-case": ERROR,
+
+    /**
+     * Disallow duplicate value imports from the same module.
+     * Separate `import type` statements are allowed.
+     *
+     * @example
+     * ```typescript
+     * // ❌ Incorrect
+     * import { Foo } from "src/components/ui";
+     * import { Bar } from "src/components/ui";
+     *
+     * // ✅ Correct
+     * import { Foo, Bar } from "src/components/ui";
+     * import type { Baz } from "src/components/ui";
+     * ```
+     * @see [no-duplicate-imports](https://eslint.org/docs/latest/rules/no-duplicate-imports)
+     */
+    "no-duplicate-imports": [ERROR, { allowSeparateTypeImports: true }],
 
     /**
      * Disallow empty block statements.
@@ -867,6 +884,43 @@ export const coreRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
      * @see [no-restricted-globals](https://eslint.org/docs/latest/rules/no-restricted-globals)
      */
     "no-restricted-globals": [ERROR, { message: "Use `globalThis` instead.", name: "window" }],
+
+    /**
+     * Disallow the `React` type namespace. `@types/react` declares `export as
+     * namespace React`, so `React.ReactNode` type-checks even in files that
+     * never import React — only a syntax rule can catch those.
+     *
+     * @example
+     * ```typescript
+     * // ❌ Incorrect
+     * const Foo: React.FC<FooProps> = ({ bar }) => <div>{bar}</div>;
+     * const node: React.ReactNode = null;
+     *
+     * // ✅ Correct
+     * const Foo = ({ bar }: FooProps) => <div>{bar}</div>;
+     * const node: ReactNode = null;
+     * ```
+     * @see [no-restricted-syntax](https://eslint.org/docs/latest/rules/no-restricted-syntax)
+     */
+    "no-restricted-syntax": [
+      ERROR,
+      {
+        message:
+          "Do not type components with `React.FC`. Annotate the props parameter instead: `const Foo = ({ bar }: FooProps) => ...`.",
+        selector: "TSQualifiedName[left.name='React'][right.name=/^(FC|FunctionComponent|VFC)$/]",
+      },
+      {
+        message:
+          "Do not type components with `FC`. Annotate the props parameter instead: `const Foo = ({ bar }: FooProps) => ...`.",
+        selector:
+          "VariableDeclarator[init.type='ArrowFunctionExpression'] > Identifier > TSTypeAnnotation > TSTypeReference > Identifier[name=/^(FC|FunctionComponent|VFC)$/]",
+      },
+      {
+        message:
+          'Import React types by name instead of qualifying them with the `React` namespace: `import { type ReactElement } from "react"`, then use `ReactElement`.',
+        selector: "TSQualifiedName[left.name='React']:not([right.name=/^(FC|FunctionComponent|VFC)$/])",
+      },
+    ],
 
     /**
      * Disallow assignment operators in `return` statements.

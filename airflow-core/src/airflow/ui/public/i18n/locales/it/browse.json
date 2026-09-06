@@ -1,9 +1,5 @@
 {
   "auditLog": {
-    "actions": {
-      "collapseAllExtra": "Collassa tutti i json extra",
-      "expandAllExtra": "Espandi tutti i json extra"
-    },
     "columns": {
       "event": "Evento",
       "extra": "Extra",
@@ -12,8 +8,7 @@
     },
     "filters": {
       "eventType": "Tipo di Evento"
-    },
-    "title": "Registro di Controllo (Logs)"
+    }
   },
   "xcom": {
     "columns": {

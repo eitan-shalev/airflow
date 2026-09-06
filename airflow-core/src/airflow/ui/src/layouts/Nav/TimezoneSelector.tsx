@@ -21,7 +21,7 @@ import { Select, type SingleValue } from "chakra-react-select";
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone";
 import utc from "dayjs/plugin/utc";
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useTimezone } from "src/context/timezone";
@@ -31,27 +31,20 @@ import type { Option as TimezoneOption } from "src/utils/option";
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const TimezoneSelector: React.FC = () => {
+const TimezoneSelector = () => {
   const { selectedTimezone, setSelectedTimezone } = useTimezone();
-  const { t: translate } = useTranslation("common");
+  const { t: translate } = useTranslation();
   const [currentTime, setCurrentTime] = useState<string>("");
 
-  const timezones = useMemo<Array<string>>(() => {
-    const tzList = Intl.supportedValuesOf("timeZone");
-    const guessedTz = dayjs.tz.guess();
-    const uniqueTimezones = new Set(["UTC", ...(guessedTz ? [guessedTz] : []), ...tzList]);
+  const tzList = Intl.supportedValuesOf("timeZone");
+  const guessedTz = dayjs.tz.guess();
+  const uniqueTimezones = new Set(["UTC", ...(guessedTz ? [guessedTz] : []), ...tzList]);
+  const timezones = [...uniqueTimezones];
 
-    return [...uniqueTimezones];
-  }, []);
-
-  const options = useMemo<Array<TimezoneOption>>(
-    () =>
-      timezones.map((tz) => ({
-        label: tz === "UTC" ? translate("timezoneModal.utc") : tz,
-        value: tz,
-      })),
-    [timezones, translate],
-  );
+  const options: Array<TimezoneOption> = timezones.map((tz) => ({
+    label: tz === "UTC" ? translate("timezoneModal.utc") : tz,
+    value: tz,
+  }));
 
   const handleTimezoneChange = (selectedOption: SingleValue<TimezoneOption>) => {
     if (selectedOption) {

@@ -27,6 +27,173 @@
 Changelog
 ---------
 
+4.6.3
+.....
+
+Misc
+~~~~
+
+* ``Add type annotations to sql hooks (#70815)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+
+
+4.6.2
+.....
+
+Misc
+~~~~
+
+* ``Use oracledb AuthMode/Purity enums in Oracle hook connection config (#67689)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Document each provider's optional extras in its docs index (#69478)``
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+4.6.1
+.....
+
+Misc
+~~~~
+
+* ``Add prek hook enforcing the "example" tag on example DAGs (#67354)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+4.6.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add uri sanitizers and asset factories for new schemes (#66426)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Fix stale system test documentation links (#65071)``
+
+4.5.3
+.....
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.5.2
+.....
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+
+4.5.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Use conn.schema as service_name fallback in OracleHook (#62895)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.5.0
+.....
+
+Features
+~~~~~~~~
+
+* ``feat: Add Hook Level Lineage to SQL hooks (#61535)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+
+4.4.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Implement specialized get_first and get_records method in OracleHook to avoid serialization issues with XCom's (#61144)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.3.1
+.....
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.3.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Features
+~~~~~~~~
+
+* ``Add wallet, SSL, and connection class support to OracleHook (#58225)``
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+4.2.1
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+* ``Migrate Oracle providers to 'common.compat' compatibility layer (#57133)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update Oracle provider URL in description (#57478)``
+* ``[Doc] Fixing 404 errors for OpenLineage & Oracle providers (#57469)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to oracle Provider test (#57941)``
+   * ``Fix documentation/provider.yaml consistencies (#57283)``
+   * ``Prepare release for Oct 2025 wave of providers (#57029)``
+   * ``Remove placeholder Release Date in changelog and index files (#56056)``
+   * ``Enable PT011 rule to prvoider tests (#55980)``
+   * ``Prepare release for Sep 2025 2nd wave of providers (#55688)``
+   * ``Move 'example_oracle_fetch.py' to its provider (#55676)``
+   * ``examples(oracle): add tutorial DAG using OracleHook to fetch/sample rows (#54617)``
+
 4.2.0
 .....
 
@@ -48,8 +215,6 @@ Doc-only
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Switch pre-commit to prek (#54258)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Fix Airflow 2 reference in README/index of providers (#55240)``
 
 4.1.3

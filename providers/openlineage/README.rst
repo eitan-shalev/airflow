@@ -23,10 +23,11 @@
 
 Package ``apache-airflow-providers-openlineage``
 
-Release: ``2.7.2``
+Release: ``2.20.1``
 
 
-`OpenLineage <https://openlineage.io/>`__
+`OpenLineage <https://openlineage.io/docs/>`__ is an open framework for data lineage collection.
+At its core it is an extensible specification that systems can use to interoperate with lineage metadata.
 
 
 Provider package
@@ -36,7 +37,7 @@ This is a provider package for ``openlineage`` provider. All classes for this pr
 are in ``airflow.providers.openlineage`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-openlineage/2.7.2/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-openlineage/2.20.1/>`_.
 
 Installation
 ------------
@@ -45,7 +46,7 @@ You can install this package on top of an existing Airflow installation (see ``R
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-openlineage``
 
-The package supports the following python versions: 3.10,3.11,3.12,3.13
+The package supports the following python versions: 3.10,3.11,3.12,3.13,3.14
 
 Requirements
 ------------
@@ -53,33 +54,22 @@ Requirements
 ==========================================  ==================
 PIP package                                 Version required
 ==========================================  ==================
-``apache-airflow``                          ``>=2.10.0``
-``apache-airflow-providers-common-sql``     ``>=1.20.0``
-``apache-airflow-providers-common-compat``  ``>=1.4.0``
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``apache-airflow-providers-common-compat``  ``>=1.15.0``
 ``attrs``                                   ``>=22.2``
-``openlineage-integration-common``          ``>=1.36.0``
-``openlineage-python``                      ``>=1.36.0``
+``openlineage-integration-common``          ``>=1.52.0``
+``openlineage-python``                      ``>=1.52.0``
 ==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional dependencies
+----------------------
 
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified providers in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
-
-.. code-block:: bash
-
-    pip install apache-airflow-providers-openlineage[common.compat]
-
-
-==================================================================================================================  =================
-Dependent package                                                                                                   Extra
-==================================================================================================================  =================
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_  ``common.compat``
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_        ``common.sql``
-==================================================================================================================  =================
+==============  ======================
+Extra           Dependencies
+==============  ======================
+``sqlalchemy``  ``sqlalchemy>=1.4.54``
+==============  ======================
 
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-openlineage/2.7.2/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-openlineage/2.20.1/changelog.html>`_.

@@ -47,7 +47,7 @@ SHORT_FUNCTION_NAME = "hello_world"
 FUNCTION_NAME = f"projects/{PROJECT_ID}/locations/{LOCATION}/functions/{SHORT_FUNCTION_NAME}"
 SOURCE_ARCHIVE_URL = "gs://airflow-system-tests-resources/cloud-functions/main_function.zip"
 ENTRYPOINT = "hello_world"
-RUNTIME = "python38"
+RUNTIME = "python312"
 
 SOURCE_UPLOAD_URL = ""
 ZIP_PATH = ""
@@ -132,5 +132,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

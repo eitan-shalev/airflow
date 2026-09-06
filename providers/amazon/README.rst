@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-amazon``
 
-Release: ``9.14.0``
+Release: ``9.35.0``
 
 
 Amazon integration (including `Amazon Web Services (AWS) <https://aws.amazon.com/>`__).
@@ -36,7 +36,7 @@ This is a provider package for ``amazon`` provider. All classes for this provide
 are in ``airflow.providers.amazon`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-amazon/9.14.0/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-amazon/9.35.0/>`_.
 
 Installation
 ------------
@@ -45,33 +45,35 @@ You can install this package on top of an existing Airflow installation (see ``R
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-amazon``
 
-The package supports the following python versions: 3.10,3.11,3.12,3.13
+The package supports the following python versions: 3.10,3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-==========================================  ==================
+==========================================  ======================================
 PIP package                                 Version required
-==========================================  ==================
-``apache-airflow``                          ``>=2.10.0``
-``apache-airflow-providers-common-compat``  ``>=1.6.1``
-``apache-airflow-providers-common-sql``     ``>=1.27.0``
+==========================================  ======================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.18.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
 ``apache-airflow-providers-http``
-``boto3``                                   ``>=1.37.2``
-``botocore``                                ``>=1.37.2``
+``boto3``                                   ``>=1.41.0``
+``botocore``                                ``>=1.41.0``
 ``inflection``                              ``>=0.5.1``
 ``watchtower``                              ``>=3.3.1,<4``
 ``jsonpath_ng``                             ``>=1.5.3``
 ``redshift_connector``                      ``>=2.1.3``
-``asgiref``                                 ``>=2.3.0``
+``redshift_connector``                      ``>=2.1.13; python_version >= "3.14"``
+``asgiref``                                 ``>=2.3.0; python_version < "3.14"``
+``asgiref``                                 ``>=3.11.1; python_version >= "3.14"``
 ``PyAthena``                                ``>=3.10.0``
 ``jmespath``                                ``>=0.7.0``
-``sagemaker-studio``                        ``>=1.0.9``
+``sagemaker-studio``                        ``>=1.0.25,<1.1.0``
 ``marshmallow``                             ``>=3``
-==========================================  ==================
+==========================================  ======================================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified providers in order to use them.
@@ -88,13 +90,10 @@ Dependent package                                                               
 ========================================================================================================================  ====================
 `apache-airflow-providers-apache-hive <https://airflow.apache.org/docs/apache-airflow-providers-apache-hive>`_            ``apache.hive``
 `apache-airflow-providers-cncf-kubernetes <https://airflow.apache.org/docs/apache-airflow-providers-cncf-kubernetes>`_    ``cncf.kubernetes``
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_        ``common.compat``
 `apache-airflow-providers-common-messaging <https://airflow.apache.org/docs/apache-airflow-providers-common-messaging>`_  ``common.messaging``
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_              ``common.sql``
 `apache-airflow-providers-exasol <https://airflow.apache.org/docs/apache-airflow-providers-exasol>`_                      ``exasol``
 `apache-airflow-providers-ftp <https://airflow.apache.org/docs/apache-airflow-providers-ftp>`_                            ``ftp``
 `apache-airflow-providers-google <https://airflow.apache.org/docs/apache-airflow-providers-google>`_                      ``google``
-`apache-airflow-providers-http <https://airflow.apache.org/docs/apache-airflow-providers-http>`_                          ``http``
 `apache-airflow-providers-imap <https://airflow.apache.org/docs/apache-airflow-providers-imap>`_                          ``imap``
 `apache-airflow-providers-microsoft-azure <https://airflow.apache.org/docs/apache-airflow-providers-microsoft-azure>`_    ``microsoft.azure``
 `apache-airflow-providers-mongo <https://airflow.apache.org/docs/apache-airflow-providers-mongo>`_                        ``mongo``
@@ -106,27 +105,29 @@ Dependent package                                                               
 Optional dependencies
 ----------------------
 
-====================  ========================================================================================================================================
+====================  ============================================================================================================================================================
 Extra                 Dependencies
-====================  ========================================================================================================================================
-``aiobotocore``       ``aiobotocore[boto3]>=2.21.1``
+====================  ============================================================================================================================================================
+``aiobotocore``       ``aiobotocore>=3.0.0``
 ``cncf.kubernetes``   ``apache-airflow-providers-cncf-kubernetes>=7.2.0``
 ``s3fs``              ``s3fs>=2023.10.0``
 ``python3-saml``      ``python3-saml>=1.16.0; python_version < '3.13'``, ``xmlsec>=1.3.14; python_version < '3.13'``, ``lxml>=6.0.0; python_version < '3.13'``
 ``apache.hive``       ``apache-airflow-providers-apache-hive``
 ``exasol``            ``apache-airflow-providers-exasol``
-``fab``               ``apache-airflow-providers-fab>=2.2.0; python_version < '3.13'``
+``fab``               ``apache-airflow-providers-fab>=2.2.0``
 ``ftp``               ``apache-airflow-providers-ftp``
 ``google``            ``apache-airflow-providers-google``
 ``imap``              ``apache-airflow-providers-imap``
 ``microsoft.azure``   ``apache-airflow-providers-microsoft-azure``
 ``mongo``             ``apache-airflow-providers-mongo``
+``pandas``            ``pandas>=2.1.2; python_version <"3.13"``, ``pandas>=2.2.3; python_version >="3.13" and python_version <"3.14"``, ``pandas>=2.3.3; python_version >="3.14"``
 ``openlineage``       ``apache-airflow-providers-openlineage>=2.3.0``
 ``salesforce``        ``apache-airflow-providers-salesforce``
 ``ssh``               ``apache-airflow-providers-ssh``
 ``standard``          ``apache-airflow-providers-standard``
 ``common.messaging``  ``apache-airflow-providers-common-messaging>=2.0.0``
-====================  ========================================================================================================================================
+``sqlalchemy``        ``sqlalchemy>=1.4.54``
+====================  ============================================================================================================================================================
 
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-amazon/9.14.0/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-amazon/9.35.0/changelog.html>`_.

@@ -19,4 +19,4 @@
 
 export { autoRefreshInterval } from "./config";
 export { useContainerWidth } from "./useContainerWidth";
-export { tokenHandler } from "./tokenHandler";
+export { getLegacyRouterNavigation } from "./versionUtils";

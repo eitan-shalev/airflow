@@ -24,15 +24,14 @@ import pytest
 
 from airflow.models import DAG, Connection
 from airflow.providers.common.compat.openlineage.facet import Dataset
+from airflow.providers.common.compat.sdk import timezone
 from airflow.providers.ftp.operators.ftp import (
     FTPFileTransmitOperator,
     FTPOperation,
     FTPSFileTransmitOperator,
 )
-from airflow.utils import timezone
-from airflow.utils.timezone import datetime
 
-DEFAULT_DATE = datetime(2017, 1, 1)
+DEFAULT_DATE = timezone.datetime(2017, 1, 1)
 DEFAULT_CONN_ID = "ftp_default"
 
 
@@ -168,7 +167,7 @@ class TestFTPFileTransmitOperator:
             task_1.execute(None)
 
     def test_unequal_local_remote_file_paths(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="1 paths in local_filepath != 2 paths in remote_filepath"):
             FTPFileTransmitOperator(
                 task_id="test_ftp_unequal_paths",
                 ftp_conn_id=DEFAULT_CONN_ID,
@@ -176,7 +175,7 @@ class TestFTPFileTransmitOperator:
                 remote_filepath=["/tmp/test1", "/tmp/test2"],
             ).execute(None)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="2 paths in local_filepath != 1 paths in remote_filepath"):
             FTPFileTransmitOperator(
                 task_id="test_ftp_unequal_paths",
                 ftp_conn_id=DEFAULT_CONN_ID,

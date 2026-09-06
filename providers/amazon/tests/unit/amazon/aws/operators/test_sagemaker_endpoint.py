@@ -22,11 +22,11 @@ from unittest import mock
 import pytest
 from botocore.exceptions import ClientError
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.providers.amazon.aws.hooks.sagemaker import SageMakerHook
 from airflow.providers.amazon.aws.operators import sagemaker
 from airflow.providers.amazon.aws.operators.sagemaker import SageMakerEndpointOperator
 from airflow.providers.amazon.aws.triggers.sagemaker import SageMakerTrigger
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
 
@@ -55,6 +55,11 @@ CONFIG: dict = {
 }
 
 EXPECTED_INTEGER_FIELDS: list[list[str]] = [["EndpointConfig", "ProductionVariants", "InitialInstanceCount"]]
+
+
+REGION_NAME = "eu-west-2"
+VERIFY = False
+BOTOCORE_CONFIG = {"read_timeout": 42}
 
 
 class TestSageMakerEndpointOperator:
@@ -175,6 +180,23 @@ class TestSageMakerEndpointOperator:
         assert isinstance(defer.value.trigger, SageMakerTrigger)
         assert defer.value.trigger.job_name == "endpoint_name"
         assert defer.value.trigger.job_type == "endpoint"
+
+    @mock.patch.object(SageMakerHook, "create_model")
+    @mock.patch.object(SageMakerHook, "create_endpoint_config")
+    @mock.patch.object(SageMakerHook, "create_endpoint")
+    def test_deferred_trigger_receives_hook_configuration(self, mock_create_endpoint, _, __):
+        mock_create_endpoint.return_value = {"ResponseMetadata": {"HTTPStatusCode": 200}}
+        self.sagemaker.deferrable = True
+        self.sagemaker.region_name = REGION_NAME
+        self.sagemaker.verify = VERIFY
+        self.sagemaker.botocore_config = BOTOCORE_CONFIG
+
+        with pytest.raises(TaskDeferred) as exc:
+            self.sagemaker.execute(None)
+
+        assert exc.value.trigger.region_name == REGION_NAME
+        assert exc.value.trigger.verify == VERIFY
+        assert exc.value.trigger.botocore_config == BOTOCORE_CONFIG
 
     def test_template_fields(self):
         validate_template_fields(self.sagemaker)

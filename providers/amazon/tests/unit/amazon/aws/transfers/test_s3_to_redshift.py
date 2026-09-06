@@ -23,7 +23,6 @@ from unittest import mock
 import pytest
 from boto3.session import Session
 
-from airflow.exceptions import AirflowException
 from airflow.models.connection import Connection
 from airflow.providers.amazon.aws.transfers.s3_to_redshift import S3ToRedshiftOperator
 from airflow.providers.common.compat.openlineage.facet import (
@@ -33,6 +32,7 @@ from airflow.providers.common.compat.openlineage.facet import (
     SchemaDatasetFacet,
     SchemaDatasetFacetFields,
 )
+from airflow.providers.common.compat.sdk import AirflowException
 
 from tests_common.test_utils.asserts import assert_equal_ignore_multiple_spaces
 
@@ -407,18 +407,19 @@ class TestS3ToRedshiftTransfer:
     @pytest.mark.parametrize("param", ["sql", "parameters"])
     def test_invalid_param_in_redshift_data_api_kwargs(self, param):
         """
-        Test passing invalid param in RS Data API kwargs raises an error
+        Test passing invalid param in RS Data API kwargs raises an error at execute time
         """
-        with pytest.raises(AirflowException):
-            S3ToRedshiftOperator(
-                schema="schema",
-                table="table",
-                s3_bucket="bucket",
-                s3_key="key",
-                task_id="task_id",
-                dag=None,
-                redshift_data_api_kwargs={param: "param"},
-            )
+        op = S3ToRedshiftOperator(
+            schema="schema",
+            table="table",
+            s3_bucket="bucket",
+            s3_key="key",
+            task_id="task_id",
+            dag=None,
+            redshift_data_api_kwargs={param: "param"},
+        )
+        with pytest.raises(AirflowException, match=f"Cannot include param '{param}'"):
+            op.execute({})
 
     @mock.patch("airflow.providers.amazon.aws.hooks.s3.S3Hook.get_connection")
     @mock.patch("airflow.models.connection.Connection")

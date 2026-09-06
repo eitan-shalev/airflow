@@ -51,6 +51,8 @@ class TestCliConfigList:
             include_env_vars=False,
             include_providers=True,
             comment_out_everything=False,
+            hide_sensitive=False,
+            show_values=False,
             only_defaults=False,
         )
 
@@ -69,16 +71,38 @@ class TestCliConfigList:
             include_env_vars=False,
             include_providers=True,
             comment_out_everything=False,
+            hide_sensitive=False,
+            show_values=False,
             only_defaults=False,
         )
 
     @conf_vars({("core", "testkey"): "test_value"})
     def test_cli_show_config_should_display_key(self, stdout_capture):
         with stdout_capture as temp_stdout:
-            config_command.show_config(self.parser.parse_args(["config", "list", "--color", "off"]))
+            config_command.show_config(
+                self.parser.parse_args(["config", "list", "--color", "off", "--show-values"])
+            )
         output = temp_stdout.getvalue()
         assert "[core]" in output
         assert "testkey = test_value" in temp_stdout.getvalue()
+
+    def test_cli_show_config_should_not_show_sensitive_values(self, stdout_capture):
+        with stdout_capture as temp_stdout:
+            config_command.show_config(
+                self.parser.parse_args(
+                    ["config", "list", "--color", "off", "--show-values", "--hide-sensitive"]
+                )
+            )
+        output = temp_stdout.getvalue()
+        assert "sql_alchemy_conn = < hidden >" in output
+        assert "fernet_key = < hidden >" in output
+
+    def test_cli_show_config_should_not_show_values(self, stdout_capture):
+        with stdout_capture as temp_stdout:
+            config_command.show_config(self.parser.parse_args(["config", "list", "--color", "off"]))
+        output = temp_stdout.getvalue()
+        lines = output.splitlines()
+        assert all(not line.startswith("testkey =") for line in lines if line)
 
     def test_cli_show_config_should_only_show_comments_when_no_defaults(self, stdout_capture):
         with stdout_capture as temp_stdout:
@@ -139,7 +163,7 @@ class TestCliConfigList:
     def test_cli_show_config_defaults(self, stdout_capture):
         with stdout_capture as temp_stdout:
             config_command.show_config(
-                self.parser.parse_args(["config", "list", "--color", "off", "--defaults"])
+                self.parser.parse_args(["config", "list", "--color", "off", "--defaults", "--show-values"])
             )
         output = temp_stdout.getvalue()
         lines = output.splitlines()
@@ -156,7 +180,7 @@ class TestCliConfigList:
     def test_cli_show_config_defaults_not_show_conf_changes(self, stdout_capture):
         with stdout_capture as temp_stdout:
             config_command.show_config(
-                self.parser.parse_args(["config", "list", "--color", "off", "--defaults"])
+                self.parser.parse_args(["config", "list", "--color", "off", "--defaults", "--show-values"])
             )
         output = temp_stdout.getvalue()
         lines = output.splitlines()
@@ -168,7 +192,7 @@ class TestCliConfigList:
     def test_cli_show_config_defaults_do_not_show_env_changes(self, stdout_capture):
         with stdout_capture as temp_stdout:
             config_command.show_config(
-                self.parser.parse_args(["config", "list", "--color", "off", "--defaults"])
+                self.parser.parse_args(["config", "list", "--color", "off", "--defaults", "--show-values"])
             )
         output = temp_stdout.getvalue()
         lines = output.splitlines()
@@ -179,7 +203,9 @@ class TestCliConfigList:
     @conf_vars({("core", "hostname_callable"): "testfn"})
     def test_cli_show_changed_defaults_when_overridden_in_conf(self, stdout_capture):
         with stdout_capture as temp_stdout:
-            config_command.show_config(self.parser.parse_args(["config", "list", "--color", "off"]))
+            config_command.show_config(
+                self.parser.parse_args(["config", "list", "--color", "off", "--show-values"])
+            )
         output = temp_stdout.getvalue()
         lines = output.splitlines()
         assert any(line.startswith("hostname_callable = testfn") for line in lines if line)
@@ -187,14 +213,18 @@ class TestCliConfigList:
     @mock.patch("os.environ", {"AIRFLOW__CORE__HOSTNAME_CALLABLE": "test_env"})
     def test_cli_show_changed_defaults_when_overridden_in_env(self, stdout_capture):
         with stdout_capture as temp_stdout:
-            config_command.show_config(self.parser.parse_args(["config", "list", "--color", "off"]))
+            config_command.show_config(
+                self.parser.parse_args(["config", "list", "--color", "off", "--show-values"])
+            )
         output = temp_stdout.getvalue()
         lines = output.splitlines()
         assert any(line.startswith("hostname_callable = test_env") for line in lines if line)
 
     def test_cli_has_providers(self, stdout_capture):
         with stdout_capture as temp_stdout:
-            config_command.show_config(self.parser.parse_args(["config", "list", "--color", "off"]))
+            config_command.show_config(
+                self.parser.parse_args(["config", "list", "--color", "off", "--show-values"])
+            )
         output = temp_stdout.getvalue()
         lines = output.splitlines()
         assert any(line.startswith("celery_config_options") for line in lines if line)
@@ -276,7 +306,7 @@ class TestConfigLint:
             assert normalized_message in normalized_output
 
     @pytest.mark.parametrize(
-        "section, option, suggestion",
+        ("section", "option", "suggestion"),
         [
             (
                 "core",
@@ -345,8 +375,9 @@ class TestConfigLint:
     def test_lint_detects_multiple_issues(self, stdout_capture):
         with mock.patch(
             "airflow.configuration.conf.has_option",
-            side_effect=lambda section, option, lookup_from_deprecated: option
-            in ["check_slas", "strict_dataset_uri_validation"],
+            side_effect=lambda section, option, lookup_from_deprecated: (
+                option in ["check_slas", "strict_dataset_uri_validation"]
+            ),
         ):
             with stdout_capture as temp_stdout:
                 config_command.lint_config(cli_parser.get_parser().parse_args(["config", "lint"]))
@@ -436,7 +467,7 @@ class TestConfigLint:
             assert expected_message in normalized_output
 
     @pytest.mark.parametrize(
-        "env_var, config_change, expected_message",
+        ("env_var", "config_change", "expected_message"),
         [
             (
                 "AIRFLOW__CORE__CHECK_SLAS",
@@ -500,6 +531,68 @@ class TestConfigLint:
 
         assert "Invalid value" not in normalized_output
 
+    @pytest.mark.parametrize(
+        ("remove_if_equals", "config_value", "expect_issue"),
+        [
+            pytest.param("removed_value", "removed_value", True, id="match"),
+            pytest.param("removed_value", "kept_value", False, id="no-match"),
+            pytest.param("", "", True, id="empty-string-match"),
+            pytest.param("", "kept_value", False, id="empty-string-no-match"),
+        ],
+    )
+    def test_lint_reports_conditional_removal_only_when_value_matches(
+        self, remove_if_equals, config_value, expect_issue, stdout_capture
+    ):
+        config_change = ConfigChange(
+            config=ConfigParameter("test_section", "test_option"),
+            was_removed=True,
+            remove_if_equals=remove_if_equals,
+        )
+        with (
+            mock.patch.object(config_command, "CONFIGS_CHANGES", [config_change]),
+            conf_vars({("test_section", "test_option"): config_value}),
+            stdout_capture as temp_stdout,
+        ):
+            config_command.lint_config(cli_parser.get_parser().parse_args(["config", "lint"]))
+
+        normalized_output = re.sub(r"\s+", " ", temp_stdout.getvalue().strip())
+        expected_message = (
+            "Removed deprecated `test_option` configuration parameter from `test_section` section."
+        )
+
+        assert (expected_message in normalized_output) is expect_issue
+
+    @pytest.mark.parametrize(
+        ("section", "option", "value"),
+        [
+            ("core", "hostname", ":"),
+            ("email", "email_backend", "airflow.contrib.utils.sendgrid.send_email"),
+            ("elasticsearch", "log_id_template", "{dag_id}-{task_id}-{logical_date}-{try_number}"),
+            (
+                "logging",
+                "log_filename_template",
+                "{{ ti.dag_id }}/{{ ti.task_id }}/{{ ts }}/{{ try_number }}.log",
+            ),
+            (
+                "logging",
+                "log_filename_template",
+                "dag_id={{ ti.dag_id }}/run_id={{ ti.run_id }}/task_id={{ ti.task_id }}/"
+                "{% if ti.map_index >= 0 %}map_index={{ ti.map_index }}/{% endif %}"
+                "attempt={{ try_number }}.log",
+            ),
+        ],
+    )
+    def test_lint_detects_shipped_conditional_removals(self, section, option, value, stdout_capture):
+        env_var = f"AIRFLOW__{section.upper()}__{option.upper()}"
+        with mock.patch.dict(os.environ, {env_var: value}), stdout_capture as temp_stdout:
+            config_command.lint_config(
+                cli_parser.get_parser().parse_args(["config", "lint", "--section", section])
+            )
+
+        normalized_output = re.sub(r"\s+", " ", temp_stdout.getvalue().strip())
+
+        assert f"`{option}` configuration parameter from `{section}` section." in normalized_output
+
 
 class TestCliConfigUpdate:
     @conf_vars({("core", "executor"): "SequentialExecutor"})
@@ -533,6 +626,29 @@ class TestCliConfigUpdate:
 
         current_cfg = cfg_file.read_text()
         assert initial_config in current_cfg, "Dry-run should not modify the config file."
+
+    @conf_vars({("core", "executor"): "SequentialExecutor"})
+    def test_update_config_dry_run_does_not_touch_filesystem(self, tmp_path, monkeypatch, capsys):
+        cfg_file = tmp_path / "airflow.cfg"
+        cfg_file.write_text("[core]\nexecutor = SequentialExecutor\n")
+
+        monkeypatch.setattr(config_command, "AIRFLOW_CONFIG", str(cfg_file))
+        monkeypatch.setattr(conf, "write_custom_config", lambda file, **kwargs: file.write("preview_config"))
+
+        def read_only_copy2(src, dst):
+            raise OSError("Read-only file system")
+
+        monkeypatch.setattr(shutil, "copy2", read_only_copy2)
+
+        parser = cli_parser.get_parser()
+        args = parser.parse_args(["config", "update", "--all-recommendations"])
+
+        config_command.update_config(args)
+
+        output = capsys.readouterr().out
+        assert "preview_config" in output
+        assert "Backup saved as" not in output
+        assert not (tmp_path / "airflow.cfg.bak").exists()
 
     @conf_vars({("core", "executor"): "SequentialExecutor"})
     def test_update_config_all_options_fix(self, tmp_path, monkeypatch, capsys):
@@ -576,3 +692,36 @@ class TestCliConfigUpdate:
         assert os.path.exists(backup_path), "Backup file should be created."
         backup_content = open(backup_path).read()
         assert "backup_config" in backup_content, "Backup file should contain the original content."
+
+    @pytest.mark.parametrize(
+        ("flag", "present_key", "absent_key"),
+        [
+            ("--option", "core/dag_concurrency", "core/worker_precheck"),
+            ("--ignore-option", "core/worker_precheck", "core/dag_concurrency"),
+        ],
+    )
+    def test_update_config_filters_by_bare_option_name(
+        self, flag, present_key, absent_key, tmp_path, monkeypatch, capsys
+    ):
+        cfg_file = tmp_path / "airflow.cfg"
+        cfg_file.write_text("[core]\ndag_concurrency = 16\nworker_precheck = True\n")
+        monkeypatch.setattr(config_command, "AIRFLOW_CONFIG", str(cfg_file))
+        monkeypatch.setattr(
+            conf,
+            "as_dict",
+            lambda *args, **kwargs: {
+                "core": {
+                    "dag_concurrency": ("16", "airflow.cfg"),
+                    "worker_precheck": ("True", "airflow.cfg"),
+                }
+            },
+        )
+        monkeypatch.setattr(conf, "write_custom_config", lambda file, **kwargs: file.write(""))
+
+        parser = cli_parser.get_parser()
+        args = parser.parse_args(["config", "update", "--all-recommendations", flag, "dag_concurrency"])
+        config_command.update_config(args)
+
+        output = capsys.readouterr().out
+        assert f"'{present_key}'" in output
+        assert f"'{absent_key}'" not in output

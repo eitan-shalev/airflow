@@ -21,10 +21,9 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 
-from airflow.exceptions import AirflowException
 from airflow.providers.apache.kafka.hooks.produce import KafkaProducerHook
-from airflow.providers.apache.kafka.version_compat import BaseOperator
-from airflow.utils.module_loading import import_string
+from airflow.providers.common.compat.module_loading import import_string
+from airflow.providers.common.compat.sdk import AirflowException, BaseOperator
 
 local_logger = logging.getLogger("airflow")
 
@@ -101,15 +100,13 @@ class ProduceToTopicOperator(BaseOperator):
         self.synchronous = synchronous
         self.poll_timeout = poll_timeout
 
+    def execute(self, context) -> None:
         if not (self.topic and self.producer_function):
             raise AirflowException(
                 "topic and producer_function must be provided. Got topic="
                 f"{self.topic} and producer_function={self.producer_function}"
             )
 
-        return
-
-    def execute(self, context) -> None:
         # Get producer and callable
         producer = KafkaProducerHook(kafka_config_id=self.kafka_config_id).get_producer()
 

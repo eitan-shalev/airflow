@@ -30,6 +30,7 @@ def get_provider_info():
             {
                 "integration-name": "Presto",
                 "external-doc-url": "https://prestodb.io/",
+                "how-to-guide": ["/docs/apache-airflow-providers-presto/operators.rst"],
                 "logo": "/docs/integration-logos/PrestoDB.png",
                 "tags": ["software"],
             }
@@ -41,13 +42,30 @@ def get_provider_info():
             {
                 "source-integration-name": "Google Cloud Storage (GCS)",
                 "target-integration-name": "Presto",
-                "how-to-guide": "/docs/apache-airflow-providers-presto/gcs_to_presto.rst",
+                "how-to-guide": "/docs/apache-airflow-providers-presto/transfer/gcs_to_presto.rst",
                 "python-module": "airflow.providers.presto.transfers.gcs_to_presto",
+            }
+        ],
+        "asset-uris": [
+            {
+                "schemes": ["presto"],
+                "handler": "airflow.providers.presto.assets.presto.sanitize_uri",
+                "factory": "airflow.providers.presto.assets.presto.create_asset",
+                "to_openlineage_converter": "airflow.providers.presto.assets.presto.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["presto"],
+                "handler": "airflow.providers.presto.assets.presto.sanitize_uri",
+                "factory": "airflow.providers.presto.assets.presto.create_asset",
+                "to_openlineage_converter": "airflow.providers.presto.assets.presto.convert_asset_to_openlineage",
             }
         ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.presto.hooks.presto.PrestoHook",
+                "hook-name": "Presto",
                 "connection-type": "presto",
             }
         ],

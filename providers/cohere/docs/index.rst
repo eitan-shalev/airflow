@@ -19,6 +19,23 @@
 ``apache-airflow-providers-cohere``
 ======================================
 
+The ``cohere`` provider gives Dags direct access to Cohere's own Embed API — this page
+compares that choice against ``common.ai``.
+
+When to use this provider
+--------------------------
+
+Use ``cohere`` when a Dag needs Cohere's native embedding models specifically:
+
+* ``CohereEmbeddingOperator`` — call Cohere's
+  `Embed API <https://docs.cohere.com/docs/embeddings>`__ directly via ``CohereHook``.
+
+Use :doc:`apache-airflow-providers-common-ai:index` instead when the embedding step should
+stay vendor-neutral:
+
+* Document-to-vector-store pipelines with its document loader, embedding, and retrieval
+  operators (see :doc:`apache-airflow-providers-common-ai:operators/index`), which are not
+  tied to Cohere's embedding models.
 
 .. toctree::
     :hidden:
@@ -71,7 +88,7 @@ apache-airflow-providers-cohere package
 `Cohere <https://docs.cohere.com/docs>`__
 
 
-Release: 1.5.3
+Release: 1.6.7
 
 Provider package
 ----------------
@@ -89,11 +106,23 @@ For the minimum Airflow version supported, see ``Requirements`` below.
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.10.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.10.0``
-``cohere``          ``>=5.13.4``
-==================  ==================
+==========================================  ==================================================================
+PIP package                                 Version required
+==========================================  ==================================================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``cohere``                                  ``>=5.13.4``
+``fastavro``                                ``>=1.10.0; python_version >= "3.13" and python_version < "3.14"``
+``fastavro``                                ``>=1.12.1; python_version >= "3.14"``
+==========================================  ==================================================================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-cohere 1.6.7 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cohere-1.6.7.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cohere-1.6.7.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cohere-1.6.7.tar.gz.sha512>`__)
+* `The apache-airflow-providers-cohere 1.6.7 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cohere-1.6.7-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cohere-1.6.7-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cohere-1.6.7-py3-none-any.whl.sha512>`__)

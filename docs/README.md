@@ -28,6 +28,7 @@
 - [Typical workflows](#typical-workflows)
   - [Publishing the documentation by the release manager](#publishing-the-documentation-by-the-release-manager)
   - [Publishing changes to the website (including theme)](#publishing-changes-to-the-website-including-theme)
+- [Publishing changes manually](#publishing-changes-manually)
 - [Fixing historical documentation](#fixing-historical-documentation)
   - [Manually publishing documentation directly to S3](#manually-publishing-documentation-directly-to-s3)
   - [Manually publishing documentation via `apache-airflow-site-archive` repo](#manually-publishing-documentation-via-apache-airflow-site-archive-repo)
@@ -38,10 +39,9 @@
 # Documentation configuration
 
 This directory used to contain all the documentation files for the project. The documentation has
-been split into separate folders - the documentation is now in the folders in sub-projects that they
-are referring to.
+been split into separate folders; the documentation is now stored in the folders of the sub-projects it refers to.
 
-If you look for the documentation, it is stored as follows:
+If you are looking for the documentation, it is stored as follows:
 
 Documentation in separate distributions:
 
@@ -50,10 +50,11 @@ Documentation in separate distributions:
 * `chart/docs` - documentation for the Helm Chart
 * `task-sdk/docs` - documentation for Task SDK (new format not yet published)
 * `airflow-ctl/docs` - documentation for Airflow CLI
+* `dev/mypy/docs` - documentation for the Apache Airflow Mypy plugins
 
 Documentation for a general overview and summaries not connected with any specific distribution:
 
-* `docker-stack-docs` - documentation for Docker Stack'
+* `docker-stack-docs` - documentation for Docker Stack
 * `providers-summary-docs` - documentation for the provider summary page
 
 # Architecture of documentation for Airflow
@@ -78,7 +79,19 @@ There are a few repositories under `apache` organization that are used to build 
 We have two S3 buckets where we can publish the documentation generated from the `apache-airflow` repository:
 
 * `s3://live-docs-airflow-apache-org/docs/` - live, [official documentation](https://airflow.apache.org/docs/)
-* `s3://staging-docs-airflow-apache-org/docs/` - staging documentation [official documentation](https://staging-airflow.apache.org/docs/) TODO: make it work
+* `s3://staging-docs-airflow-apache-org/docs/` - staging documentation [official documentation](https://airflow.staged.apache.org/docs/)
+
+Note that those S3 buckets are not served directly to Apache Server, but they are served via Cloudfront
+in order to provide caching and automated resolution of folders into index.html files.
+
+Our CloudFront distributions are:
+
+* Live CloudFront url: https://d7fnmbhf26p21.cloudfront.net
+* Staging CloudFront url: https://d3a2du7x0n8ydr.cloudfront.net
+
+Those cloudfront caches are automatically invalidated when we publish new documentation to S3 using
+GitHub Actions workflows, but you can also manually invalidate them using the AWS Console if needed.
+
 
 # Diagrams of the documentation architecture
 
@@ -121,16 +134,15 @@ This workflow is used twice:
   bucket and the `live` website should be built and published.
 
 When the release manager publishes the documentation, they choose `auto` destination by default - depending on the
-tag they use - `staging` will be used to publish from pre-release tag and `live` will be used ot publish
+tag they use - `staging` will be used to publish from pre-release tag and `live` will be used to publish
 from the release tag.
 
-You can also specify whether `live` or `staging` documentation should be published manually - overriding
-the auto-detection.
+You can also specify whether documentation should be published to `live` or `staging`, thereby overriding the auto-detection.
 
 The person who triggers the build (release manager) should specify the tag name of the docs to be published
 and the list of documentation packages to be published. Usually it is:
 
-* Airflow: `apache-airflow docker-stack task-sdk apache-airflow-ctl`
+* Airflow: `apache-airflow docker-stack task-sdk apache-airflow-ctl apache-airflow-mypy`
 * Helm chart: `helm-chart`
 * Providers: `provider_id1 provider_id2` or `all providers` if all providers should be published.
 
@@ -145,7 +157,7 @@ Example screenshot of the workflow triggered from the GitHub UI:
 
 Note that this just publishes the documentation but does not update the "site" with version numbers or
 stable links to providers and airflow - if you release a new documentation version, it will be available
-with direct URL (say https://apache.airflow.org/docs/apache-airflow/3.0.1/), but the main site will still
+with direct URL (say https://airflow.apache.org/docs/apache-airflow/3.0.1/), but the main site will still
 point to the previous version of the documentation as `stable` and the version drop-downs will not be updated.
 
 In order to do it, you need to run the [Build docs](https://github.com/apache/airflow-site/actions/workflows/build.yml)
@@ -161,8 +173,8 @@ The `staging` documentation is produced automatically with `staging` watermark a
 ![Publishing site](images/publish_site.png)
 
 This workflow also invalidates cache in Fastly that Apache Software Foundation uses to serve the website,
-so you should always run it after you modify the documentation for the website. Other than that Fastly is
-configured with 3600 seconds TTL - which means that changes will propagate to the website in ~1 hour.
+so you should always run it after you modify the documentation for the website. Fastly is configured with a
+3600-second TTL, which means that changes may take up to ~1 hour to propagate to the website.
 
 Shortly after the workflow succeeds and documentation is published, in the live bucket, the [airflow-site-archive](https://github.com/apache/airflow-site-archive)
 repository is automatically synchronized with the live S3 bucket. TODO: IMPLEMENT THIS, FOR NOW IT HAS
@@ -196,6 +208,21 @@ The version of sphinx theme is fixed in both repositories:
 In case of bigger changes to the theme, we can first iterate on the website and merge a new theme version,
 and only after that can we switch to the new version of the theme.
 
+# Publishing changes manually
+
+Sometimes you do not want to use Publishing workflows to publish individual files and caches might get
+into the way as both Cloudfront and Fastly caches might take some time to invalidate. In such a case, when
+you manually upload the files to S3 bucket, you can immediately invalidate the caches:
+
+1) Manually run invalidation request in Cloudfront for the documentation S3 bucket you uploaded the files
+   to via AWS Console or AWS CLI (You can use `/*` to invalidate all files).
+
+![Cloudfront invalidation](images/cloudfront_invalidation.png)
+
+2) Run the `Build docs` workflow in `airflow-site` repository to invalidate Fastly cache for the website.
+   Use `main` branch to rebuild site for `live` site and `staging` to rebuild the `staging` site:
+
+![Build docs](images/build-docs.png)
 
 # Fixing historical documentation
 
@@ -209,21 +236,31 @@ bad links or when we change some of the structure in the documentation. This can
 2. Make the changes to the documentation in `airflow-site-archive` repository. This can be done using any
    text editor, script, etc. Those files are generated as `html` files and are not meant to be regenerated,
    they should be modified as `html` files in-place
-3. Commit the changes to `airflow-site-archive` repository and push them to `some` branch of the repository.
-4. Run `Sync GitHub to S3` workflow in `airflow-site-archive` repository. This will upload the modified
-   documentation to the S3 bucket.
-5. You can choose whether to sync the changes to `live` or `staging` bucket. The default is `live`.
-6. By default, the workflow will synchronize all documentation modified in a single last commit pushed to
-   the branch you specified. You can also specify "full_sync" to synchronize all files in the repository.
-7. In case you specify "full_sync", you can also synchronize `all` docs or only selected documentation
-   packages (for example `apache-airflow` or `docker-stack` or `amazon` or `helm-chart`) - you can specify
-   more than one package separated by  spaces.
-8. After you synchronize the changes to S3, the Sync `S3 to GitHub` workflow will be triggered
-   automatically, and the changes will be synchronized to `airflow-site-archive` `main` branch - so there
-   is no need to merge your changes to `main` branch of `airflow-site-archive` repository. You can safely
-   delete the branch you created in step 3.
 
-![Sync GitHub to S3](images/sync_github_to_s3.png)
+> [!IMPORTANT]
+> When you modify a file for latest published version of the documentation you should do it in two
+> places - in the `stable` version and in the `X.Y.Z` version of the documentation, as `stable` is just a
+> copy of the latest version of the documentation.
+
+3. Commit the changes to `airflow-site-archive` repository and push them to `some` branch of the repository.
+4. Create a Pull Request from that branch and merge it to `main`
+5. Run `Sync GitHub to S3` workflow in `airflow-site-archive` repository. This will upload the modified
+   documentation to the S3 bucket. Use `main` branch (default) as "Reference of the commit used
+   for synchronization". You can choose whether to sync the changes to `live` or `staging` bucket.
+   The default is `live`:
+   ![Sync GitHub to S3](images/sync_github_to_s3.png)
+6. By default, the workflow will synchronize all documentation modified in a single last commit pushed to
+   the `main`. You can also specify `full_sync` to synchronize all files in the repository if you want to
+   make sure that S3 reflects `main`. The workflow might run for a long time (hours) in case of full sync
+   or many changes to the `.html` files.
+7. In case you specify `full_sync`, you can also synchronize `all` docs or only selected documentation
+   packages (for example `apache-airflow` or `docker-stack` or `amazon` or `helm-chart`) - you can specify
+   more than one package separated by spaces.
+8. The workflow will invalidate Cloudfront cache for "live" or "staging" bucket respectively.
+9. Run the `Build docs` workflow in `airflow-site` repository to make sure that Fastly cache of the
+   https://airflow.apache.org or https://airflow.staged.apache.org/ invalidated. Use `main` to rebuild site
+   for `live` site and `staging` to rebuild the `staging` site:
+   ![Build docs](images/build-docs.png)
 
 
 ## Manually publishing documentation directly to S3

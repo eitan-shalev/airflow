@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -44,30 +43,39 @@ import type { CalendarTimeRangeResponse } from "openapi/requests/types.gen";
 
 import { CalendarCell } from "./CalendarCell";
 import { generateHourlyCalendarData } from "./calendarUtils";
-import type { CalendarScale, CalendarColorMode } from "./types";
+import type { CalendarScale, CalendarColorMode, DeadlineCounts } from "./types";
 
 dayjs.extend(isSameOrBefore);
 
 type Props = {
   readonly data: Array<CalendarTimeRangeResponse>;
+  readonly deadlineMap?: Map<string, DeadlineCounts>;
   readonly scale: CalendarScale;
   readonly selectedMonth: number;
   readonly selectedYear: number;
+  readonly timezone: string;
   readonly viewMode?: CalendarColorMode;
 };
 
 export const HourlyCalendarView = ({
   data,
+  deadlineMap,
   scale,
   selectedMonth,
   selectedYear,
+  timezone,
   viewMode = "total",
 }: Props) => {
   const { t: translate } = useTranslation("dag");
-  const hourlyData = generateHourlyCalendarData(data, selectedYear, selectedMonth);
+  const hourlyData = generateHourlyCalendarData(data, {
+    deadlineMap,
+    selectedMonth,
+    selectedYear,
+    timezone,
+  });
 
   return (
-    <Box mb={4}>
+    <Box data-testid="calendar-hourly-view" mb={4}>
       <Box mb={4}>
         <Box display="flex" mb={2}>
           <Box width="40px" />
@@ -140,7 +148,7 @@ export const HourlyCalendarView = ({
         </Box>
       </Box>
 
-      <Box display="flex" gap={2}>
+      <Box data-testid="calendar-grid" display="flex" gap={2}>
         <Box display="flex" flexDirection="column" gap={0.5}>
           {Array.from({ length: 24 }, (_, hour) => (
             <Box

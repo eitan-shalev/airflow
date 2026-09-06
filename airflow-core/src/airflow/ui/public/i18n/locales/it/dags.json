@@ -20,8 +20,7 @@
       "all": "Tutti",
       "paused": "In Pausa"
     },
-    "runIdPatternFilter": "Cercare Dag Runs",
-    "triggeringUserNameFilter": "Cercare per Utente che ha Attivato"
+    "runIdPatternFilter": "Cercare Dag Runs"
   },
   "ownerLink": "Link dell'Owner per {{owner}}",
   "runAndTaskActions": {
@@ -62,6 +61,7 @@
       "future": "Futuro",
       "onlyFailed": "Pulisci solo le task fallite",
       "past": "Passato",
+      "preventRunningTasks": "Impedisci la riesecuzione se la task è in esecuzione",
       "queueNew": "Inserisci nuove task",
       "runOnLatestVersion": "Esegui con l'ultima versione del bundle",
       "upstream": "Upstream"

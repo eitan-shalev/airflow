@@ -28,6 +28,175 @@
 Changelog
 ---------
 
+4.6.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Make 'durable' reach 'default_args' and warn when set below Airflow 3.3 (#71531)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+   * ``Update changelog with better wording (#71161)``
+
+
+4.6.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Reconnect to the running Livy batch on retry instead of resubmitting (#68956)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Use common.compat.sdk for timezone imports in providers (#70492)``
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+4.5.7
+.....
+
+Misc
+~~~~
+
+* ``Bump aiohttp>=3.14.0 (#67978)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.5.6
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Include endpoint_prefix in LivyTrigger serialization (#66966)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``refactor: word changed from DAG to Dag in providers/apache/ (#66153)``
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Fix stale system test documentation links (#65071)``
+
+4.5.5
+.....
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.5.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Allow override of HTTP method in run_method of LivyAsyncHook (#64150)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+* ``Refactor HttpAsyncHook to support session-based async HTTP operations and simplify LivyAsyncHook (#60458)``
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Remove Connection dependency from shared secrets backend (#61523)``
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``Standardize connection docs labels across providers (#63455)``
+
+4.5.3
+.....
+
+Misc
+~~~~
+
+* ``Use common provider's get_async_connection in other providers (#56791)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.5.2
+.....
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Source conf from 'airflow.sdk.configuration.conf' for apache providers (#59966)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``TaskInstance unused method cleanup (#59835)``
+
+4.5.1
+.....
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.5.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+4.4.5
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to 13 files in providers (apache) (#57998)``
+   * ``Enable ruff PLW0129 rule (#57516)``
+
+4.4.4
+.....
+
+Misc
+~~~~
+
+* ``Migrate Apache providers & Elasticsearch to ''common.compat'' (#57016)``
+
+Doc-only
+~~~~~~~~
+
+* ``fix(livy): replace connection type (#55984)``
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT011 rule to provider tests (#56578)``
+
 4.4.3
 .....
 
@@ -160,7 +329,7 @@ Misc
 .....
 
 .. note::
-  This version has no code changes. It's released due to yank of previous version due to packaging issues.
+  This version contains no code changes. It was released to replace a previous version that was yanked due to a packaging issue.
 
 
 4.1.0
@@ -213,8 +382,6 @@ Misc
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Use Python 3.9 as target version for Ruff & Black rules (#44298)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
 
 3.9.2

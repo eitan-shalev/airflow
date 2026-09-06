@@ -23,7 +23,6 @@ from unittest import mock
 import pytest
 from moto import mock_aws
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.models import DAG, DagRun, TaskInstance
 from airflow.providers.amazon.aws.hooks.athena import AthenaHook
 from airflow.providers.amazon.aws.operators.athena import AthenaOperator
@@ -37,18 +36,16 @@ from airflow.providers.common.compat.openlineage.facet import (
     SQLJobFacet,
     SymlinksDatasetFacet,
 )
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 from airflow.providers.openlineage.extractors import OperatorLineage
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunType
 
+from tests_common.test_utils.compat import timezone
 from tests_common.test_utils.dag import sync_dag_to_db
+from tests_common.test_utils.taskinstance import create_task_instance, get_template_context
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
-
-try:
-    from airflow.sdk import timezone
-except ImportError:
-    from airflow.utils import timezone  # type: ignore[attr-defined,no-redef]
 
 TEST_DAG_ID = "unit_tests"
 DEFAULT_DATE = timezone.datetime(2018, 1, 1)
@@ -136,6 +133,26 @@ class TestAthenaOperator:
         mock_run_query.assert_called_once_with(
             MOCK_DATA["query"],
             query_context_catalog,
+            result_configuration,
+            MOCK_DATA["client_request_token"],
+            MOCK_DATA["workgroup"],
+        )
+        assert mock_check_query_status.call_count == 1
+
+    @mock.patch.object(AthenaHook, "check_query_status", side_effect=("SUCCEEDED",))
+    @mock.patch.object(AthenaHook, "run_query", return_value=ATHENA_QUERY_ID)
+    @mock.patch.object(AthenaHook, "get_conn")
+    def test_hook_run_without_database(self, mock_conn, mock_run_query, mock_check_query_status):
+        op_kwargs = self.default_op_kwargs.copy()
+        op_kwargs["task_id"] = "test_athena_operator_without_database"
+        op_kwargs.pop("database")
+        op = AthenaOperator(
+            **op_kwargs, output_location="s3://test_s3_bucket/", aws_conn_id=None, dag=self.dag
+        )
+        op.execute({})
+        mock_run_query.assert_called_once_with(
+            MOCK_DATA["query"],
+            {"Catalog": MOCK_DATA["catalog"]},
             result_configuration,
             MOCK_DATA["client_request_token"],
             MOCK_DATA["workgroup"],
@@ -251,7 +268,7 @@ class TestAthenaOperator:
 
             sync_dag_to_db(self.dag)
             dag_version = DagVersion.get_latest_version(self.dag.dag_id)
-            ti = TaskInstance(task=self.athena, dag_version_id=dag_version.id)
+            ti = create_task_instance(task=self.athena, dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=self.dag.dag_id,
                 logical_date=timezone.utcnow(),
@@ -271,7 +288,7 @@ class TestAthenaOperator:
         ti.dag_run = dag_run
         session.add(ti)
         session.commit()
-        assert self.athena.execute(ti.get_template_context()) == ATHENA_QUERY_ID
+        assert self.athena.execute(get_template_context(ti, self.athena)) == ATHENA_QUERY_ID
 
     @mock.patch.object(AthenaHook, "check_query_status", side_effect=("SUCCEEDED",))
     @mock.patch.object(AthenaHook, "run_query", return_value=ATHENA_QUERY_ID)
@@ -323,6 +340,21 @@ class TestAthenaOperator:
             event={"status": "success", "value": query_execution_id},
         )
         assert operator.query_execution_id == query_execution_id
+
+    @mock.patch.object(AthenaOperator, "get_openlineage_dataset")
+    def test_openlineage_uses_database_from_query_execution_context(self, mock_get_dataset):
+        op = AthenaOperator(
+            task_id="test_athena_openlineage",
+            query="INSERT INTO TEST_TABLE SELECT CUSTOMER_EMAIL FROM DISCOUNTS",
+            database=None,
+            query_execution_context={"Database": "TEST_DATABASE"},
+            dag=self.dag,
+        )
+
+        op.get_openlineage_facets_on_complete(None)
+
+        mock_get_dataset.assert_any_call("TEST_DATABASE", "DISCOUNTS")
+        mock_get_dataset.assert_any_call("TEST_DATABASE", "TEST_TABLE")
 
     @mock.patch.object(AthenaHook, "region_name", new_callable=mock.PropertyMock)
     @mock.patch.object(AthenaHook, "get_conn")

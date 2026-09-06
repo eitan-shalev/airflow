@@ -22,7 +22,7 @@ from unittest import mock
 
 import pytest
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.samba.transfers.gcs_to_samba import GCSToSambaOperator
 
 TASK_ID = "test-gcs-to-samba-operator"
@@ -35,7 +35,7 @@ DESTINATION_SMB = "destination_path"
 
 class TestGoogleCloudStorageToSambaOperator:
     @pytest.mark.parametrize(
-        "source_object, target_object, keep_directory_structure",
+        ("source_object", "target_object", "keep_directory_structure"),
         [
             ("folder/test_object.txt", "folder/test_object.txt", True),
             ("folder/subfolder/test_object.txt", "folder/subfolder/test_object.txt", True),
@@ -74,7 +74,7 @@ class TestGoogleCloudStorageToSambaOperator:
         gcs_hook_mock.return_value.delete.assert_not_called()
 
     @pytest.mark.parametrize(
-        "source_object, target_object, keep_directory_structure",
+        ("source_object", "target_object", "keep_directory_structure"),
         [
             ("folder/test_object.txt", "folder/test_object.txt", True),
             ("folder/subfolder/test_object.txt", "folder/subfolder/test_object.txt", True),
@@ -118,7 +118,7 @@ class TestGoogleCloudStorageToSambaOperator:
         gcs_hook_mock.return_value.delete.assert_called_once_with(TEST_BUCKET, source_object)
 
     @pytest.mark.parametrize(
-        "source_object, target_object, keep_directory_structure",
+        ("source_object", "target_object", "keep_directory_structure"),
         [
             ("folder/test_object.txt", "folder/test_object.txt", True),
             ("folder/subfolder/test_object.txt", "folder/subfolder/test_object.txt", True),
@@ -163,7 +163,14 @@ class TestGoogleCloudStorageToSambaOperator:
         gcs_hook_mock.return_value.delete.assert_called_once_with(TEST_BUCKET, source_object)
 
     @pytest.mark.parametrize(
-        "source_object, prefix, delimiter, gcs_files_list, target_objects, keep_directory_structure",
+        (
+            "source_object",
+            "prefix",
+            "delimiter",
+            "gcs_files_list",
+            "target_objects",
+            "keep_directory_structure",
+        ),
         [
             (
                 "folder/test_object*.txt",
@@ -252,7 +259,14 @@ class TestGoogleCloudStorageToSambaOperator:
         gcs_hook_mock.return_value.delete.assert_not_called()
 
     @pytest.mark.parametrize(
-        "source_object, prefix, delimiter, gcs_files_list, target_objects, keep_directory_structure",
+        (
+            "source_object",
+            "prefix",
+            "delimiter",
+            "gcs_files_list",
+            "target_objects",
+            "keep_directory_structure",
+        ),
         [
             (
                 "folder/test_object*.txt",
@@ -356,3 +370,35 @@ class TestGoogleCloudStorageToSambaOperator:
         )
         with pytest.raises(AirflowException):
             operator.execute(None)
+
+    @pytest.mark.parametrize(
+        "source_object",
+        [
+            "../../victim_area/payload",
+            "../escape",
+            "subdir/../../escape",
+        ],
+    )
+    def test_resolve_destination_path_rejects_traversal(self, source_object):
+        operator = GCSToSambaOperator(
+            task_id=TASK_ID,
+            source_bucket=TEST_BUCKET,
+            source_object=source_object,
+            destination_path=DESTINATION_SMB,
+            gcp_conn_id=GCP_CONN_ID,
+            samba_conn_id=SAMBA_CONN_ID,
+        )
+        with pytest.raises(ValueError, match="outside the configured"):
+            operator._resolve_destination_path(source_object)
+
+    def test_resolve_destination_path_allows_contained_object(self):
+        operator = GCSToSambaOperator(
+            task_id=TASK_ID,
+            source_bucket=TEST_BUCKET,
+            source_object="dir/file.txt",
+            destination_path=DESTINATION_SMB,
+            gcp_conn_id=GCP_CONN_ID,
+            samba_conn_id=SAMBA_CONN_ID,
+        )
+        resolved = operator._resolve_destination_path("dir/file.txt")
+        assert resolved == os.path.join(DESTINATION_SMB, "dir/file.txt")

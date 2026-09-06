@@ -17,16 +17,18 @@
  * under the License.
  */
 import { Pagination as ChakraPagination } from "@chakra-ui/react";
+import type { HTMLAttributes } from "react";
 
 import { Ellipsis } from "./Ellipsis";
 import { Item } from "./Item";
 
-export const Items = (props: React.HTMLAttributes<HTMLElement>) => (
+export const Items = (props: HTMLAttributes<HTMLElement>) => (
   <ChakraPagination.Context>
     {({ pages }) =>
       pages.map((page, index) =>
         page.type === "ellipsis" ? (
-          <Ellipsis index={index} key={page.type} {...props} />
+          // eslint-disable-next-line react/no-array-index-key
+          <Ellipsis index={index} key={`${page.type}-${index}`} {...props} />
         ) : (
           <Item key={page.value} type="page" value={page.value} {...props} />
         ),

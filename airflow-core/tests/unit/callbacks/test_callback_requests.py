@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 
 import pytest
 from pydantic import TypeAdapter
@@ -32,12 +31,12 @@ from airflow.callbacks.callback_requests import (
     CallbackRequest,
     DagCallbackRequest,
     DagRunContext,
-    EmailNotificationRequest,
+    EmailRequest,
     TaskCallbackRequest,
 )
-from airflow.models.dag import DAG
+from airflow.models import DagRun
 from airflow.models.taskinstance import TaskInstance
-from airflow.providers.standard.operators.bash import BashOperator
+from airflow.serialization.definitions.baseoperator import SerializedBaseOperator
 from airflow.utils.state import State, TaskInstanceState
 
 pytestmark = pytest.mark.db_test
@@ -45,7 +44,7 @@ pytestmark = pytest.mark.db_test
 
 class TestCallbackRequest:
     @pytest.mark.parametrize(
-        "input,request_class",
+        ("input", "request_class"),
         [
             (
                 None,  # to be generated when test is run
@@ -67,12 +66,7 @@ class TestCallbackRequest:
     def test_from_json(self, input, request_class):
         if input is None:
             ti = TaskInstance(
-                task=BashOperator(
-                    task_id="test",
-                    bash_command="true",
-                    start_date=datetime.now(),
-                    dag=DAG(dag_id="id", schedule=None),
-                ),
+                task=SerializedBaseOperator(task_id="test"),
                 run_id="fake_run",
                 state=State.RUNNING,
                 dag_version_id=uuid.uuid4(),
@@ -98,7 +92,7 @@ class TestCallbackRequest:
         assert input == result
 
     @pytest.mark.parametrize(
-        "task_callback_type,expected_is_failure",
+        ("task_callback_type", "expected_is_failure"),
         [
             (None, True),
             (TaskInstanceState.FAILED, True),
@@ -124,6 +118,33 @@ class TestCallbackRequest:
 
         assert request.is_failure_callback == expected_is_failure
 
+    def test_version_data_round_trips_and_defaults_none(self):
+        """version_data survives JSON serialization and defaults to None when omitted."""
+        version_data = {"schema_version": 1, "files": {"dags/my_dag.py": "ver123"}}
+        request = DagCallbackRequest(
+            filepath="filepath",
+            dag_id="fake_dag",
+            run_id="fake_run",
+            is_failure_callback=False,
+            bundle_name="testing",
+            bundle_version="abc123",
+            version_data=version_data,
+        )
+        result = DagCallbackRequest.from_json(request.to_json())
+        assert result.version_data == version_data
+
+        # Omitted -> defaults to None and round-trips as None.
+        unpinned = DagCallbackRequest(
+            filepath="filepath",
+            dag_id="fake_dag",
+            run_id="fake_run",
+            is_failure_callback=False,
+            bundle_name="testing",
+            bundle_version=None,
+        )
+        assert unpinned.version_data is None
+        assert DagCallbackRequest.from_json(unpinned.to_json()).version_data is None
+
 
 class TestDagRunContext:
     def test_dagrun_context_creation(self):
@@ -141,6 +162,7 @@ class TestDagRunContext:
             run_type="manual",
             state="running",
             consumed_asset_events=[],
+            partition_key=None,
         )
 
         ti_data = TIDataModel(
@@ -179,6 +201,7 @@ class TestDagRunContext:
             run_type="manual",
             state="running",
             consumed_asset_events=[],
+            partition_key=None,
         )
 
         ti_data = TIDataModel(
@@ -202,6 +225,67 @@ class TestDagRunContext:
         assert deserialized.dag_run.dag_id == context.dag_run.dag_id
         assert deserialized.last_ti.task_id == context.last_ti.task_id
 
+    def test_dagrun_context_detached_consumed_asset_events(self, session):
+        """
+        DagRunContext should not fail if a detached DagRun raises
+        DetachedInstanceError when accessing consumed_asset_events.
+        """
+        # Create a real ORM DagRun.
+        current_time = timezone.utcnow()
+        dag_run = DagRun(
+            dag_id="test_dag",
+            run_id="test_run_detached",
+            logical_date=current_time,
+            state="running",
+            run_type="manual",
+        )
+
+        # Forcefully detached it to replicate failure mode.
+        session.add(dag_run)
+        session.commit()
+        session.expunge(dag_run)
+
+        # Validation for consumed_asset_events occurs on creation of DagRunContext.
+        context = DagRunContext(dag_run=dag_run, last_ti=None)
+
+        # Access should be safe and not raise DetachedInstanceError.
+        events = context.dag_run.consumed_asset_events
+
+        # Relationship should be normalized to a safe iterable.
+        assert events is not None
+        assert isinstance(events, list)
+
+    def test_dagrun_context_attached_consumed_asset_events(self, session):
+        """
+        DagRunContext should safely normalize consumed_asset_events
+        when the DagRun is attached to a session.
+        """
+        current_time = timezone.utcnow()
+        dag_run = DagRun(
+            dag_id="test_dag",
+            run_id="test_run_attached",
+            logical_date=current_time,
+            state="running",
+            run_type="manual",
+        )
+
+        # Do not detach
+        session.add(dag_run)
+        session.flush()
+
+        # Construct context while DagRun is still attached.
+        context = DagRunContext(
+            dag_run=dag_run,
+            last_ti=None,
+        )
+
+        # Access should be safe and not raise DetachedInstanceError.
+        events = context.dag_run.consumed_asset_events
+
+        # Relationship should be normalized to a safe iterable.
+        assert events is not None
+        assert isinstance(events, list)
+
 
 class TestDagCallbackRequestWithContext:
     def test_dag_callback_request_with_context_from_server(self):
@@ -219,6 +303,7 @@ class TestDagCallbackRequestWithContext:
             run_type="manual",
             state="running",
             consumed_asset_events=[],
+            partition_key=None,
         )
 
         ti_data = TIDataModel(
@@ -277,6 +362,7 @@ class TestDagCallbackRequestWithContext:
             run_type="manual",
             state="running",
             consumed_asset_events=[],
+            partition_key=None,
         )
 
         ti_data = TIDataModel(
@@ -314,9 +400,9 @@ class TestDagCallbackRequestWithContext:
         assert result.context_from_server.last_ti.task_id == "test_task"
 
 
-class TestEmailNotificationRequest:
+class TestEmailRequest:
     def test_email_notification_request_serialization(self):
-        """Test EmailNotificationRequest can be serialized and used in CallbackRequest union."""
+        """Test EmailRequest can be serialized and used in CallbackRequest union."""
         ti_data = TIDataModel(
             id=str(uuid.uuid4()),
             task_id="test_task",
@@ -331,8 +417,8 @@ class TestEmailNotificationRequest:
 
         current_time = timezone.utcnow()
 
-        # Create EmailNotificationRequest
-        email_request = EmailNotificationRequest(
+        # Create EmailRequest
+        email_request = EmailRequest(
             filepath="/path/to/dag.py",
             bundle_name="test_bundle",
             bundle_version="1.0.0",
@@ -350,6 +436,7 @@ class TestEmailNotificationRequest:
                     run_type="manual",
                     state="running",
                     consumed_asset_events=[],
+                    partition_key=None,
                 ),
                 max_tries=2,
             ),
@@ -359,17 +446,17 @@ class TestEmailNotificationRequest:
 
         # Test serialization
         json_str = email_request.to_json()
-        assert "EmailNotificationRequest" in json_str
+        assert "EmailRequest" in json_str
         assert "failure" in json_str
 
         # Test deserialization
-        result = EmailNotificationRequest.from_json(json_str)
+        result = EmailRequest.from_json(json_str)
         assert result == email_request
         assert result.email_type == "failure"
         assert result.ti.task_id == "test_task"
 
     def test_callback_request_union_with_email_notification(self):
-        """Test EmailNotificationRequest works in CallbackRequest union type."""
+        """Test EmailRequest works in CallbackRequest union type."""
         ti_data = TIDataModel(
             id=str(uuid.uuid4()),
             task_id="test_task",
@@ -397,12 +484,13 @@ class TestEmailNotificationRequest:
                 run_type="manual",
                 state="running",
                 consumed_asset_events=[],
+                partition_key=None,
             ),
             max_tries=2,
         )
 
         email_data = {
-            "type": "EmailNotificationRequest",
+            "type": "EmailRequest",
             "filepath": "/path/to/dag.py",
             "bundle_name": "test_bundle",
             "bundle_version": "1.0.0",
@@ -416,7 +504,7 @@ class TestEmailNotificationRequest:
         adapter = TypeAdapter(CallbackRequest)
         callback_request = adapter.validate_python(email_data)
 
-        # Verify it's correctly identified as EmailNotificationRequest
-        assert isinstance(callback_request, EmailNotificationRequest)
+        # Verify it's correctly identified as EmailRequest
+        assert isinstance(callback_request, EmailRequest)
         assert callback_request.email_type == "retry"
         assert callback_request.ti.task_id == "test_task"

@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import os
 import urllib.parse
+import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from botocore.exceptions import ClientError
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.amazon.aws.exceptions import GlueJobRunStoppedError
 from airflow.providers.amazon.aws.hooks.glue import GlueDataQualityHook, GlueJobHook
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.amazon.aws.links.glue import GlueJobRunDetailsLink
@@ -37,12 +38,65 @@ from airflow.providers.amazon.aws.triggers.glue import (
 )
 from airflow.providers.amazon.aws.utils import validate_execute_complete_event
 from airflow.providers.amazon.aws.utils.mixins import aws_template_fields
+from airflow.providers.amazon.version_compat import AIRFLOW_V_3_3_PLUS
+from airflow.providers.common.compat.openlineage.utils.spark import (
+    inject_parent_job_information_into_glue_arguments,
+    inject_transport_information_into_glue_arguments,
+)
+from airflow.providers.common.compat.sdk import AirflowException, conf
+
+_DURABLE_UNSET = object()
+
+
+def _warn_and_disable_durable_pre_3_3(durable: Any) -> bool:
+    """Shared by the <3.3 compat stub: durable has no effect below 3.3, warn if it was set."""
+    if durable is not _DURABLE_UNSET:
+        warnings.warn(
+            "`durable` has no effect on Airflow versions below 3.3.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return False
+
+
+# ResumableJobMixin only exists on Airflow 3.3+; this provider still targets >=2.11. Drop this
+# fallback once the provider's minimum Airflow version is >=3.3.
+try:
+    from airflow.sdk import ResumableJobMixin
+except ImportError:
+
+    class ResumableJobMixin:  # type: ignore[no-redef]
+        """Airflow <3.3 stub, task_state_store unavailable, always submits fresh."""
+
+        external_id_key: str = "glue_job_run_id"
+
+        def __init__(self, *, durable: Any = _DURABLE_UNSET, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.durable = _warn_and_disable_durable_pre_3_3(durable)
+
+        def execute_resumable(self, context):
+            external_id = self.submit_job(context)
+            self.poll_until_complete(external_id, context)
+            return self.get_job_result(external_id, context)
+
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from pydantic import JsonValue
+
+    from airflow.sdk import Context
+
+# Glue job run states, see
+# https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-jobs-runs.html#aws-glue-api-jobs-runs-JobRun
+# STOPPED is deliberately NOT a success state here, unlike GlueJobHook.job_completion: Glue can't
+# tell a console cancellation apart from on_kill stopping its own run, so treating STOPPED as
+# failure avoids silently reporting a self-inflicted stop as success.
+JOB_RUN_SUCCESS_STATES = ("SUCCEEDED",)
+JOB_RUN_TERMINAL_STATES = (*JOB_RUN_SUCCESS_STATES, "STOPPED", "FAILED", "TIMEOUT", "ERROR", "EXPIRED")
+# Synthetic state for a run id Glue no longer knows about, so a retry submits fresh rather than failing.
+NOT_FOUND_STATE = "NOT_FOUND"
 
 
-class GlueJobOperator(AwsBaseOperator[GlueJobHook]):
+class GlueJobOperator(ResumableJobMixin, AwsBaseOperator[GlueJobHook]):
     """
     Create an AWS Glue Job.
 
@@ -79,8 +133,20 @@ class GlueJobOperator(AwsBaseOperator[GlueJobHook]):
         It is recommended to set this parameter to 10 when you are using concurrency=1.
         For more information see:
         https://repost.aws/questions/QUaKgpLBMPSGWO0iq2Fob_bw/glue-run-concurrent-jobs#ANFpCL2fRnQRqgDFuIU_rpvA
+    :param openlineage_inject_parent_job_info: If True, injects OpenLineage parent job information into the
+        Glue job's ``--conf`` argument so the Glue Spark job emits a ``parentRunFacet`` linking back to the
+        Airflow task. Defaults to the ``openlineage.spark_inject_parent_job_info`` config value.
+    :param openlineage_inject_transport_info: If True, injects OpenLineage transport configuration into the
+        Glue job's ``--conf`` argument so the Glue Spark job sends OL events to the same backend as Airflow.
+        Defaults to the ``openlineage.spark_inject_transport_info`` config value.
     :param waiter_delay: Time in seconds to wait between status checks. (default: 60)
     :param waiter_max_attempts: Maximum number of attempts to check for job completion. (default: 20)
+    :param resume_glue_job_on_retry: deprecated, use ``durable`` instead.
+    :param durable: When ``True``, the Glue job run id is persisted to task state before polling
+        begins. A worker crash on retry reconnects to the existing run instead of starting a
+        duplicate. Defaults to ``True`` on Airflow 3.3+, which uses task state store for the
+        persisted lookup; on earlier versions it defaults to ``False`` and, if set explicitly,
+        recovers the run by searching job runs for the task's ``--airflow_task_uuid`` argument.
     :param aws_conn_id: The Airflow connection used for AWS credentials.
         If this is ``None`` or empty then the default boto3 behaviour is used. If
         running Airflow in a distributed manner and aws_conn_id is None or
@@ -113,6 +179,8 @@ class GlueJobOperator(AwsBaseOperator[GlueJobHook]):
     ui_color = "#ededed"
 
     operator_extra_links = (GlueJobRunDetailsLink(),)
+    TASK_UUID_ARG = "--airflow_task_uuid"
+    external_id_key = "glue_job_run_id"
 
     def __init__(
         self,
@@ -139,9 +207,38 @@ class GlueJobOperator(AwsBaseOperator[GlueJobHook]):
         job_poll_interval: int | float = 6,
         waiter_delay: int = 60,
         waiter_max_attempts: int = 75,
+        resume_glue_job_on_retry: bool | None = None,
+        durable: bool | None = None,
+        openlineage_inject_parent_job_info: bool = conf.getboolean(
+            "openlineage", "spark_inject_parent_job_info", fallback=False
+        ),
+        openlineage_inject_transport_info: bool = conf.getboolean(
+            "openlineage", "spark_inject_transport_info", fallback=False
+        ),
         **kwargs,
     ):
+        if resume_glue_job_on_retry is not None:
+            warnings.warn(
+                "`resume_glue_job_on_retry` is deprecated and will be removed once this provider's "
+                "minimum supported Airflow version reaches 3.3. "
+                + (
+                    "Use `durable` instead."
+                    if AIRFLOW_V_3_3_PLUS
+                    else "On Airflow 3.3+, use `durable` instead."
+                ),
+                AirflowProviderDeprecationWarning,
+                stacklevel=2,
+            )
+            if AIRFLOW_V_3_3_PLUS:
+                kwargs.setdefault("durable", resume_glue_job_on_retry)
+        # durable is also named parameter here (not left to **kwargs) so default_args={"durable": ...} reaches
+        # it on every supported Airflow version.
+        if durable is not None:
+            kwargs["durable"] = durable
         super().__init__(**kwargs)
+        if not AIRFLOW_V_3_3_PLUS and resume_glue_job_on_retry is not None:
+            # durable itself has no effect below 3.3, so we take value of resume_glue_job_on_retry instead.
+            self.durable = resume_glue_job_on_retry
         self.job_name = job_name
         self.job_desc = job_desc
         self.script_location = script_location
@@ -168,6 +265,8 @@ class GlueJobOperator(AwsBaseOperator[GlueJobHook]):
         self.s3_script_location: str | None = None
         self.waiter_delay = waiter_delay
         self.waiter_max_attempts = waiter_max_attempts
+        self.openlineage_inject_parent_job_info = openlineage_inject_parent_job_info
+        self.openlineage_inject_transport_info = openlineage_inject_transport_info
 
     @property
     def _hook_parameters(self):
@@ -211,40 +310,58 @@ class GlueJobOperator(AwsBaseOperator[GlueJobHook]):
         )
         self.s3_script_location = f"s3://{self.s3_bucket}/{self.s3_artifacts_prefix}{script_name}"
 
-    def execute(self, context: Context):
+    def _get_task_uuid(self, context: Context) -> str:
+        ti = context["ti"]
+        map_index = getattr(ti, "map_index", -1)
+        if map_index is None:
+            map_index = -1
+        return f"{ti.dag_id}:{ti.task_id}:{ti.run_id}:{map_index}"
+
+    def _prepare_script_args_with_task_uuid(
+        self, context: Context, base_args: dict | None = None
+    ) -> tuple[dict, str]:
+        script_args = dict(base_args if base_args is not None else (self.script_args or {}))
+        if self.TASK_UUID_ARG in script_args:
+            task_uuid = str(script_args[self.TASK_UUID_ARG])
+        else:
+            task_uuid = self._get_task_uuid(context)
+            script_args[self.TASK_UUID_ARG] = task_uuid
+        return script_args, task_uuid
+
+    def _find_job_run_id_by_task_uuid(self, task_uuid: str) -> tuple[str, str] | None:
+        # Unbounded walk with no page cap; a no-match run is the common retry shape and pays the
+        # full scan. Tracked at https://github.com/apache/airflow/issues/71489.
+        next_token: str | None = None
+        while True:
+            request = {"JobName": self.job_name, "MaxResults": 50}
+            if next_token:
+                request["NextToken"] = next_token
+            response = self.hook.conn.get_job_runs(**request)
+            for job_run in response.get("JobRuns", []):
+                args = job_run.get("Arguments", {}) or {}
+                if args.get(self.TASK_UUID_ARG) == task_uuid:
+                    job_run_id = job_run.get("Id")
+                    job_run_state = job_run.get("JobRunState")
+                    if job_run_id and job_run_state:
+                        return job_run_id, job_run_state
+            next_token = response.get("NextToken")
+            if not next_token:
+                return None
+
+    def execute(self, context: Context) -> str | None:
         """
         Execute AWS Glue Job from Airflow.
 
         :return: the current Glue job ID.
         """
-        self.log.info(
-            "Initializing AWS Glue Job: %s. Wait for completion: %s",
-            self.job_name,
-            self.wait_for_completion,
-        )
-        glue_job_run = self.hook.initialize_job(self.script_args, self.run_job_kwargs)
-        self._job_run_id = glue_job_run["JobRunId"]
-        glue_job_run_url = GlueJobRunDetailsLink.format_str.format(
-            aws_domain=GlueJobRunDetailsLink.get_aws_domain(self.hook.conn_partition),
-            region_name=self.hook.conn_region_name,
-            job_name=urllib.parse.quote(self.job_name, safe=""),
-            job_run_id=self._job_run_id,
-        )
-        GlueJobRunDetailsLink.persist(
-            context=context,
-            operator=self,
-            region_name=self.hook.conn_region_name,
-            aws_partition=self.hook.conn_partition,
-            job_name=urllib.parse.quote(self.job_name, safe=""),
-            job_run_id=self._job_run_id,
-        )
-        self.log.info("You can monitor this Glue Job run at: %s", glue_job_run_url)
-
         if self.deferrable:
+            # The Triggerer tracks the run, so no id is persisted to task_state_store here -- but
+            # durable still reattaches a retry via the task-UUID scan in submit_job.
+            job_run_id = self.submit_job(context)
             self.defer(
                 trigger=GlueJobCompleteTrigger(
                     job_name=self.job_name,
-                    run_id=self._job_run_id,
+                    run_id=job_run_id,
                     verbose=self.verbose,
                     aws_conn_id=self.aws_conn_id,
                     waiter_delay=self.waiter_delay,
@@ -253,18 +370,7 @@ class GlueJobOperator(AwsBaseOperator[GlueJobHook]):
                 ),
                 method_name="execute_complete",
             )
-        elif self.wait_for_completion:
-            glue_job_run = self.hook.job_completion(
-                self.job_name, self._job_run_id, self.verbose, self.sleep_before_return
-            )
-            self.log.info(
-                "AWS Glue Job: %s status: %s. Run Id: %s",
-                self.job_name,
-                glue_job_run["JobRunState"],
-                self._job_run_id,
-            )
-        else:
-            self.log.info("AWS Glue Job: %s. Run Id: %s", self.job_name, self._job_run_id)
+        self.execute_resumable(context)
         return self._job_run_id
 
     def execute_complete(self, context: Context, event: dict[str, Any] | None = None) -> str:
@@ -276,7 +382,7 @@ class GlueJobOperator(AwsBaseOperator[GlueJobHook]):
 
     def on_kill(self):
         """Cancel the running AWS Glue Job."""
-        if self.stop_job_run_on_kill:
+        if self.stop_job_run_on_kill and self._job_run_id:
             self.log.info("Stopping AWS Glue Job: %s. Run Id: %s", self.job_name, self._job_run_id)
             response = self.hook.conn.batch_stop_job_run(
                 JobName=self.job_name,
@@ -284,6 +390,157 @@ class GlueJobOperator(AwsBaseOperator[GlueJobHook]):
             )
             if not response["SuccessfulSubmissions"]:
                 self.log.error("Failed to stop AWS Glue Job: %s. Run Id: %s", self.job_name, self._job_run_id)
+
+    def _set_job_run_id(self, context: Context, job_run_id: str) -> None:
+        """Record the run id and surface its console link; guarded so one attempt logs it once."""
+        if self._job_run_id == job_run_id:
+            return
+        self._job_run_id = job_run_id
+        context["ti"].xcom_push(key="glue_job_run_id", value=job_run_id)
+        GlueJobRunDetailsLink.persist(
+            context=context,
+            operator=self,
+            region_name=self.hook.conn_region_name,
+            aws_partition=self.hook.conn_partition,
+            job_name=urllib.parse.quote(self.job_name, safe=""),
+            job_run_id=job_run_id,
+        )
+        self.log.info(
+            "You can monitor this Glue Job run at: %s",
+            GlueJobRunDetailsLink.format_str.format(
+                aws_domain=GlueJobRunDetailsLink.get_aws_domain(self.hook.conn_partition),
+                region_name=self.hook.conn_region_name,
+                job_name=urllib.parse.quote(self.job_name, safe=""),
+                job_run_id=job_run_id,
+            ),
+        )
+
+    def _build_script_args(self, context: Context) -> dict:
+        script_args = dict(self.script_args)
+        if self.openlineage_inject_parent_job_info:
+            self.log.info("Injecting OpenLineage parent job information into Glue job arguments.")
+            script_args = inject_parent_job_information_into_glue_arguments(script_args, context)
+        if self.openlineage_inject_transport_info:
+            self.log.info("Injecting OpenLineage transport information into Glue job arguments.")
+            script_args = inject_transport_information_into_glue_arguments(script_args, context)
+        # Skipped for a synchronous run on 3.3+: task_state_store is the primary reconnect
+        # mechanism there, so tagging every script's args is not worth it just for the narrow
+        # crash-before-persist window this tag would otherwise cover.
+        if self.durable and (self.deferrable or not AIRFLOW_V_3_3_PLUS):
+            script_args, _ = self._prepare_script_args_with_task_uuid(context, base_args=script_args)
+        return script_args
+
+    def _find_previous_job_run(self, context: Context, task_uuid: str) -> str | None:
+        """
+        Look for a Glue job run this task instance already started.
+
+        Checks XCom for a cached run id first, then falls back to a task-UUID scan. The XCom tier
+        only works on Airflow 2.x; every Airflow 3 release clears task XComs before each
+        non-deferral attempt, so it always misses there and the scan runs every time.
+        """
+        ti = context["ti"]
+        previous_job_run_id = ti.xcom_pull(key="glue_job_run_id", task_ids=ti.task_id)
+        if previous_job_run_id:
+            try:
+                job_run = self.hook.conn.get_job_run(JobName=self.job_name, RunId=previous_job_run_id)
+                state = job_run.get("JobRun", {}).get("JobRunState")
+                self.log.info("Previous Glue job_run_id: %s, state: %s", previous_job_run_id, state)
+                if self.is_job_active(state):
+                    return previous_job_run_id
+            except Exception:
+                self.log.warning("Failed to get previous Glue job run state", exc_info=True)
+        else:
+            try:
+                existing = self._find_job_run_id_by_task_uuid(task_uuid)
+                if existing:
+                    existing_job_run_id, existing_job_run_state = existing
+                    self.log.info(
+                        "Found Glue job_run_id by task UUID: %s, state: %s",
+                        existing_job_run_id,
+                        existing_job_run_state,
+                    )
+                    if self.is_job_active(existing_job_run_state):
+                        return existing_job_run_id
+            except Exception:
+                self.log.warning("Failed to find previous Glue job run by task UUID", exc_info=True)
+        return None
+
+    def _has_stored_external_id(self, context: Context) -> bool:
+        task_state_store = context.get("task_state_store")
+        return task_state_store is not None and task_state_store.get(self.external_id_key) is not None
+
+    def submit_job(self, context: Context) -> str:
+        """Start a Glue job run and return its run id, or reconnect to one this task already started."""
+        script_args = self._build_script_args(context)
+        # Scan only when there's nothing else to go on: first attempt, no store, or a store that
+        # never recorded this key. The store check itself is skipped on the deferrable path, where
+        # nothing is ever written to it -- a store error there would otherwise block the scan.
+        # Deferrable retries could reconnect via task_state_store too, avoiding this scan entirely,
+        # if ResumableJobMixin exposed its reconnect decision apart from its polling loop;
+        # tracked at https://github.com/apache/airflow/issues/71485.
+        if (
+            self.durable
+            and (self.deferrable or not AIRFLOW_V_3_3_PLUS)
+            and context["ti"].try_number > 1
+            and (self.deferrable or not self._has_stored_external_id(context))
+        ):
+            existing_job_run_id = self._find_previous_job_run(context, script_args[self.TASK_UUID_ARG])
+            if existing_job_run_id:
+                self._set_job_run_id(context, existing_job_run_id)
+                return existing_job_run_id
+        self.log.info(
+            "Initializing AWS Glue Job: %s. Wait for completion: %s",
+            self.job_name,
+            self.wait_for_completion,
+        )
+        # A prior get_job_status call may have set this to a stale, terminal run id while checking
+        # whether to reconnect. Clear it so on_kill has nothing to act on if initialize_job raises.
+        self._job_run_id = None
+        glue_job_run = self.hook.initialize_job(script_args, self.run_job_kwargs)
+        # Set before polling so on_kill can stop the run even if the worker dies immediately after.
+        self._set_job_run_id(context, glue_job_run["JobRunId"])
+        return glue_job_run["JobRunId"]
+
+    def get_job_status(self, external_id: JsonValue, context: Context) -> str:
+        """Query the raw job run state; a run id Glue no longer knows about degrades to NOT_FOUND."""
+        job_run_id = cast("str", external_id)
+        # This is the first place a reconnecting attempt learns the run id.
+        self._set_job_run_id(context, job_run_id)
+        try:
+            return self.hook.get_job_state(self.job_name, job_run_id)
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "EntityNotFoundException":
+                return NOT_FOUND_STATE
+            raise
+
+    def is_job_active(self, status: str) -> bool:
+        return status not in (*JOB_RUN_TERMINAL_STATES, NOT_FOUND_STATE)
+
+    def is_job_succeeded(self, status: str) -> bool:
+        return status in JOB_RUN_SUCCESS_STATES
+
+    def poll_until_complete(self, external_id: JsonValue, context: Context) -> None:
+        job_run_id = cast("str", external_id)
+        self._set_job_run_id(context, job_run_id)
+        if not self.wait_for_completion:
+            self.log.info("AWS Glue Job: %s. Run Id: %s", self.job_name, job_run_id)
+            return
+        glue_job_run = self.hook.job_completion(
+            self.job_name, job_run_id, self.verbose, self.sleep_before_return
+        )
+        state = glue_job_run["JobRunState"]
+        self.log.info("AWS Glue Job: %s status: %s. Run Id: %s", self.job_name, state, job_run_id)
+        if state not in JOB_RUN_SUCCESS_STATES:
+            # job_completion's own finished_states also accepts STOPPED; this is narrower on purpose.
+            raise GlueJobRunStoppedError(
+                f"Glue job run {job_run_id} for job {self.job_name} ended in state {state!r} "
+                "instead of succeeding."
+            )
+
+    def get_job_result(self, external_id: JsonValue, context: Context) -> str:
+        job_run_id = cast("str", external_id)
+        self._set_job_run_id(context, job_run_id)
+        return job_run_id
 
 
 class GlueDataQualityOperator(AwsBaseOperator[GlueDataQualityHook]):
@@ -334,7 +591,7 @@ class GlueDataQualityOperator(AwsBaseOperator[GlueDataQualityHook]):
     ):
         super().__init__(**kwargs)
         self.name = name
-        self.ruleset = ruleset.strip()
+        self.ruleset = ruleset
         self.description = description
         self.update_rule_set = update_rule_set
         self.data_quality_ruleset_kwargs = data_quality_ruleset_kwargs or {}
@@ -350,6 +607,8 @@ class GlueDataQualityOperator(AwsBaseOperator[GlueDataQualityHook]):
                 raise AttributeError("Target table must have DatabaseName and TableName")
 
     def execute(self, context: Context):
+        # ruleset is a template field; strip the rendered value here, not in __init__.
+        self.ruleset = self.ruleset.strip()
         self.validate_inputs()
 
         config = {

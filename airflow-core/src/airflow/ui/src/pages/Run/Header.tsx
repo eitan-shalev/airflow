@@ -16,104 +16,54 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { HStack, Text, Box, Link, Button, Menu, Portal } from "@chakra-ui/react";
-import { useCallback, useState, useRef } from "react";
+import { HStack, Text, Box } from "@chakra-ui/react";
 import { useTranslation } from "react-i18next";
 import { FiBarChart } from "react-icons/fi";
-import { LuMenu } from "react-icons/lu";
-import { Link as RouterLink } from "react-router-dom";
 
+import { useDeadlinesServiceGetDagDeadlineAlerts } from "openapi/queries";
 import type { DAGRunResponse } from "openapi/requests/types.gen";
 import { ClearRunButton } from "src/components/Clear";
 import { DagVersion } from "src/components/DagVersion";
-import EditableMarkdownButton from "src/components/EditableMarkdownButton";
 import { HeaderCard } from "src/components/HeaderCard";
 import { LimitedItemsList } from "src/components/LimitedItemsList";
 import { MarkRunAsButton } from "src/components/MarkAs";
+import { NeedsReviewButtonWithModal } from "src/components/NeedsReviewButton";
+import NotePreview from "src/components/NotePreview";
 import { RunTypeIcon } from "src/components/RunTypeIcon";
+import { TeamName } from "src/components/TeamName";
 import Time from "src/components/Time";
+import { RouterLink } from "src/components/ui";
 import { SearchParamsKeys } from "src/constants/searchParams";
-import DeleteRunButton from "src/pages/DeleteRunButton";
-import { usePatchDagRun } from "src/queries/usePatchDagRun";
-import { getDuration, useContainerWidth } from "src/utils";
+import { useShowTeam } from "src/hooks/useShowTeam";
+import DeleteRunButton from "src/pages/DagRuns/DeleteRunButton";
+import { useDagRunNote } from "src/queries/useDagRunNote";
+import { getDuration } from "src/utils";
 
-export const Header = ({
-  dagRun,
-  isRefreshing,
-}: {
-  readonly dagRun: DAGRunResponse;
-  readonly isRefreshing?: boolean;
-}) => {
+import { DeadlineStatus } from "./DeadlineStatus";
+
+export const Header = ({ dagRun }: { readonly dagRun: DAGRunResponse }) => {
   const { t: translate } = useTranslation();
-  const [note, setNote] = useState<string | null>(dagRun.note);
-
-  const hasContent = Boolean(dagRun.note?.trim());
+  const { isPending, note, onOpen, onSave, setNote } = useDagRunNote(dagRun);
+  const showTeam = useShowTeam(dagRun.team_name);
 
   const dagId = dagRun.dag_id;
   const dagRunId = dagRun.dag_run_id;
 
-  const { isPending, mutate } = usePatchDagRun({
-    dagId,
-    dagRunId,
-  });
-
-  const onConfirm = useCallback(() => {
-    if (note !== dagRun.note) {
-      mutate({
-        dagId,
-        dagRunId,
-        requestBody: { note },
-      });
-    }
-  }, [dagId, dagRun.note, dagRunId, mutate, note]);
-
-  const onOpen = () => {
-    setNote(dagRun.note ?? "");
-  };
-
-  const containerRef = useRef<HTMLDivElement>();
-  const containerWidth = useContainerWidth(containerRef);
+  const { data: alertData } = useDeadlinesServiceGetDagDeadlineAlerts({ dagId });
+  const hasDeadlineAlerts = (alertData?.total_entries ?? 0) > 0;
 
   return (
-    <Box ref={containerRef}>
+    <Box>
       <HeaderCard
         actions={
           <>
-            <EditableMarkdownButton
-              header={translate("note.dagRun")}
-              isPending={isPending}
-              mdContent={dagRun.note}
-              onConfirm={onConfirm}
-              onOpen={onOpen}
-              placeholder={translate("note.placeholder")}
-              setMdContent={setNote}
-              text={hasContent ? translate("note.label") : translate("note.add")}
-              withText={containerWidth > 700}
-            />
-            <ClearRunButton dagRun={dagRun} isHotkeyEnabled withText={containerWidth > 700} />
-            <MarkRunAsButton dagRun={dagRun} isHotkeyEnabled withText={containerWidth > 700} />
-            <Menu.Root>
-              <Menu.Trigger asChild>
-                <Button aria-label={translate("dag:header.buttons.advanced")} variant="outline">
-                  <LuMenu />
-                </Button>
-              </Menu.Trigger>
-              <Portal>
-                <Menu.Positioner>
-                  <Menu.Content>
-                    <Menu.Item closeOnSelect={false} value="delete">
-                      <Box width="100%">
-                        <DeleteRunButton dagRun={dagRun} width="100%" withText={true} />
-                      </Box>
-                    </Menu.Item>
-                  </Menu.Content>
-                </Menu.Positioner>
-              </Portal>
-            </Menu.Root>
+            <NeedsReviewButtonWithModal dagId={dagId} runId={dagRunId} />
+            <ClearRunButton dagRun={dagRun} isHotkeyEnabled />
+            <MarkRunAsButton dagRun={dagRun} isHotkeyEnabled />
+            <DeleteRunButton dagRun={dagRun} />
           </>
         }
         icon={<FiBarChart />}
-        isRefreshing={isRefreshing}
         state={dagRun.state}
         stats={[
           ...(dagRun.logical_date === null
@@ -124,12 +74,20 @@ export const Header = ({
                   value: <Time datetime={dagRun.logical_date} />,
                 },
               ]),
+          ...(dagRun.partition_key === null
+            ? []
+            : [
+                {
+                  label: translate("dagRun.partitionKey"),
+                  value: dagRun.partition_key,
+                },
+              ]),
           {
             label: translate("dagRun.runType"),
             value: (
               <HStack>
                 <RunTypeIcon runType={dagRun.run_type} />
-                <Text>{dagRun.run_type}</Text>
+                <Text>{translate(`runTypes.${dagRun.run_type}`)}</Text>
               </HStack>
             ),
           },
@@ -142,16 +100,22 @@ export const Header = ({
                 {
                   label: translate("dagRun.triggeringUser"),
                   value: (
-                    <Link asChild color="fg.info">
-                      <RouterLink
-                        to={`/dag_runs?${SearchParamsKeys.TRIGGERING_USER_NAME_PATTERN}=${encodeURIComponent(dagRun.triggering_user_name)}`}
-                      >
-                        <Text>{dagRun.triggering_user_name}</Text>
-                      </RouterLink>
-                    </Link>
+                    <RouterLink
+                      to={`/dag_runs?${SearchParamsKeys.TRIGGERING_USER_NAME_PATTERN}=${encodeURIComponent(dagRun.triggering_user_name)}`}
+                    >
+                      <Text>{dagRun.triggering_user_name}</Text>
+                    </RouterLink>
                   ),
                 },
               ]),
+          ...(showTeam
+            ? [
+                {
+                  label: translate("dagDetails.team"),
+                  value: <TeamName teamName={dagRun.team_name} />,
+                },
+              ]
+            : []),
           {
             label: translate("dagRun.dagVersions"),
             value: (
@@ -163,8 +127,24 @@ export const Header = ({
               />
             ),
           },
+          ...(hasDeadlineAlerts
+            ? [
+                {
+                  label: translate("dag:deadlineStatus.label"),
+                  value: <DeadlineStatus dagId={dagId} dagRunId={dagRunId} endDate={dagRun.end_date} />,
+                },
+              ]
+            : []),
         ]}
-        title={<Time datetime={dagRun.run_after} />}
+        title={dagRun.dag_run_id}
+      />
+      <NotePreview
+        header={translate("note.dagRun")}
+        isPending={isPending}
+        note={note}
+        onOpen={onOpen}
+        onSave={onSave}
+        setNote={setNote}
       />
     </Box>
   );

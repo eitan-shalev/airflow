@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Button, Box, Spacer, HStack, Input, Field, Stack } from "@chakra-ui/react";
+import { Button, Box, Spacer, HStack, Field, Stack, Text, VStack } from "@chakra-ui/react";
 import dayjs from "dayjs";
 import { useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
@@ -26,155 +26,251 @@ import { FiPlay } from "react-icons/fi";
 import { useDagParams } from "src/queries/useDagParams";
 import { useParamStore } from "src/queries/useParamStore";
 import { useTogglePause } from "src/queries/useTogglePause";
-import { useTrigger } from "src/queries/useTrigger";
 import { DEFAULT_DATETIME_FORMAT } from "src/utils/datetimeUtils";
 
 import ConfigForm from "../ConfigForm";
 import { DateTimeInput } from "../DateTimeInput";
-import { ErrorAlert } from "../ErrorAlert";
+import { ErrorAlert, type ExpandedApiError } from "../ErrorAlert";
 import { Checkbox } from "../ui/Checkbox";
-import EditableMarkdown from "./EditableMarkdown";
+import { RadioCardItem, RadioCardRoot } from "../ui/RadioCard";
+import TriggerDAGAdvancedOptions from "./TriggerDAGAdvancedOptions";
+import { dataIntervalModeOptions, type DagRunTriggerParams } from "./types";
 
 type TriggerDAGFormProps = {
   readonly dagDisplayName: string;
   readonly dagId: string;
+  readonly error?: unknown;
+  readonly hasSchedule: boolean;
+  readonly isPartitioned: boolean;
   readonly isPaused: boolean;
-  readonly onClose: () => void;
+  readonly isPending?: boolean;
+  readonly onSubmitTrigger?: (params: DagRunTriggerParams) => void;
   readonly open: boolean;
+  readonly prefillConfig?:
+    | {
+        conf: Record<string, unknown> | undefined;
+        logicalDate: string | undefined;
+        runId: string;
+      }
+    | undefined;
 };
 
-export type DagRunTriggerParams = {
-  conf: string;
-  dagRunId: string;
-  logicalDate: string;
-  note: string;
-};
-
-const TriggerDAGForm = ({ dagDisplayName, dagId, isPaused, onClose, open }: TriggerDAGFormProps) => {
+const TriggerDAGForm = ({
+  dagDisplayName,
+  dagId,
+  error,
+  hasSchedule,
+  isPartitioned,
+  isPaused,
+  isPending = false,
+  onSubmitTrigger,
+  open,
+  prefillConfig,
+}: TriggerDAGFormProps) => {
   const { t: translate } = useTranslation(["common", "components"]);
   const [errors, setErrors] = useState<{ conf?: string; date?: unknown }>({});
   const [formError, setFormError] = useState(false);
   const initialParamsDict = useDagParams(dagId, open);
-  const { error: errorTrigger, isPending, triggerDagRun } = useTrigger({ dagId, onSuccessConfirm: onClose });
-  const { conf } = useParamStore();
+  const { conf, initialParamDict, setConf, setInitialParamDict } = useParamStore();
   const [unpause, setUnpause] = useState(true);
-
+  const [hasAppliedPrefill, setHasAppliedPrefill] = useState(false);
   const { mutate: togglePause } = useTogglePause({ dagId });
 
-  const { control, handleSubmit, reset } = useForm<DagRunTriggerParams>({
+  const { control, handleSubmit, reset, watch } = useForm<DagRunTriggerParams>({
     defaultValues: {
       conf,
       dagRunId: "",
-      // Default logical date to now, show it in the selected timezone
-      logicalDate: dayjs().format(DEFAULT_DATETIME_FORMAT),
+      dataIntervalEnd: "",
+      dataIntervalMode: "auto",
+      dataIntervalStart: "",
+      // Default logical date to now, show it in the selected timezone.
+      // For partitioned Dags, logical date is not applicable.
+      logicalDate: isPartitioned ? "" : dayjs().format(DEFAULT_DATETIME_FORMAT),
       note: "",
+      partitionKey: undefined,
     },
   });
 
-  // Automatically reset form when conf is fetched
+  // Pre-fill form when prefillConfig is provided (priority over conf)
+  // Only restore 'conf' (parameters), not logicalDate, runId, or partitionKey to avoid 409 conflicts
   useEffect(() => {
-    if (conf) {
-      reset((prevValues) => ({
-        ...prevValues,
-        conf,
-      }));
+    if (prefillConfig && open) {
+      const confString = prefillConfig.conf ? JSON.stringify(prefillConfig.conf, undefined, 2) : "";
+
+      reset({
+        conf: confString,
+        dagRunId: "",
+        dataIntervalEnd: "",
+        dataIntervalMode: "auto",
+        dataIntervalStart: "",
+        logicalDate: isPartitioned ? "" : dayjs().format(DEFAULT_DATETIME_FORMAT),
+        note: "",
+        partitionKey: undefined,
+      });
+      // Also update the param store to keep it in sync. Seed the initial params (for stable
+      // section ordering) only once they are available, but always push the conf so a run's
+      // configuration propagates even for Dags with no declared params or before params load.
+      if (confString) {
+        if (
+          Object.keys(initialParamsDict.paramsDict).length > 0 &&
+          Object.keys(initialParamDict).length === 0
+        ) {
+          setInitialParamDict(initialParamsDict.paramsDict);
+        }
+        setConf(confString);
+      }
+      setHasAppliedPrefill(true);
+    } else if (!open) {
+      setHasAppliedPrefill(false);
     }
-  }, [conf, reset]);
+  }, [
+    prefillConfig,
+    open,
+    reset,
+    setConf,
+    initialParamsDict.paramsDict,
+    initialParamDict,
+    setInitialParamDict,
+    isPartitioned,
+  ]);
 
-  const resetDateError = () => {
-    setErrors((prev) => ({ ...prev, date: undefined }));
-  };
+  // Automatically reset form when conf is fetched (only if no prefillConfig)
+  useEffect(() => {
+    if (conf && open && (!prefillConfig || hasAppliedPrefill)) {
+      reset((prevValues) => ({ ...prevValues, conf }));
+    }
+  }, [conf, hasAppliedPrefill, prefillConfig, open, reset]);
 
+  const resetDateError = () => setErrors((prev) => ({ ...prev, date: undefined }));
+
+  const dataIntervalMode = watch("dataIntervalMode");
+  const dataIntervalStart = watch("dataIntervalStart");
+  const dataIntervalEnd = watch("dataIntervalEnd");
+  const noDataInterval = !Boolean(dataIntervalStart) || !Boolean(dataIntervalEnd);
+  const dataIntervalInvalid =
+    dataIntervalMode === "manual" &&
+    (noDataInterval || dayjs(dataIntervalStart).isAfter(dayjs(dataIntervalEnd)));
   const onSubmit = (data: DagRunTriggerParams) => {
     if (unpause && isPaused) {
-      togglePause({
-        dagId,
-        requestBody: {
-          is_paused: false,
-        },
-      });
+      togglePause({ dagId, requestBody: { is_paused: false } });
     }
-    triggerDagRun(data);
+    onSubmitTrigger?.(data);
   };
 
   return (
-    <Box mt={8}>
-      <ConfigForm
-        control={control}
-        errors={errors}
-        initialParamsDict={initialParamsDict}
-        setErrors={setErrors}
-        setFormError={setFormError}
-      >
-        <Controller
+    <>
+      <ErrorAlert error={errors.date ?? error} />
+      <VStack alignItems="stretch" gap={2} pt={4}>
+        {isPartitioned ? undefined : (
+          <>
+            <Controller
+              control={control}
+              name="logicalDate"
+              render={({ field }) => (
+                <Field.Root invalid={Boolean(errors.date)} orientation="horizontal">
+                  <Stack>
+                    <Field.Label fontSize="md" style={{ flexBasis: "30%" }}>
+                      {translate("logicalDate")}
+                    </Field.Label>
+                  </Stack>
+                  <Stack css={{ flexBasis: "70%" }}>
+                    <DateTimeInput {...field} onBlur={resetDateError} size="sm" />
+                  </Stack>
+                </Field.Root>
+              )}
+            />
+            <Spacer />
+            {hasSchedule ? (
+              <Box>
+                <Text fontSize="md" fontWeight="semibold" mb={3}>
+                  {translate("components:triggerDag.dataInterval")}
+                </Text>
+                <Controller
+                  control={control}
+                  name="dataIntervalMode"
+                  render={({ field }) => (
+                    <RadioCardRoot defaultValue={String(field.value)} onChange={field.onChange}>
+                      <HStack align="stretch">
+                        {dataIntervalModeOptions.map((mode) => (
+                          <RadioCardItem
+                            indicatorPlacement="start"
+                            key={mode.value}
+                            label={translate(mode.label)}
+                            value={mode.value}
+                          />
+                        ))}
+                      </HStack>
+                    </RadioCardRoot>
+                  )}
+                />
+                <Spacer />
+                {dataIntervalMode === "manual" ? (
+                  <HStack alignItems="flex-start" mt={3} w="full">
+                    <Controller
+                      control={control}
+                      name="dataIntervalStart"
+                      render={({ field }) => (
+                        <Field.Root invalid={Boolean(errors.date) || dataIntervalInvalid} required>
+                          <Field.Label>{translate("components:triggerDag.intervalStart")}</Field.Label>
+                          <DateTimeInput {...field} onBlur={resetDateError} size="sm" />
+                        </Field.Root>
+                      )}
+                    />
+                    <Controller
+                      control={control}
+                      name="dataIntervalEnd"
+                      render={({ field }) => (
+                        <Field.Root invalid={Boolean(errors.date) || dataIntervalInvalid} required>
+                          <Field.Label>{translate("components:triggerDag.intervalEnd")}</Field.Label>
+                          <DateTimeInput {...field} onBlur={resetDateError} size="sm" />
+                        </Field.Root>
+                      )}
+                    />
+                  </HStack>
+                ) : undefined}
+              </Box>
+            ) : undefined}
+            <Spacer />
+          </>
+        )}
+        {isPaused ? (
+          <>
+            <Checkbox checked={unpause} onChange={() => setUnpause(!unpause)} wordBreak="break-all">
+              {translate("components:triggerDag.unpause", { dagDisplayName })}
+            </Checkbox>
+            <Spacer />
+          </>
+        ) : undefined}
+        <ConfigForm
           control={control}
-          name="logicalDate"
-          render={({ field }) => (
-            <Field.Root invalid={Boolean(errors.date)} orientation="horizontal">
-              <Stack>
-                <Field.Label fontSize="md" style={{ flexBasis: "30%" }}>
-                  {translate("logicalDate")}
-                </Field.Label>
-              </Stack>
-              <Stack css={{ flexBasis: "70%" }}>
-                <DateTimeInput {...field} onBlur={resetDateError} size="sm" />
-              </Stack>
-            </Field.Root>
-          )}
-        />
-
-        <Controller
-          control={control}
-          name="dagRunId"
-          render={({ field }) => (
-            <Field.Root mt={6} orientation="horizontal">
-              <Stack>
-                <Field.Label fontSize="md" style={{ flexBasis: "30%" }}>
-                  {translate("runId")}
-                </Field.Label>
-              </Stack>
-              <Stack css={{ flexBasis: "70%" }}>
-                <Input {...field} size="sm" />
-                <Field.HelperText>{translate("components:triggerDag.runIdHelp")}</Field.HelperText>
-              </Stack>
-            </Field.Root>
-          )}
-        />
-        <Controller
-          control={control}
-          name="note"
-          render={({ field }) => (
-            <Field.Root mt={6}>
-              <Field.Label fontSize="md">{translate("note.dagRun")}</Field.Label>
-              <EditableMarkdown field={field} placeholder={translate("note.placeholder")} />
-            </Field.Root>
-          )}
-        />
-      </ConfigForm>
-      {isPaused ? (
-        <Checkbox
-          checked={unpause}
-          colorPalette="brand"
-          onChange={() => setUnpause(!unpause)}
-          wordBreak="break-all"
+          errors={errors}
+          initialParamsDict={initialParamsDict}
+          setErrors={setErrors}
+          setFormError={setFormError}
         >
-          {translate("components:triggerDag.unpause", { dagDisplayName })}
-        </Checkbox>
-      ) : undefined}
-      <ErrorAlert error={errors.date ?? errorTrigger} />
+          <TriggerDAGAdvancedOptions control={control} isPartitioned={isPartitioned} />
+        </ConfigForm>
+      </VStack>
       <Box as="footer" display="flex" justifyContent="flex-end" mt={4}>
         <HStack w="full">
           <Spacer />
           <Button
-            colorPalette="brand"
-            disabled={Boolean(errors.conf) || Boolean(errors.date) || formError || isPending}
+            data-testid="trigger-dag-submit"
+            disabled={
+              Boolean(errors.conf) ||
+              Boolean(errors.date) ||
+              formError ||
+              isPending ||
+              dataIntervalInvalid ||
+              (Boolean(error) && (error as ExpandedApiError).status === 403)
+            }
             onClick={() => void handleSubmit(onSubmit)()}
           >
             <FiPlay /> {translate("components:triggerDag.button")}
           </Button>
         </HStack>
       </Box>
-    </Box>
+    </>
   );
 };
 

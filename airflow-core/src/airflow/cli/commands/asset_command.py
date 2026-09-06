@@ -26,12 +26,13 @@ from airflow.api.common.trigger_dag import trigger_dag
 from airflow.api_fastapi.core_api.datamodels.assets import AssetAliasResponse, AssetResponse
 from airflow.api_fastapi.core_api.datamodels.dag_run import DAGRunResponse
 from airflow.cli.simple_table import AirflowConsole
+from airflow.cli.utils import deprecated_for_airflowctl
 from airflow.exceptions import AirflowConfigException
 from airflow.models.asset import AssetAliasModel, AssetModel, TaskOutletAssetReference
 from airflow.utils import cli as cli_utils
 from airflow.utils.platform import getuser
 from airflow.utils.session import NEW_SESSION, provide_session
-from airflow.utils.types import DagRunTriggeredByType
+from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
 if typing.TYPE_CHECKING:
     from typing import Any
@@ -53,6 +54,7 @@ def _list_assets(args, *, session: Session) -> tuple[Any, type[BaseModel]]:
     return assets, AssetResponse
 
 
+@deprecated_for_airflowctl("airflowctl assets list / airflowctl assets list-aliases")
 @cli_utils.action_cli
 @provide_session
 def asset_list(args, *, session: Session = NEW_SESSION) -> None:
@@ -105,6 +107,7 @@ def _detail_asset(args, *, session: Session) -> BaseModel:
     return AssetResponse.model_validate(asset)
 
 
+@deprecated_for_airflowctl("airflowctl assets get / airflowctl assets get-alias")
 @cli_utils.action_cli
 @provide_session
 def asset_details(args, *, session: Session = NEW_SESSION) -> None:
@@ -123,6 +126,7 @@ def asset_details(args, *, session: Session = NEW_SESSION) -> None:
     AirflowConsole().print_as(data=data, output=args.output)
 
 
+@deprecated_for_airflowctl("airflowctl assets materialize")
 @cli_utils.action_cli
 @provide_session
 def asset_materialize(args, *, session: Session = NEW_SESSION) -> None:
@@ -157,7 +161,11 @@ def asset_materialize(args, *, session: Session = NEW_SESSION) -> None:
         log.warning("Failed to get user name from os: %s, not setting the triggering user", e)
         user = None
     dagrun = trigger_dag(
-        dag_id=dag_id, triggered_by=DagRunTriggeredByType.CLI, triggering_user_name=user, session=session
+        dag_id=dag_id,
+        triggered_by=DagRunTriggeredByType.CLI,
+        run_type=DagRunType.ASSET_MATERIALIZATION,
+        triggering_user_name=user,
+        session=session,
     )
     if dagrun is not None:
         data = [DAGRunResponse.model_validate(dagrun).model_dump(mode="json")]

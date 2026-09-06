@@ -1,5 +1,7 @@
 {
   "filters": {
+    "body": "Cuerpo",
+    "createdAt": "Creado en",
     "response": {
       "all": "Todas",
       "pending": "Pendientes",
@@ -14,13 +16,29 @@
   "requiredActionCount_other": "Acciones Requeridas ({{count}})",
   "requiredActionState": "Estado de Acción Requerida",
   "response": {
+    "created": "Respuesta creada el ",
     "error": "Error en la Respuesta",
     "optionsDescription": "Elige tus opciones para esta instancia de tarea",
     "optionsLabel": "Opciones",
     "received": "Respuesta recibida en ",
     "respond": "Responder",
+    "responded_by_user_name": "Respondido por (Nombre de usuario)",
     "success": "Respuesta de {{taskId}} exitosa",
     "title": "Instancia de Tarea Humana - {{taskId}}"
+  },
+  "review": {
+    "detail": {
+      "selectRequiredAction": "Selecciona una acción requerida para ver detalles"
+    },
+    "list": {
+      "completedRequiredActions": "Acciones requeridas completadas ({{count}})",
+      "loadError": "No se pudieron cargar las acciones requeridas",
+      "loadingActions": "Cargando acciones requeridas...",
+      "pendingRequiredActions": "Acciones requeridas pendientes ({{count}})"
+    },
+    "openReviewDrawer": "Abrir Panel de Revisión",
+    "pageLimitHint": "Solo se muestran aquí las primeras acciones. Usa \"$t(review.viewAll)\" para ver todas.",
+    "viewAll": "Ver todas las acciones requeridas"
   },
   "state": {
     "approvalReceived": "Aprobación recibida",

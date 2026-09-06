@@ -24,6 +24,8 @@ CI_COMMANDS: dict[str, str | list[str]] = {
         "resource-check",
         "selective-check",
         "get-workflow-info",
+        "upgrade",
+        "set-milestone",
     ],
 }
 CI_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
@@ -44,6 +46,7 @@ CI_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--pr-labels",
                 "--default-branch",
                 "--default-constraints-branch",
+                "--platform",
             ],
         },
         {
@@ -53,6 +56,7 @@ CI_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--github-repository",
                 "--github-actor",
                 "--github-context",
+                "--github-context-input",
             ],
         },
     ],
@@ -66,4 +70,47 @@ CI_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
         }
     ],
     "breeze ci resource-check": [],
+    "breeze ci upgrade": [
+        {
+            "name": "Upgrade flags",
+            "options": [
+                "--target-branch",
+                "--create-pr",
+                "--draft",
+                "--switch-to-base",
+                "--airflow-site",
+                "--force-k8s-schema-sync",
+                "--github-token",
+            ],
+        },
+        {
+            "name": "Upgrade steps",
+            "options": [
+                "--autoupdate",
+                "--update-chart-dependencies",
+                "--upgrade-important-versions",
+                "--update-uv-lock",
+                "--k8s-schema-sync",
+            ],
+        },
+    ],
+    "breeze ci set-milestone": [
+        {
+            "name": "PR information",
+            "options": [
+                "--pr-number",
+                "--pr-title",
+                "--pr-labels",
+                "--base-branch",
+                "--merged-by",
+            ],
+        },
+        {
+            "name": "GitHub parameters",
+            "options": [
+                "--github-token",
+                "--github-repository",
+            ],
+        },
+    ],
 }

@@ -30,12 +30,17 @@ def get_provider_info():
             {
                 "integration-name": "ODBC",
                 "external-doc-url": "https://github.com/mkleehammer/pyodbc/wiki",
+                "how-to-guide": ["/docs/apache-airflow-providers-odbc/operators.rst"],
                 "logo": "/docs/integration-logos/ODBC.png",
                 "tags": ["protocol"],
             }
         ],
         "hooks": [{"integration-name": "ODBC", "python-modules": ["airflow.providers.odbc.hooks.odbc"]}],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.odbc.hooks.odbc.OdbcHook", "connection-type": "odbc"}
+            {
+                "hook-class-name": "airflow.providers.odbc.hooks.odbc.OdbcHook",
+                "hook-name": "ODBC",
+                "connection-type": "odbc",
+            }
         ],
     }

@@ -253,7 +253,7 @@ as shown below:
 
 .. tab-set::
 
-    .. tab-item:: @tash.bash
+    .. tab-item:: @task.bash
         :sync: taskflow
 
         .. code-block:: python
@@ -302,7 +302,7 @@ locations in the Dag constructor call.
         .. code-block:: python
             :emphasize-lines: 1
 
-            with Dag("example_bash_dag", ..., template_searchpath="/opt/scripts"):
+            with DAG("example_bash_dag", ..., template_searchpath="/opt/scripts"):
                 t2 = BashOperator(
                     task_id="bash_example",
                     bash_command="test.sh ",
